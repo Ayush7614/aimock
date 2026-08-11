@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- **Recorded OpenAI/OpenRouter token usage — including OpenRouter `usage.cost` (#368).** Collapsing a streaming OpenAI-compatible chat completion previously dropped the final usage frame (the `chat.completion.chunk` with an empty `choices` array and a populated `usage`), because the collapser skipped every chunk without choices. A recorded fixture therefore kept content / reasoning / tool calls / timings but no token counts at all, and replay could only ever serve the `ceil(length / 4)` estimate or a hand-authored `response.usage` override. OpenRouter's provider-reported `cost` was never captured, so an app that bills from real provider cost could not e2e-test its wallet/ledger path from a tape (the same gap #269 closed for fal's `x-fal-billable-units`).
+  - **Record:** `collapseOpenAISSE` now captures the last non-null `usage` object on the stream (`CollapseResult.usage`), and the non-streaming recorder captures the completion envelope's `usage`.
+  - **Persist:** the recorder writes it to the fixture's `response.usage`, passing through the standard token fields plus `cost`, `cost_details`, `prompt_tokens_details`, `completion_tokens_details`, `is_byok`, and unmodelled provider extras such as OpenRouter's `native_tokens_*`. Non-numeric / unknown-shaped fields are dropped so a recorded fixture always passes load-time validation. **Back-compatible:** a stream that reported no usage records no `usage` key and the fixture stays byte-identical to before.
+  - **Replay:** recorded counts win over estimation (existing `resolveUsage` precedence), and OpenRouter-shaped responses emit the recorded `cost` / breakdowns on both the final streaming usage chunk and the non-streaming envelope. `ResponseOverrides.usage` accepts forward-compat extra keys, and OpenRouter shaping now passes any such key through verbatim rather than dropping it.
+  - **Note:** capturing cost requires the recorded request to actually elicit a usage frame — `stream_options: { include_usage: true }` on OpenAI-compatible streams (OpenRouter sends it regardless), or a non-streaming response. Plain OpenAI (`/v1/...`) replays continue to emit token counts only; `cost` is OpenRouter-shaped output.
+
 ### Changed
 
 - `POST /__aimock/reset` is now the canonical full reset and returns a plain `{ "reset": true }` with no deprecation header or body fields. `POST /__aimock/reset/journal` is unaffected.

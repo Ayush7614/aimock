@@ -449,6 +449,43 @@
           faithfully block order is reconstructable on each provider's wire.
         </p>
 
+        <h2 id="recording-usage">Recording Token Usage &amp; Cost</h2>
+        <p>
+          OpenAI-compatible recordings (including <a href="/openrouter-chat">OpenRouter</a>) keep
+          the provider's reported <code>usage</code> on the fixture. For a non-streaming call that
+          is the envelope's <code>usage</code> object; for a stream it is the final
+          <code>chat.completion.chunk</code> — the one with an empty <code>choices</code> array —
+          that OpenAI emits when the request sets
+          <code>stream_options: { include_usage: true }</code> (OpenRouter emits it either way).
+        </p>
+        <pre><code>{
+  "match": { "userMessage": "summarize this" },
+  "response": {
+    "content": "…",
+    "usage": {
+      "prompt_tokens": 1234,
+      "completion_tokens": 567,
+      "total_tokens": 1801,
+      "cost": 0.0042
+    }
+  }
+}</code></pre>
+        <p>
+          On replay those counts are served verbatim instead of aimock's
+          <code>ceil(length / 4)</code> estimate, and OpenRouter-shaped responses re-emit
+          <code>usage.cost</code> — so a test can assert a wallet or ledger deduction against the
+          amount the provider actually charged. Extra provider fields (<code>cost_details</code>,
+          <code>prompt_tokens_details</code>, <code>completion_tokens_details</code>,
+          <code>native_tokens_*</code>, …) round-trip too.
+        </p>
+        <p>
+          <strong>Record with usage enabled to get cost.</strong> If the recorded request did not
+          ask for usage — and the provider therefore never sent a usage frame — the fixture is
+          written without a <code>usage</code> key and replay falls back to estimated token counts,
+          exactly as before. You can always hand-author <code>response.usage</code> on a fixture
+          instead.
+        </p>
+
         <h2>Header Forwarding</h2>
         <p>
           When proxying to upstream providers, aimock forwards the original request's headers except

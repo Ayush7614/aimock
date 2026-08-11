@@ -122,6 +122,22 @@ export interface CollapseResult {
    */
   redactedThinking?: string[];
   webSearches?: string[];
+  /**
+   * The provider-reported `usage` object from the stream's final usage frame,
+   * captured VERBATIM (#368). OpenAI-compatible streams (including OpenRouter)
+   * close with a `chat.completion.chunk` whose `choices` is empty and whose
+   * `usage` carries the real token counts — plus, on OpenRouter,
+   * `cost` / `cost_details` / `native_tokens_*`. Collapsing dropped that frame,
+   * so a recorded fixture could only ever replay estimated (`ceil(len/4)`) token
+   * counts and never a provider-reported cost. Last-usage-wins: a stream that
+   * emits several usage frames keeps the final one. Absent when the upstream
+   * stream carried no usage (e.g. `stream_options.include_usage` unset).
+   *
+   * Kept as a loose record because the field set is provider-specific and
+   * forward-extending; the recorder sanitizes it into the fixture
+   * `response.usage` override shape before persisting.
+   */
+  usage?: Record<string, unknown>;
   toolCalls?: ToolCall[];
   droppedChunks?: number;
   firstDroppedSample?: string;
@@ -372,6 +388,8 @@ export function collapseOpenAISSE(rawBody: string): CollapseResult {
   let transcriptUsage: Record<string, unknown> | undefined;
   let reasoning = "";
   const webSearchQueries: string[] = [];
+  // Provider-reported usage from the stream's final usage frame (#368).
+  let usage: Record<string, unknown> | undefined;
   let droppedChunks = 0;
   let firstDroppedSample: string | undefined;
   let harmonyUnparsed = false;
@@ -463,6 +481,17 @@ export function collapseOpenAISSE(rawBody: string): CollapseResult {
     // Skip other Responses API structural events
     if (typeof parsed.type === "string" && parsed.type.startsWith("response.")) {
       continue;
+    }
+
+    // Final usage frame (#368). OpenAI-compatible providers close an
+    // include_usage stream with a `chat.completion.chunk` carrying EMPTY
+    // `choices` and a populated `usage` — the only frame with the real token
+    // counts, and on OpenRouter the only one with `cost`. Capture it BEFORE the
+    // empty-`choices` guard below, which would otherwise skip the frame
+    // entirely. Some providers also attach `usage` to the finish chunk (non-empty
+    // choices), so this runs for every chat chunk, last-usage-wins.
+    if (parsed.usage && typeof parsed.usage === "object" && !Array.isArray(parsed.usage)) {
+      usage = parsed.usage as Record<string, unknown>;
     }
 
     const choices = parsed.choices as Array<Record<string, unknown>> | undefined;
@@ -605,6 +634,8 @@ export function collapseOpenAISSE(rawBody: string): CollapseResult {
       ...(reasoning ? { reasoning } : {}),
       // webSearches parity with the text-only return branch.
       ...(webSearchQueries.length > 0 ? { webSearches: webSearchQueries } : {}),
+      // Provider-reported usage parity with the text-only return branch (#368).
+      ...(usage ? { usage } : {}),
       ...(droppedChunks > 0 ? { droppedChunks } : {}),
       ...(firstDroppedSample ? { firstDroppedSample } : {}),
       ...(harmonyUnparsed ? { harmonyUnparsed: true } : {}),
@@ -626,6 +657,7 @@ export function collapseOpenAISSE(rawBody: string): CollapseResult {
     content,
     ...(reasoning ? { reasoning } : {}),
     ...(webSearchQueries.length > 0 ? { webSearches: webSearchQueries } : {}),
+    ...(usage ? { usage } : {}),
     ...(droppedChunks > 0 ? { droppedChunks } : {}),
     ...(firstDroppedSample ? { firstDroppedSample } : {}),
     ...(harmonyUnparsed ? { harmonyUnparsed: true } : {}),
