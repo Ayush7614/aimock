@@ -17,14 +17,15 @@ import type { ResponseOverrides } from "../types.js";
 // ---------------------------------------------------------------------------
 
 /**
- * Build a usage override whose extras include a `__proto__` (and `constructor`)
- * OWN key. A source-level object literal cannot express this — `{ __proto__: … }`
- * sets the prototype instead of an own key — so parse it from JSON, exactly as
- * the recorder would load a captured upstream usage frame.
+ * Build a usage override whose extras include a `__proto__`, `constructor`, and
+ * `prototype` OWN key. A source-level object literal cannot express the first
+ * of these — `{ __proto__: … }` sets the prototype instead of an own key — so
+ * parse it from JSON, exactly as the recorder would load a captured upstream
+ * usage frame. All three keys exercise a distinct leg of `UNSAFE_PROTO_KEYS`.
  */
 function usageWithProtoKeys(): ResponseOverrides {
   const usage = JSON.parse(
-    '{"__proto__":{"polluted":true},"constructor":{"polluted":true},"native_tokens_prompt":1200}',
+    '{"__proto__":{"polluted":true},"constructor":{"polluted":true},"prototype":{"polluted":true},"native_tokens_prompt":1200}',
   ) as ResponseOverrides["usage"];
   return { usage };
 }
