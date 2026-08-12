@@ -697,8 +697,13 @@ export async function proxyAndRecord(
     // the REAL token counts instead of the `ceil(len/4)` estimate, and so
     // OpenRouter's `usage.cost` round-trips to the replayed usage chunk /
     // completion envelope. Omitted when the stream carried no usage, keeping
-    // every pre-#368 recorded fixture byte-identical. The transcription and
-    // audio shapes carry their own usage slots and are left untouched.
+    // every pre-#368 recorded fixture byte-identical. Transcription fixtures
+    // carry their own `usage` slot, so the transcription branch below is left
+    // untouched. The audio shape (`AudioResponse` in types.ts) has NO usage
+    // field, so the audio branch cannot carry `usage` at all — inert today (a
+    // collapse never yields both `audioB64` and a stream usage frame), but a
+    // future collapser that set both would drop the usage on the audio path
+    // with no compiler signal.
     const collapsedUsage = sanitizeRecordedUsage(collapsed.usage);
     const usageSpread = collapsedUsage ? { usage: collapsedUsage } : {};
     // Audio from streamed inlineData (e.g. Gemini SSE with audio parts).
@@ -1839,9 +1844,11 @@ function buildFixtureResponse(
             : undefined;
 
       // Provider-reported usage from the non-streaming envelope (#368), at
-      // parity with the collapsed-stream path: replay then serves the real token
-      // counts rather than the `ceil(len/4)` estimate, and OpenRouter's
-      // `usage.cost` survives recording. Omitted when upstream sent no usage.
+      // parity with the collapsed-stream path (both capture usage for
+      // OpenAI-compatible providers only — only `collapseOpenAISSE` sets
+      // `CollapseResult.usage`): replay then serves the real token counts rather
+      // than the `ceil(len/4)` estimate, and OpenRouter's `usage.cost` survives
+      // recording. Omitted when upstream sent no usage.
       const openaiUsage = sanitizeRecordedUsage(obj.usage);
       const usageSpread = openaiUsage ? { usage: openaiUsage } : {};
 

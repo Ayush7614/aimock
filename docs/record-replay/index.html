@@ -426,8 +426,14 @@
           </tbody>
         </table>
         <p>
-          The collapse extracts text content and tool calls from streaming chunks and produces a
-          simple <code>{ content }</code> or <code>{ toolCalls }</code> fixture response.
+          The collapse extracts text content and tool calls from streaming chunks &mdash; plus, for
+          OpenAI-compatible streams, the provider-reported token <code>usage</code> from the final
+          usage frame &mdash; and produces a fixture response such as <code>{ content }</code>,
+          <code>{ toolCalls }</code>, or <code>{ content, toolCalls, usage }</code>. Genuinely
+          tool-first or interleaved streams additionally gain an ordered
+          <a href="/fixtures#ordered-blocks"><code>blocks</code></a> array. See
+          <a href="#recording-block-order">Recording Block Order</a> and
+          <a href="#recording-usage">Recording Token Usage &amp; Cost</a> below.
         </p>
 
         <h2 id="recording-block-order">Recording Block Order</h2>
@@ -472,11 +478,16 @@
 }</code></pre>
         <p>
           On replay those counts are served verbatim instead of aimock's
-          <code>ceil(length / 4)</code> estimate, and OpenRouter-shaped responses re-emit
-          <code>usage.cost</code> — so a test can assert a wallet or ledger deduction against the
-          amount the provider actually charged. Extra provider fields (<code>cost_details</code>,
-          <code>prompt_tokens_details</code>, <code>completion_tokens_details</code>,
-          <code>native_tokens_*</code>, …) round-trip too.
+          <code>ceil(length / 4)</code> estimate. The <code>usage.cost</code> shown above is
+          OpenRouter-shaped output: it is re-emitted only when the fixture is replayed through
+          aimock's <a href="/openrouter-chat">OpenRouter</a> endpoint
+          (<code>/api/v1/chat/completions</code>), so a test can assert a wallet or ledger deduction
+          against the amount the provider actually charged. On a plain OpenAI (<code>/v1/…</code>)
+          replay the <code>cost</code> key is still recorded and validated on the fixture but is
+          <em>not</em> served back (token counts round-trip while <code>cost</code> stays inert), so
+          copy this example into an OpenRouter fixture if you need the cost to appear. Extra
+          provider fields (<code>cost_details</code>, <code>prompt_tokens_details</code>,
+          <code>completion_tokens_details</code>, <code>native_tokens_*</code>, …) round-trip too.
         </p>
         <p>
           <strong>Record with usage enabled to get cost.</strong> If the recorded request did not
