@@ -404,6 +404,14 @@ export function collapseOpenAISSE(rawBody: string): CollapseResult {
   // it (they are small per-stream counters), so synthetic keys never collide.
   let nextSyntheticIndex = 1_000_000;
   const idKeyMap = new Map<string, number>();
+  // The key of the most-recently-opened tool call (real, id-correlated, or
+  // synthetic). A delta that omits BOTH `index` and `id` carries no identity of
+  // its own; without a fallback each such fragment would mint a fresh synthetic
+  // key, splitting one call's arguments streamed across multiple bare deltas
+  // into separate tool-call entries with no drop/truncation signal. Correlate
+  // it to the last-open call instead (real OpenAI always streams `index`, so
+  // this only affects the degenerate index-and-id-less case).
+  let lastToolCallKey: number | undefined;
   // Cross-channel order atoms (#274), in stream arrival order. A toolCall atom
   // references the same accumulator object stored in toolCallMap, so later arg
   // deltas mutate the block in place.
@@ -540,9 +548,17 @@ export function collapseOpenAISSE(rawBody: string): CollapseResult {
             index = nextSyntheticIndex++;
             idKeyMap.set(rawId, index);
           }
+        } else if (lastToolCallKey !== undefined) {
+          // No `index` AND no `id`: correlate to the last-open tool call so a
+          // call's arguments streamed across multiple bare deltas concatenate
+          // into one entry instead of fragmenting under fresh synthetic keys.
+          index = lastToolCallKey;
         } else {
           index = nextSyntheticIndex++;
         }
+        // Remember this key so a following index-and-id-less delta correlates
+        // to whichever call most recently opened.
+        lastToolCallKey = index;
 
         if (!toolCallMap.has(index)) {
           const created = {

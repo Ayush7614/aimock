@@ -4450,3 +4450,60 @@ describe("collapseCohereSSE tool-call-start correlation ordering", () => {
     expect(result.droppedChunks).toBeUndefined();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Stream-collapse integrity: OpenAI index-and-id-less tool-call correlation
+// ---------------------------------------------------------------------------
+
+describe("collapseOpenAISSE index-and-id-less tool-call correlation", () => {
+  // Arg deltas that omit BOTH index and id must fall back to the last-open
+  // tool-call key so one call's arguments streamed across multiple such deltas
+  // concatenate into one tool call instead of fragmenting.
+  it("arg deltas lacking both index and id concatenate into one tool call", () => {
+    const body = [
+      `data: ${JSON.stringify({
+        choices: [{ delta: { tool_calls: [{ function: { name: "foo", arguments: '{"a":' } }] } }],
+      })}`,
+      "",
+      `data: ${JSON.stringify({
+        choices: [{ delta: { tool_calls: [{ function: { arguments: "1}" } }] } }],
+      })}`,
+      "",
+      "data: [DONE]",
+      "",
+    ].join("\n");
+    const result = collapseOpenAISSE(body);
+    expect(result.toolCalls).toHaveLength(1);
+    expect(result.toolCalls![0].name).toBe("foo");
+    expect(result.toolCalls![0].arguments).toBe('{"a":1}');
+  });
+
+  // Distinct calls still separate when each carries its own id, and a trailing
+  // bare delta correlates to whichever call opened most recently.
+  it("bare delta correlates to the last-open call, not a merge of all calls", () => {
+    const body = [
+      `data: ${JSON.stringify({
+        choices: [
+          { delta: { tool_calls: [{ id: "a", function: { name: "fa", arguments: '{"x":1}' } }] } },
+        ],
+      })}`,
+      "",
+      `data: ${JSON.stringify({
+        choices: [
+          { delta: { tool_calls: [{ id: "b", function: { name: "fb", arguments: '{"y":' } }] } },
+        ],
+      })}`,
+      "",
+      `data: ${JSON.stringify({
+        choices: [{ delta: { tool_calls: [{ function: { arguments: "2}" } }] } }],
+      })}`,
+      "",
+      "data: [DONE]",
+      "",
+    ].join("\n");
+    const result = collapseOpenAISSE(body);
+    expect(result.toolCalls).toHaveLength(2);
+    expect(result.toolCalls![0]).toMatchObject({ name: "fa", arguments: '{"x":1}' });
+    expect(result.toolCalls![1]).toMatchObject({ name: "fb", arguments: '{"y":2}' });
+  });
+});
