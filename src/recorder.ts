@@ -1527,19 +1527,20 @@ function toToolCallArguments(raw: unknown): string {
 }
 
 /**
- * `usage` sub-objects that carry numeric breakdowns rather than a scalar, and
- * the inner fields aimock documents for each. Mirrors the load-time validator in
- * fixture-loader.ts so anything this recorder writes loads cleanly.
+ * `usage` sub-objects that carry numeric breakdowns rather than a scalar. The
+ * inner fields are NOT allowlisted here on purpose: the recorder keeps every
+ * finite-numeric inner field (documented or forward-compat), matching the
+ * load-time validator in fixture-loader.ts, whose index-signature escape hatch
+ * accepts undocumented numeric inner keys too. A `Set` (own-key membership via
+ * `.has()`, no prototype-chain walk) mirrors that validator's
+ * `new Set(Object.keys(...))` classification so anything this recorder writes
+ * loads cleanly.
  */
-const USAGE_OBJECT_FIELDS: Record<string, readonly string[]> = {
-  cost_details: [
-    "upstream_inference_cost",
-    "upstream_inference_prompt_cost",
-    "upstream_inference_completions_cost",
-  ],
-  prompt_tokens_details: ["cached_tokens", "cache_write_tokens", "audio_tokens"],
-  completion_tokens_details: ["reasoning_tokens"],
-};
+const USAGE_OBJECT_FIELDS: ReadonlySet<string> = new Set([
+  "cost_details",
+  "prompt_tokens_details",
+  "completion_tokens_details",
+]);
 
 /**
  * Sanitize a provider-reported `usage` object into the fixture
@@ -1563,12 +1564,12 @@ const USAGE_OBJECT_FIELDS: Record<string, readonly string[]> = {
  * Returns `undefined` when nothing survives, so the caller omits `usage`
  * entirely and keeps pre-#368 fixtures byte-identical.
  */
-function sanitizeRecordedUsage(raw: unknown): ResponseOverrides["usage"] | undefined {
+export function sanitizeRecordedUsage(raw: unknown): ResponseOverrides["usage"] | undefined {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return undefined;
   const out: Record<string, unknown> = {};
   for (const [key, val] of Object.entries(raw as Record<string, unknown>)) {
     if (val === undefined || val === null) continue;
-    if (key in USAGE_OBJECT_FIELDS) {
+    if (USAGE_OBJECT_FIELDS.has(key)) {
       if (typeof val !== "object" || val === null || Array.isArray(val)) continue;
       const inner: Record<string, unknown> = {};
       for (const [innerKey, innerVal] of Object.entries(val as Record<string, unknown>)) {
