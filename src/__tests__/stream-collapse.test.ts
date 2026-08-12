@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import {
   collapseOpenAISSE,
   collapseAnthropicSSE,
@@ -749,6 +749,31 @@ describe("collapseStreamingResponse", () => {
     const result = collapseStreamingResponse("text/event-stream", "openai", buf);
     expect(result).not.toBeNull();
     expect(result!.content).toBe("buf-hi");
+  });
+
+  it("routes the openrouter provider key to the OpenAI collapser without warning", () => {
+    // OpenRouter is a first-class RecordProviderKey (set by every
+    // /api/v1/chat/completions record) and speaks the OpenAI SSE wire format.
+    // It must be a recognized case, not the unknown-provider fallback, which
+    // logged a misleading warning on every recorded OpenRouter stream.
+    const openrouterSse = [
+      'data: {"choices":[{"delta":{"content":"hi"}}]}',
+      "",
+      'data: {"choices":[],"usage":{"prompt_tokens":4,"completion_tokens":1,"cost":0.001}}',
+      "",
+      "data: [DONE]",
+      "",
+    ].join("\n");
+    const logger = { warn: vi.fn(), error: vi.fn(), info: vi.fn(), debug: vi.fn() };
+    const result = collapseStreamingResponse(
+      "text/event-stream",
+      "openrouter",
+      openrouterSse,
+      logger as unknown as Parameters<typeof collapseStreamingResponse>[3],
+    );
+    expect(result?.content).toBe("hi");
+    expect(result?.usage).toEqual({ prompt_tokens: 4, completion_tokens: 1, cost: 0.001 });
+    expect(logger.warn).not.toHaveBeenCalled();
   });
 
   it("unknown SSE provider key falls back to OpenAI SSE format", () => {

@@ -1895,8 +1895,16 @@ export function collapseStreamingResponse(
   if (ct.includes("text/event-stream")) {
     const str = typeof body === "string" ? body : body.toString("utf8");
     switch (providerKey) {
+      // OpenRouter belongs here with OpenAI/Azure: it IS the OpenAI SSE wire
+      // format (it is the OpenAI-compatible gateway), and `openrouter` is a
+      // first-class RecordProviderKey set by every `/api/v1/chat/completions`
+      // record. Without this case it fell to the `default` arm, which collapsed
+      // it correctly but logged `unknown SSE provider "openrouter"` on EVERY
+      // recorded OpenRouter stream — telling users aimock does not recognize a
+      // provider it ships first-class support for.
       case "openai":
       case "azure":
+      case "openrouter":
         return collapseOpenAISSE(str);
       case "anthropic":
         return collapseAnthropicSSE(str);

@@ -10,6 +10,10 @@
   - **Replay:** recorded counts win over estimation (existing `resolveUsage` precedence), and OpenRouter-shaped responses emit the recorded `cost` / breakdowns on both the final streaming usage chunk and the non-streaming envelope. `ResponseOverrides.usage` accepts forward-compat extra keys, and OpenRouter shaping now passes any such key through verbatim rather than dropping it.
   - **Note:** capturing cost requires the recorded request to actually elicit a usage frame — `stream_options: { include_usage: true }` on OpenAI-compatible streams (OpenRouter sends it regardless), or a non-streaming response. Plain OpenAI (`/v1/...`) replays continue to emit token counts only; `cost` is OpenRouter-shaped output.
 
+### Fixed
+
+- **`openrouter` is no longer treated as an unknown SSE provider when recording.** `collapseStreamingResponse`'s provider switch had cases for `openai` / `azure` / `anthropic` / `gemini` / `cohere` / `bedrock` but none for `openrouter`, even though it is a first-class `RecordProviderKey` that the server sets on every `/api/v1/chat/completions` request. Recording a streaming OpenRouter completion therefore hit the `default` arm and logged `[stream-collapse] unknown SSE provider "openrouter", falling back to OpenAI SSE format` on **every** recorded stream. The collapse itself was already correct (the fallback is the OpenAI collapser, and OpenRouter speaks the OpenAI SSE wire format), so this is a log-noise/diagnostics fix with no behavior change — but the warning claimed aimock did not recognize a provider it ships first-class support for, which is actively misleading while debugging a recording.
+
 ### Changed
 
 - `POST /__aimock/reset` is now the canonical full reset and returns a plain `{ "reset": true }` with no deprecation header or body fields. `POST /__aimock/reset/journal` is unaffected.
