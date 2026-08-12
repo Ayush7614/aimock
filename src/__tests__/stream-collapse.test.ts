@@ -4373,3 +4373,40 @@ describe("stream block-order instrumentation (#274)", () => {
     });
   });
 });
+
+// ---------------------------------------------------------------------------
+// Stream-collapse integrity: uncorrelated tool_use-start accounting (Bedrock)
+// ---------------------------------------------------------------------------
+
+describe("collapseBedrockEventStream uncorrelated tool_use start accounting", () => {
+  // A Bedrock native tool_use content_block_start with an undefined block index
+  // cannot be keyed, so it must be accounted as a dropped chunk (matching the
+  // sibling arg-delta path), never silently lose the tool call's identity.
+  it("native: tool_use content_block_start with no index is accounted, not silently lost", () => {
+    const frame = encodeEventStreamMessage("chunk", {
+      type: "content_block_start",
+      // No `index` — the tool call's identity cannot be keyed.
+      content_block: { type: "tool_use", id: "toolu_x", name: "get_weather", input: {} },
+    });
+    const result = collapseBedrockEventStream(Buffer.from(frame));
+    // Either captured or counted as dropped — but NOT silently vanished.
+    const captured = (result.toolCalls?.length ?? 0) > 0;
+    const accounted = (result.droppedChunks ?? 0) > 0;
+    expect(captured || accounted).toBe(true);
+    // Sibling accounting behavior: an unkeyable tool_use start is a dropped chunk.
+    expect(result.droppedChunks).toBe(1);
+  });
+
+  // The Converse contentBlockStart path shares the same `index !== undefined`
+  // guard and must account an unkeyable toolUse start too.
+  it("converse: toolUse contentBlockStart with no index is accounted, not silently lost", () => {
+    const frame = encodeEventStreamMessage("contentBlockStart", {
+      // No contentBlockIndex anywhere — the tool call cannot be keyed.
+      contentBlockStart: {
+        start: { toolUse: { toolUseId: "tu_1", name: "get_weather" } },
+      },
+    });
+    const result = collapseBedrockEventStream(Buffer.from(frame));
+    expect(result.droppedChunks).toBe(1);
+  });
+});

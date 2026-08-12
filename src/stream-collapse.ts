@@ -1541,14 +1541,29 @@ export function collapseBedrockEventStream(rawBody: Buffer): CollapseResult {
       if (redactedData !== undefined) {
         redactedThinking.push(redactedData);
       }
-      if (block?.type === "tool_use" && index !== undefined) {
-        const created = {
-          id: (block.id as string) ?? "",
-          name: (block.name as string) ?? "",
-          arguments: "",
-        };
-        toolCallMap.set(index, created);
-        orderAtoms.push({ kind: "toolCall", ref: created });
+      if (block?.type === "tool_use") {
+        if (index !== undefined) {
+          const created = {
+            id: (block.id as string) ?? "",
+            name: (block.name as string) ?? "",
+            arguments: "",
+          };
+          toolCallMap.set(index, created);
+          orderAtoms.push({ kind: "toolCall", ref: created });
+        } else {
+          // A tool_use start with no block index cannot be keyed, so no later
+          // input_json_delta can ever correlate to it and the tool call's
+          // identity is silently lost. Account for it as a dropped chunk —
+          // matching the sibling uncorrelated arg-delta path below — rather
+          // than vanishing without a trace.
+          droppedChunks++;
+          if (droppedChunks === 1) {
+            firstDroppedSample = `tool_use content_block_start with no index — tool call identity lost: ${surrogateSafeSlice(
+              frameStr,
+              200,
+            )}`;
+          }
+        }
       }
       continue;
     }
@@ -1561,15 +1576,28 @@ export function collapseBedrockEventStream(rawBody: Buffer): CollapseResult {
         | number
         | undefined;
       const start = blockStart.start as Record<string, unknown> | undefined;
-      if (start?.toolUse && index !== undefined) {
-        const toolUse = start.toolUse as Record<string, unknown>;
-        const created = {
-          id: (toolUse.toolUseId as string) ?? "",
-          name: (toolUse.name as string) ?? "",
-          arguments: "",
-        };
-        toolCallMap.set(index, created);
-        orderAtoms.push({ kind: "toolCall", ref: created });
+      if (start?.toolUse) {
+        if (index !== undefined) {
+          const toolUse = start.toolUse as Record<string, unknown>;
+          const created = {
+            id: (toolUse.toolUseId as string) ?? "",
+            name: (toolUse.name as string) ?? "",
+            arguments: "",
+          };
+          toolCallMap.set(index, created);
+          orderAtoms.push({ kind: "toolCall", ref: created });
+        } else {
+          // Same accounting as the native path: an unkeyable toolUse start
+          // would lose its identity, so count it as a dropped chunk rather
+          // than dropping it silently.
+          droppedChunks++;
+          if (droppedChunks === 1) {
+            firstDroppedSample = `contentBlockStart toolUse with no index — tool call identity lost: ${surrogateSafeSlice(
+              frameStr,
+              200,
+            )}`;
+          }
+        }
       }
     }
 
