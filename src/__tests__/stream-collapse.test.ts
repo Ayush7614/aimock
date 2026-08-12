@@ -4507,3 +4507,35 @@ describe("collapseOpenAISSE index-and-id-less tool-call correlation", () => {
     expect(result.toolCalls![1]).toMatchObject({ name: "fb", arguments: '{"y":2}' });
   });
 });
+
+// ---------------------------------------------------------------------------
+// Stream-collapse integrity: transcription usage capture guards
+// ---------------------------------------------------------------------------
+
+describe("collapseOpenAISSE transcription usage capture guards", () => {
+  // An array-valued usage is a type lie once cast to a Record — never capture it.
+  it("array-valued usage is not captured", () => {
+    const result = collapseOpenAISSE(
+      'data: {"type":"transcript.text.done","text":"hi","usage":[]}\n\n',
+    );
+    expect(result.transcription).toBeDefined();
+    expect(result.transcription!.usage).toBeUndefined();
+  });
+
+  // An empty usage object carries no information — never capture it.
+  it("empty usage object is not captured", () => {
+    const result = collapseOpenAISSE(
+      'data: {"type":"transcript.text.done","text":"hi","usage":{}}\n\n',
+    );
+    expect(result.transcription).toBeDefined();
+    expect(result.transcription!.usage).toBeUndefined();
+  });
+
+  // A real, non-empty usage object is still captured.
+  it("non-empty usage object is still captured", () => {
+    const result = collapseOpenAISSE(
+      'data: {"type":"transcript.text.done","text":"hi","usage":{"total_tokens":5}}\n\n',
+    );
+    expect(result.transcription!.usage).toEqual({ total_tokens: 5 });
+  });
+});

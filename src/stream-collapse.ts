@@ -455,7 +455,15 @@ export function collapseOpenAISSE(rawBody: string): CollapseResult {
           )
           .map((language) => ({ code: language.code as string }));
       }
-      if (parsed.usage && typeof parsed.usage === "object") {
+      // Only capture a real usage OBJECT. `typeof === "object"` alone admits an
+      // array (a type lie once cast to Record) and an empty `{}` (meaningless);
+      // guard against both, exactly like any chat usage capture would.
+      if (
+        parsed.usage &&
+        typeof parsed.usage === "object" &&
+        !Array.isArray(parsed.usage) &&
+        Object.keys(parsed.usage).length > 0
+      ) {
         transcriptUsage = parsed.usage as Record<string, unknown>;
       }
       continue;
