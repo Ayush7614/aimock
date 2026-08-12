@@ -489,8 +489,14 @@ export function collapseOpenAISSE(rawBody: string): CollapseResult {
     // counts, and on OpenRouter the only one with `cost`. Capture it BEFORE the
     // empty-`choices` guard below, which would otherwise skip the frame
     // entirely. Some providers also attach `usage` to the finish chunk (non-empty
-    // choices), so this runs for every chat chunk, last-usage-wins.
-    if (parsed.usage && typeof parsed.usage === "object" && !Array.isArray(parsed.usage)) {
+    // choices), so this runs for every chat chunk, last-NON-EMPTY-usage-wins:
+    // a trailing bare `usage: {}` frame must not clobber a good capture (#369).
+    if (
+      parsed.usage &&
+      typeof parsed.usage === "object" &&
+      !Array.isArray(parsed.usage) &&
+      Object.keys(parsed.usage).length > 0
+    ) {
       usage = parsed.usage as Record<string, unknown>;
     }
 

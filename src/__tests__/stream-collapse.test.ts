@@ -226,6 +226,27 @@ describe("collapseOpenAISSE", () => {
     expect(result.toolCalls![0].name).toBe("lookup");
     expect(result.toolCalls![0].arguments).toBe('{"q":"test"}');
   });
+
+  it("does not let a trailing empty usage frame clobber a populated one (#369 F4)", () => {
+    const body = [
+      `data: ${JSON.stringify({
+        choices: [],
+        usage: { prompt_tokens: 11, completion_tokens: 5, total_tokens: 16 },
+      })}`,
+      "",
+      `data: ${JSON.stringify({ choices: [], usage: {} })}`,
+      "",
+      "data: [DONE]",
+      "",
+    ].join("\n");
+
+    const result = collapseOpenAISSE(body);
+    expect(result.usage).toEqual({
+      prompt_tokens: 11,
+      completion_tokens: 5,
+      total_tokens: 16,
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------
