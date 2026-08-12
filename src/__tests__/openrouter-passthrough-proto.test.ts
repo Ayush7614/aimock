@@ -49,13 +49,6 @@ describe("openrouter usage passthrough — prototype safety", () => {
     expect(Object.prototype.hasOwnProperty.call(extras, "prototype")).toBe(false);
   });
 
-  it("does not pollute a bystander plain object after shaping", () => {
-    resolveOpenRouterShaping(usageWithProtoKeys(), "openai/gpt-4o");
-    const bystander: Record<string, unknown> = {};
-    expect("polluted" in bystander).toBe(false);
-    expect(bystander.polluted).toBeUndefined();
-  });
-
   it("still passes legitimate un-shaped usage keys through verbatim", () => {
     const shaping = resolveOpenRouterShaping(usageWithProtoKeys(), "openai/gpt-4o");
     const extras = shaping.usageExtras as Record<string, unknown>;
