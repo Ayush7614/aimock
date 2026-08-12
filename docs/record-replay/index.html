@@ -426,11 +426,13 @@
           </tbody>
         </table>
         <p>
-          The collapse extracts text content and tool calls from streaming chunks &mdash; plus, for
-          OpenAI-compatible streams, the provider-reported token <code>usage</code> from the final
-          usage frame &mdash; and produces a fixture response such as <code>{ content }</code>,
-          <code>{ toolCalls }</code>, or <code>{ content, toolCalls, usage }</code>. Genuinely
-          tool-first or interleaved streams additionally gain an ordered
+          The collapse extracts text content and tool calls from streaming chunks and produces a
+          fixture response such as <code>{ content }</code>, <code>{ toolCalls }</code>, or
+          <code>{ content, toolCalls }</code>. For OpenAI-compatible streams it also captures the
+          provider-reported token <code>usage</code> from the final usage frame and attaches it to
+          whichever of those shapes results &mdash; <code>usage</code> is recorded independently of
+          whether the response carries content, tool calls, or both. Genuinely tool-first or
+          interleaved streams additionally gain an ordered
           <a href="/fixtures#ordered-blocks"><code>blocks</code></a> array. See
           <a href="#recording-block-order">Recording Block Order</a> and
           <a href="#recording-usage">Recording Token Usage &amp; Cost</a> below.
