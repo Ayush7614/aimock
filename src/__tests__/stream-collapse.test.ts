@@ -4410,3 +4410,43 @@ describe("collapseBedrockEventStream uncorrelated tool_use start accounting", ()
     expect(result.droppedChunks).toBe(1);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Stream-collapse integrity: Cohere tool-call-start correlation ordering
+// ---------------------------------------------------------------------------
+
+describe("collapseCohereSSE tool-call-start correlation ordering", () => {
+  // A payload-less tool-call-start must NOT advance lastStartKey; otherwise a
+  // following index-less tool-call-delta is stolen away from the prior valid
+  // start and miscounted as a dropped chunk.
+  it("payload-less tool-call-start does not steal correlation from a prior start", () => {
+    const body = [
+      `event: tool-call-start`,
+      `data: ${JSON.stringify({
+        type: "tool-call-start",
+        index: 0,
+        delta: {
+          message: {
+            tool_calls: { id: "call_1", type: "function", function: { name: "fn", arguments: "" } },
+          },
+        },
+      })}`,
+      "",
+      // A start event carrying NO tool_calls payload and NO index.
+      `event: tool-call-start`,
+      `data: ${JSON.stringify({ type: "tool-call-start" })}`,
+      "",
+      // An index-less delta that should correlate to the prior valid start (0).
+      `event: tool-call-delta`,
+      `data: ${JSON.stringify({
+        type: "tool-call-delta",
+        delta: { message: { tool_calls: { function: { arguments: '{"x":1}' } } } },
+      })}`,
+      "",
+    ].join("\n");
+    const result = collapseCohereSSE(body);
+    expect(result.toolCalls).toHaveLength(1);
+    expect(result.toolCalls![0].arguments).toBe('{"x":1}');
+    expect(result.droppedChunks).toBeUndefined();
+  });
+});

@@ -1234,9 +1234,6 @@ export function collapseCohereSSE(rawBody: string): CollapseResult {
       } else {
         index = nextSyntheticIndex++;
       }
-      // Track the most-recent start key (real OR synthetic) so a following
-      // index-less delta correlates to whichever call just opened.
-      lastStartKey = index;
       const delta = parsed.delta as Record<string, unknown> | undefined;
       const message = delta?.message as Record<string, unknown> | undefined;
       const toolCalls = message?.tool_calls as Record<string, unknown> | undefined;
@@ -1248,6 +1245,13 @@ export function collapseCohereSSE(rawBody: string): CollapseResult {
           arguments: "",
         };
         toolCallMap.set(index, created);
+        // Track the most-recent start key (real OR synthetic) so a following
+        // index-less delta correlates to whichever call just opened. Advance it
+        // ONLY after confirming this start actually carried a tool_calls payload
+        // and created an entry; a payload-less start must not steal correlation
+        // from a prior valid start (which would miscount the next index-less
+        // delta as a dropped chunk).
+        lastStartKey = index;
         // Record the tool atom at the position its tool-call-start arrived; it
         // references `created` so later tool-call-delta args fill it in place.
         orderAtoms.push({ kind: "toolCall", ref: created });
