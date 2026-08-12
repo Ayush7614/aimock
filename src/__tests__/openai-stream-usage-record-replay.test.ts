@@ -447,6 +447,9 @@ describe("replay of recorded usage (#368)", () => {
       port: 0,
       record: { providers: { openai: upstreamUrl }, fixturePath: tmpDir },
     });
+    // Register with the afterEach-drained cleanup so an early assertion throw
+    // before the explicit close below can't leak the listening socket.
+    servers.push(recorder.server);
     await httpPost(`${recorder.url}/v1/chat/completions`, {
       model: "openai/gpt-4o",
       messages: [{ role: "user", content: "hi" }],
