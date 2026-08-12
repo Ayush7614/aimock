@@ -116,6 +116,16 @@ const SHAPED_OR_CANONICAL_USAGE_KEYS = new Set([
 ]);
 
 /**
+ * Keys that must never flow through the passthrough assignment below: a
+ * JSON-parsed usage frame (fixtures are attacker-adjacent — they mirror upstream
+ * provider responses) can carry a real own `__proto__`/`constructor`/`prototype`
+ * key, and a plain `usageExtras[key] = value` for one of those hits the
+ * prototype setter, corrupting the emitted object's prototype chain instead of
+ * emitting a data field. Real providers never send these, so skipping is safe.
+ */
+const UNSAFE_PROTO_KEYS = new Set(["__proto__", "constructor", "prototype"]);
+
+/**
  * Resolve the shaping context from a fixture's response overrides and the
  * winning model slug. `provider` defaults to the winning slug's author;
  * `native_finish_reason` mirrors `finish_reason` unless overridden. `cost` and
@@ -168,6 +178,7 @@ export function resolveOpenRouterShaping(
   for (const [key, value] of Object.entries(u ?? {})) {
     if (value === undefined) continue;
     if (SHAPED_OR_CANONICAL_USAGE_KEYS.has(key)) continue;
+    if (UNSAFE_PROTO_KEYS.has(key)) continue;
     usageExtras[key] = value;
   }
   return {
