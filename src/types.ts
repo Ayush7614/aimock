@@ -177,9 +177,12 @@ export interface FixtureMatch {
  * When total_tokens (or provider equivalent) is omitted, it is auto-computed
  * from the component fields.
  *
- * Provider support: OpenAI Chat (all 7), Responses API (5: no role,
- * systemFingerprint), Claude (5: no created, systemFingerprint),
- * Gemini (2: only finishReason, usage).
+ * Provider support: seven fields are common (id, created, model, usage,
+ * systemFingerprint, finishReason, role); provider and nativeFinishReason are
+ * OpenRouter-only and ignored elsewhere. OpenAI Chat honors the seven common
+ * fields; OpenRouter additionally honors provider/nativeFinishReason; Responses
+ * API (5: no role, systemFingerprint); Claude (5: no created,
+ * systemFingerprint); Gemini (2: only finishReason, usage).
  */
 export interface ResponseOverrides {
   id?: string;
