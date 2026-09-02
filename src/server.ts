@@ -350,6 +350,13 @@ async function handleControlAPI(
     return true;
   }
 
+  // GET /__aimock/fixtures — inspect current fixture count
+  if (subPath === "/fixtures" && req.method === "GET") {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ count: fixtures.length }));
+    return true;
+  }
+
   // POST /__aimock/fixtures — add fixtures dynamically
   if (subPath === "/fixtures" && req.method === "POST") {
     let raw: string;
