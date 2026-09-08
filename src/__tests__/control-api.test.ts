@@ -101,6 +101,56 @@ describe("/__aimock control API", () => {
     });
   });
 
+  describe("GET /__aimock/fixtures", () => {
+    it("returns the current fixture count", async () => {
+      const fixtures: Fixture[] = [
+        { match: { userMessage: "hello" }, response: { content: "Hi" } },
+        { match: { userMessage: "bye" }, response: { content: "Later" } },
+      ];
+      instance = await createServer(fixtures);
+
+      const res = await httpRequest(`${instance.url}/__aimock/fixtures`, "GET");
+      expect(res.status).toBe(200);
+      expect(JSON.parse(res.body)).toEqual({ count: 2 });
+    });
+
+    it("reports zero for a server started with no fixtures", async () => {
+      instance = await createServer([]);
+      const res = await httpRequest(`${instance.url}/__aimock/fixtures`, "GET");
+      expect(res.status).toBe(200);
+      expect(JSON.parse(res.body)).toEqual({ count: 0 });
+    });
+
+    // The count is the POINT of the endpoint: a static 200 that always said the
+    // same number would satisfy the two cases above, so track it across the
+    // mutating routes it exists to let a caller observe.
+    it("tracks POST and DELETE on the same route", async () => {
+      instance = await createServer([
+        { match: { userMessage: "hello" }, response: { content: "Hi" } },
+      ]);
+      const url = `${instance.url}/__aimock/fixtures`;
+
+      expect(JSON.parse((await httpRequest(url, "GET")).body)).toEqual({ count: 1 });
+
+      await httpRequest(url, "POST", {
+        fixtures: [{ match: { userMessage: "third" }, response: { content: "3" } }],
+      });
+      expect(JSON.parse((await httpRequest(url, "GET")).body)).toEqual({ count: 2 });
+
+      await httpRequest(url, "DELETE");
+      expect(JSON.parse((await httpRequest(url, "GET")).body)).toEqual({ count: 0 });
+    });
+
+    it("does not leak fixture internals — the body carries the count and nothing else", async () => {
+      instance = await createServer([
+        { match: { userMessage: "hello" }, response: { content: "Hi" } },
+      ]);
+      const res = await httpRequest(`${instance.url}/__aimock/fixtures`, "GET");
+      expect(Object.keys(JSON.parse(res.body))).toEqual(["count"]);
+      expect(res.body).not.toContain("hello");
+    });
+  });
+
   describe("POST /__aimock/fixtures", () => {
     it("adds fixtures and they match requests", async () => {
       const fixtures: Fixture[] = [];

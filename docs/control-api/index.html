@@ -83,6 +83,11 @@
               <td>Read-only snapshot of recorded requests</td>
             </tr>
             <tr>
+              <td><code>GET</code></td>
+              <td><code>/__aimock/fixtures</code></td>
+              <td>How many fixtures are currently loaded</td>
+            </tr>
+            <tr>
               <td><code>POST</code></td>
               <td><code>/__aimock/fixtures</code></td>
               <td>Add fixtures at runtime</td>
@@ -249,6 +254,22 @@
         </div>
 
         <h2>Fixtures</h2>
+
+        <h3>GET /__aimock/fixtures</h3>
+        <p>
+          Read-only: how many fixtures are currently registered. Useful for asserting a CI job or
+          test harness actually loaded its tape before it starts making requests, without having to
+          send a probe request and infer the answer from the reply. Returns the count only —
+          fixtures hold predicate functions, so nothing about their contents is serialized.
+        </p>
+        <div class="code-block">
+          <div class="code-block-header">Count fixtures <span class="lang-tag">shell</span></div>
+          <pre><code>$ curl http://localhost:4010/__aimock/fixtures</code></pre>
+        </div>
+        <div class="code-block">
+          <div class="code-block-header">Response <span class="lang-tag">json</span></div>
+          <pre><code>{ <span class="prop">"count"</span>: <span class="num">2</span> }</code></pre>
+        </div>
 
         <h3>POST /__aimock/fixtures</h3>
         <p>
