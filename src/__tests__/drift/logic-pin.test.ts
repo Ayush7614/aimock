@@ -421,15 +421,15 @@ describe("classification-logic checksum freeze (Phase-0 anti-silence guard)", ()
 const DATA_FROZEN: Record<string, { members: () => string[]; pin: string }> = {
   "includeFamilies.openai": {
     members: () => [...includeFamilies.openai].sort(),
-    pin: "802989cfefe27838cf7303ac905dbb5fb6641e9fb859924834422b86cce8fb9c",
+    pin: "65899f85f8a87178b19fdb0be4ea1b37c3f18aabe925733c8d78e1beaf956c8e",
   },
   "includeFamilies.anthropic": {
     members: () => [...includeFamilies.anthropic].sort(),
-    pin: "ab79ff332fadeff93c2678ebe3e0af7a6280ce6f0deb4694228e316944dfeb74",
+    pin: "3934772426666eb3cc770fe879c53e02b0432368b40b0cdcf8a6d4a6c4cad272",
   },
   "includeFamilies.gemini": {
     members: () => [...includeFamilies.gemini].sort(),
-    pin: "c2e2c56b8f8d5fc56152b4633e7d3782e95b7eeb9bc123da71f00e884a54a743",
+    pin: "eded621072bfe853b144378c8988a4ab3c471861f44dacc56c75c90a6016cd55",
   },
   "excludeFamilies.openai": {
     members: () => [...excludeFamilies.openai].sort(),
@@ -441,7 +441,7 @@ const DATA_FROZEN: Record<string, { members: () => string[]; pin: string }> = {
   },
   "excludeFamilies.gemini": {
     members: () => [...excludeFamilies.gemini].sort(),
-    pin: "c95dedab7588212bbba0bf9ab6434bfd43a449adbe7b35f81f48271ee849a9c2",
+    pin: "748359a2dc129363e1a3d754c007ec6f1ef7b2a731a2fd58650bdbb62cbf6265",
   },
   // The realtime canary's seed sets, previously pinned NOWHERE. An edit to
   // either one was invisible to every guard in the repo: adding a family to

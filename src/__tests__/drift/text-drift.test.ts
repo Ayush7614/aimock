@@ -127,3 +127,185 @@ describe("openai transcription line is classified as EXCLUDED (PR #343)", () => 
     ).toEqual([]);
   });
 });
+
+// ---------------------------------------------------------------------------
+// The 2026-08-26/27 Gemini transcription + omni-video line — BEHAVIOURAL
+// coverage of the classification, in the same shape as the OpenAI block above.
+//
+// `gemini-3.5-transcribe`, `gemini-3.5-transcribe-live` and
+// `gemini-omni-1.1-flash` were classified EXCLUDE in model-registry.ts on the
+// provider's own DECLARED capabilities (see the rationale comment beside the
+// entries, and drift-proposals/). Without the assertions below the only thing
+// that would redden if an entry were dropped is the `excludeFamilies.gemini`
+// membership CHECKSUM in logic-pin.test.ts — which says "the data moved" and
+// nothing about what the classification MEANS.
+//
+// The `gemini-3.5-transcribe` / `gemini-3.5-transcribe-live` pair is asserted
+// in BOTH directions on purpose: the first key is a strict PREFIX of the
+// second, the same substring/prefix hazard the OpenAI `gpt-live` block exists
+// for. They are DIFFERENT families and both must be classified on their own
+// entry, not by one swallowing the other.
+// ---------------------------------------------------------------------------
+
+describe("gemini transcription + omni-video line is classified as EXCLUDED", () => {
+  it("gemini-3.5-transcribe is EXCLUDED in a /models-shaped payload", () => {
+    expect(isClassifiedFamily("gemini-3.5-transcribe", "gemini")).toBe(true);
+    expect(
+      unclassifiedFamilies(
+        [
+          "gemini-3.5-flash", // include, for a realistic mixed listing
+          "gemini-3.5-transcribe",
+          "gemini-3.5-transcribe-2026-08-26", // dated snapshot collapses onto the family
+        ],
+        "gemini",
+      ),
+    ).toEqual([]);
+  });
+
+  it("gemini-3.5-transcribe-live is EXCLUDED in a /models-shaped payload", () => {
+    expect(isClassifiedFamily("gemini-3.5-transcribe-live", "gemini")).toBe(true);
+    expect(
+      unclassifiedFamilies(
+        [
+          "gemini-3.5-flash",
+          "gemini-3.5-transcribe-live",
+          "gemini-3.5-transcribe-live-2026-08-26",
+          "gemini-live", // the pre-existing full-duplex Live surface
+        ],
+        "gemini",
+      ),
+    ).toEqual([]);
+  });
+
+  it("gemini-omni-1.1-flash is EXCLUDED in a /models-shaped payload", () => {
+    expect(isClassifiedFamily("gemini-omni-1.1-flash", "gemini")).toBe(true);
+    expect(
+      unclassifiedFamilies(
+        [
+          "gemini-3.5-flash",
+          "gemini-omni-1.1-flash",
+          "gemini-omni-1.1-flash-2026-08-27",
+          "gemini-omni-flash-preview", // sibling preview tier, excluded by pattern
+        ],
+        "gemini",
+      ),
+    ).toEqual([]);
+  });
+
+  it("neither transcribe key classifies the other, nor an unrelated extension", () => {
+    // The two entries are distinct families; a `startsWith`-shaped classification
+    // bug would let the shorter key classify the longer one (or vice versa) and
+    // silently swallow a family the canary exists to report.
+    expect(normalizeModelFamily("gemini-3.5-transcribe-live", "gemini")).toBe(
+      "gemini-3.5-transcribe-live",
+    );
+    // NEGATIVE CONTROL: an id that merely EXTENDS an excluded key is still a new
+    // family and must be reported. Without this, `toEqual([])` above is also
+    // what a neutered `unclassifiedFamilies` would produce.
+    expect(unclassifiedFamilies(["gemini-3.5-transcribe-diarize"], "gemini")).toEqual([
+      "gemini-3.5-transcribe-diarize",
+    ]);
+    expect(unclassifiedFamilies(["gemini-omni-1.1-pro"], "gemini")).toEqual([
+      "gemini-omni-1.1-pro",
+    ]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The 2026-09-05 wave — BEHAVIOURAL coverage of the four classifications made
+// in this change, in the same shape as the two blocks above.
+//
+// `gpt-6-astra`, `claude-fable-5-1` and `gemini-3.8-flash` were classified
+// INCLUDE and `lyria-3.5` EXCLUDE in model-registry.ts, each on the provider's
+// own declared capability (see the rationale comment beside each entry, and
+// drift-proposals/). Without the assertions below the only thing that would
+// redden if an entry were dropped is that set's membership CHECKSUM in
+// logic-pin.test.ts — which says "the data moved" and nothing about what the
+// classification MEANS.
+//
+// `claude-fable-5-1` is the prefix case in this wave, and it is asserted in both
+// directions: the already-included `claude-fable-5` is a strict PREFIX of it, so
+// a `startsWith`-shaped classification bug would let the shorter key classify
+// the longer one — and the negative control below proves a FURTHER point release
+// is still reported rather than swallowed by either.
+//
+// `lyria-3.5` is the one entry a methods-only rule would have got backwards: its
+// live /models entry declares `generateContent`, so only the model card
+// (`description: "Music Generation model"`) distinguishes it from a text tier.
+// It is asserted beside its `-preview` sibling, which reaches the same verdict
+// by the PREVIEW_FAMILY rule rather than by enumeration.
+// ---------------------------------------------------------------------------
+
+describe("the 2026-09-05 model-family wave is classified", () => {
+  it("gpt-6-astra is INCLUDED in a /models-shaped payload", () => {
+    expect(isClassifiedFamily("gpt-6-astra", "openai")).toBe(true);
+    expect(
+      unclassifiedFamilies(
+        [
+          "gpt-5.6-luna", // the sibling named variant it was probed against
+          "gpt-6-astra",
+          "gpt-6-astra-2026-08-27", // dated snapshot collapses onto the family
+          "whisper-1", // the negative control from that probe, excluded
+        ],
+        "openai",
+      ),
+    ).toEqual([]);
+  });
+
+  it("claude-fable-5-1 is INCLUDED in a /models-shaped payload", () => {
+    expect(isClassifiedFamily("claude-fable-5-1", "anthropic")).toBe(true);
+    expect(
+      unclassifiedFamilies(
+        [
+          "claude-fable-5", // the prefix sibling, already included
+          "claude-fable-5-1",
+          "claude-fable-5-1-20260901", // dated snapshot collapses onto the family
+          "claude-opus-5",
+        ],
+        "anthropic",
+      ),
+    ).toEqual([]);
+  });
+
+  it("gemini-3.8-flash is INCLUDED in a /models-shaped payload", () => {
+    expect(isClassifiedFamily("gemini-3.8-flash", "gemini")).toBe(true);
+    expect(
+      unclassifiedFamilies(
+        [
+          "gemini-3.7-flash", // the tier whose method set it matches exactly
+          "gemini-3.8-flash",
+          "gemini-3.8-flash-2026-09-05", // dated snapshot collapses onto the family
+        ],
+        "gemini",
+      ),
+    ).toEqual([]);
+  });
+
+  it("lyria-3.5 is EXCLUDED in a /models-shaped payload", () => {
+    expect(isClassifiedFamily("lyria-3.5", "gemini")).toBe(true);
+    expect(excludeFamilies.gemini.has("lyria-3.5")).toBe(true);
+    expect(
+      unclassifiedFamilies(
+        [
+          "gemini-3.8-flash",
+          "lyria-3.5",
+          "lyria-3.5-2026-09-05", // dated snapshot collapses onto the family
+          "lyria-3-pro-preview", // sibling preview tier, excluded by pattern
+        ],
+        "gemini",
+      ),
+    ).toEqual([]);
+  });
+
+  it("no key in this wave classifies a neighbouring family", () => {
+    // Each entry is its own family. NEGATIVE CONTROLS: without these,
+    // `toEqual([])` above is also what a neutered `unclassifiedFamilies` would
+    // produce, and a prefix-shaped bug would look identical to a correct pass.
+    expect(normalizeModelFamily("claude-fable-5-1", "anthropic")).toBe("claude-fable-5-1");
+    expect(unclassifiedFamilies(["claude-fable-5-2"], "anthropic")).toEqual(["claude-fable-5-2"]);
+    expect(unclassifiedFamilies(["gpt-6"], "openai")).toEqual(["gpt-6"]);
+    expect(unclassifiedFamilies(["gpt-6-astra-pro"], "openai")).toEqual(["gpt-6-astra-pro"]);
+    expect(unclassifiedFamilies(["gemini-3.8-pro"], "gemini")).toEqual(["gemini-3.8-pro"]);
+    expect(unclassifiedFamilies(["lyria-4"], "gemini")).toEqual(["lyria-4"]);
+  });
+});

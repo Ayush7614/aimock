@@ -1,6 +1,6 @@
 {
   "name": "@copilotkit/aimock",
-  "version": "1.38.0",
+  "version": "1.39.0",
   "description": "Mock infrastructure for AI application testing — LLM APIs, image generation, image editing, text-to-speech, transcription, audio translation, audio generation, video generation, embeddings, MCP tools, A2A agents, AG-UI event streams, vector databases, search, rerank, and moderation. One package, one port, zero dependencies.",
   "license": "MIT",
   "keywords": [
@@ -167,9 +167,10 @@
     "test": "vitest run",
     "test:drift": "vitest run --config vitest.config.drift.ts",
     "test:exports": "publint && attw --pack .",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json --noEmit && tsc -p scripts/tsconfig.json --noEmit",
     "lint": "eslint .",
     "format:check": "prettier --check .",
-    "release": "pnpm format:check && pnpm build && pnpm test && pnpm lint && pnpm test:exports && npm publish",
+    "release": "pnpm format:check && pnpm typecheck && pnpm build && pnpm test && pnpm lint && pnpm test:exports && npm publish",
     "prepare": "husky || true"
   },
   "lint-staged": {

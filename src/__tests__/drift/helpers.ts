@@ -157,15 +157,83 @@ export const THINKING_FIXTURE: Fixture = {
   response: { content: "Hello!", reasoning: "I need to consider..." },
 };
 
+/**
+ * Audio-out fixture for the Gemini Live drift leg.
+ *
+ * The Live API only supports the `AUDIO` response modality, so the mock side of
+ * that leg's three-way comparison must be driven by an AUDIO fixture — a text
+ * fixture would compare the mock's TEXT shape against a real AUDIO turn.
+ *
+ * `userMessage` matching is SUBSTRING (see router.ts), so this prompt must not
+ * contain any other fixture's prompt: "Greet me aloud" shares no substring with
+ * "Say hello" / "Weather in Paris" / "Think about hello", so the drift server's
+ * other legs are unaffected.
+ */
+export const AUDIO_FIXTURE: Fixture = {
+  match: { userMessage: "Greet me aloud" },
+  response: { audio: { b64Json: "AAAAAA==", contentType: "audio/pcm;rate=24000" } },
+};
+
+/** The prompt that selects {@link AUDIO_FIXTURE} on both sides of a drift leg. */
+export const AUDIO_PROMPT = "Greet me aloud";
+
+/**
+ * Tool-call fixture for the Gemini Live drift leg.
+ *
+ * A Live session carries exactly ONE response modality and it is `AUDIO`, so a
+ * turn in which the model calls a function is an AUDIO turn that ALSO calls it:
+ * the model speaks (`serverContent`) and then asks for the call (`toolCall`).
+ * The shared {@link TOOL_FIXTURE} describes a text-protocol tool turn — tool
+ * call and nothing else — so driving the Live leg's mock side with it produces
+ * a bare `toolCall` with no model turn at all.
+ *
+ * That mis-drive is what run 31896605497's head report recorded as
+ * `SSE:serverContent … mock:"<absent>"`, and the ORDER in it is not a guess: the
+ * probe collects up to and including the FIRST `toolCall`, the real leg's
+ * `toolCallCount > 0` assertion passed, and a `serverContent` was nonetheless
+ * present in what it collected — so the provider sent `serverContent` strictly
+ * BEFORE the `toolCall`. It is the same class of error as the TEXT-modality
+ * request that mis-drove the REAL side: one side driven into a shape the
+ * session's modality cannot produce.
+ *
+ * NOT PROVEN: the fields of the provider's pre-`toolCall` `serverContent`. The
+ * artifact records the event TYPE only. `AUDIO` being the session's sole
+ * modality, audio parts are the shape reproduced here; confirming the
+ * provider's exact fields needs a live run.
+ */
+export const LIVE_TOOL_FIXTURE: Fixture = {
+  match: { userMessage: "Weather in Paris" },
+  response: {
+    audio: { b64Json: "AAAAAA==", contentType: "audio/pcm;rate=24000" },
+    toolCalls: [{ name: "get_weather", arguments: '{"city":"Paris"}' }],
+  },
+};
+
 // ---------------------------------------------------------------------------
 // Server lifecycle
 // ---------------------------------------------------------------------------
 
 export async function startDriftServer(): Promise<ServerInstance> {
-  return createServer([TEXT_FIXTURE, TOOL_FIXTURE, THINKING_FIXTURE], {
+  return createServer([TEXT_FIXTURE, TOOL_FIXTURE, THINKING_FIXTURE, AUDIO_FIXTURE], {
     port: 0,
     chunkSize: 100,
   });
+}
+
+/**
+ * Drift server for the Gemini Live legs.
+ *
+ * Separate from {@link startDriftServer} because the Live leg's fixtures are
+ * modality-specific: {@link LIVE_TOOL_FIXTURE} answers the same
+ * `"Weather in Paris"` prompt as the shared {@link TOOL_FIXTURE} but with the
+ * AUDIO turn a Live session actually produces. Putting it on the shared server
+ * would mean either shadowing `TOOL_FIXTURE` for every other provider's tool
+ * leg or gating it on a model-name pattern — and a Live model is not
+ * identifiable by its name (see the header of ws-gemini-live.drift.ts). A
+ * dedicated instance needs neither.
+ */
+export async function startGeminiLiveDriftServer(): Promise<ServerInstance> {
+  return createServer([AUDIO_FIXTURE, LIVE_TOOL_FIXTURE], { port: 0, chunkSize: 100 });
 }
 
 export async function stopDriftServer(instance: ServerInstance): Promise<void> {

@@ -3,19 +3,59 @@
  *
  * Three-way comparison: SDK types × real API (WS) × aimock output (WS).
  *
- * Currently, the Gemini Live API only supports native-audio models (those
- * with "native-audio" in the name) which cannot return TEXT responses. Rather
- * than a hardcoded model pin + a human-maintained `.skip`/un-skip cycle, model
- * selection is SELF-HEALING: `fetchLiveCapableTextModels` + providers.ts's
- * shared `resolveLiveModel` (the R0 discovery helper, generalizing the cohere
- * #325 pattern) query the live model listing on every run and resolve to
- * exactly one of:
- *   - `{ model }`       — a text-capable bidiGenerateContent model exists NOW;
- *                         the drift tests below run for real against it.
- *   - `{ unavailable }` — today's real-world state (no such model yet) — an
- *                         HONEST SKIP, not a failure.
+ * MODALITY. The Live API permits exactly ONE response modality per session, and
+ * WHICH one a model serves is a PER-MODEL capability. A native-audio model
+ * serves only `AUDIO` — Google's capabilities guide states the native audio
+ * models "only support `AUDIO` response modality" — and refuses `TEXT`
+ * out-of-band with an RFC 6455 CLOSE frame, observed verbatim from the live
+ * endpoint as
+ *
+ *   code=1007 reason="The requested combination of response modalities (TEXT)
+ *   is not supported by the model. models/gemini-3.1-flash-live-preview"
+ *
+ * so this leg drives the AUDIO shape — the shape those models actually emit —
+ * and grades the audio event sequence (`inlineData` parts + `turnComplete`)
+ * plus the modality-independent `toolCall`. The TEXT shape is NOT expressible
+ * against a native-audio model; aimock's TEXT path stays covered mock-only by
+ * ws-gemini-live.test.ts, without live triangulation.
+ *
+ * `bidiGenerateContent` DOES NOT IMPLY AUDIO, though — this header used to say
+ * it did. Google shipped `gemini-3.5-transcribe-live` on 2026-08-26: a streaming
+ * speech-to-text model that declares `bidiGenerateContent` and emits only TEXT.
+ * The listing offered it first, this leg asked for AUDIO, and the provider sent
+ * the mirror-image refusal
+ *
+ *   code=1007 reason="The requested combination of response modalities (AUDIO)
+ *   is not supported by the model. models/gemini-3.5-transcribe-live"
+ *
+ * reddening the leg on every run from 2026-08-27 (run 33296393200).
+ *
+ * MODEL SELECTION is SELF-HEALING rather than a hardcoded pin plus a
+ * human-maintained `.skip` cycle: `fetchLiveCapableModels` + providers.ts's
+ * shared `resolveLiveModelCandidates` query the live model listing on every run
+ * and resolve to exactly one of:
+ *   - `{ models }`      — the ordered `bidiGenerateContent` candidates; the
+ *                         drift tests below run for real against the first that
+ *                         actually serves AUDIO.
+ *   - `{ unavailable }` — the listing exposes no Live-capable model at all —
+ *                         an HONEST SKIP, not a failure.
  *   - `{ infra }`       — the listing hit an auth/rate-limit/5xx condition —
  *                         also an honest skip (never a hard-fail).
+ *
+ * Selection keys on the listing's declared `bidiGenerateContent` support ONLY,
+ * and never re-derives a capability from the model NAME. That rule has been
+ * earned twice: a `"native-audio"` name-substring filter silently
+ * mis-classified `gemini-3.1-flash-live-preview` — a native-audio model whose
+ * name lacks that substring — as text-capable, and a `"transcribe"` filter
+ * would be the same mistake wearing the opposite sign. Google names models
+ * freely; only the provider is an authority on capability.
+ *
+ * Since the LISTING cannot express response modality, the leg gets that one
+ * capability from the provider by ASKING: `driveGeminiLiveAudio` walks the
+ * candidates in listing order and a 1007 modality refusal disqualifies that
+ * candidate and advances to the next. A listing whose Live models ALL refuse
+ * AUDIO is an honest skip — there is no AUDIO turn to grade — not drift.
+ *
  * A WS handshake-level infra status (401/403/429/5xx) is likewise an honest
  * skip via `WSHandshakeError` + `isInfraSkip` (ws-providers.ts, shared with
  * every other WS live leg). Only a genuine 2xx envelope-shape mismatch reports
@@ -27,22 +67,30 @@ import type { ServerInstance } from "../../server.js";
 import { extractShape, compareSSESequences, formatDriftReport } from "./schema.js";
 import {
   geminiLiveSetupCompleteShape,
-  geminiLiveTextEventShapes,
+  geminiLiveAudioEventShapes,
   geminiLiveToolCallEventShapes,
 } from "./sdk-shapes.js";
-import { geminiLiveWS, WSHandshakeError } from "./ws-providers.js";
+import {
+  driveGeminiLiveAudio,
+  summarizeGeminiLiveTurn,
+  GEMINI_LIVE_RESPONSE_MODALITIES,
+  WSHandshakeError,
+  type WSResult,
+} from "./ws-providers.js";
 import {
   resolveLiveModel,
+  resolveLiveModelCandidates,
   isInfraSkip,
   __resetResolveLiveModelCache,
   type LiveModelEntry,
 } from "./providers.js";
 import {
-  startDriftServer,
+  startGeminiLiveDriftServer,
   stopDriftServer,
   collectMockWSMessages,
   classifyGeminiMessage,
   GEMINI_WS_PATH,
+  AUDIO_PROMPT,
 } from "./helpers.js";
 import { connectWebSocket } from "../ws-test-client.js";
 
@@ -54,7 +102,7 @@ let instance: ServerInstance;
 const GOOGLE_API_KEY = process.env.GOOGLE_API_KEY;
 
 beforeAll(async () => {
-  instance = await startDriftServer();
+  instance = await startGeminiLiveDriftServer();
 });
 
 afterAll(async () => {
@@ -62,19 +110,30 @@ afterAll(async () => {
 });
 
 // ---------------------------------------------------------------------------
-// Self-healing model discovery: find a text-capable bidiGenerateContent model
+// Self-healing model discovery: find a bidiGenerateContent-capable model
 // ---------------------------------------------------------------------------
 
 /**
  * Query the Gemini model listing API and normalize it to the `resolveLiveModel`
- * contract (R0's shared discovery helper), pre-filtered to models that support
- * `bidiGenerateContent` AND are NOT native-audio-only (the only kind that can
- * return TEXT responses over the Live WS protocol). A non-2xx status is
- * surfaced so `resolveLiveModel`/`isInfraSkip` can classify an auth/rate-limit/
- * 5xx listing failure as an honest skip rather than this function propagating
- * a bare fetch error.
+ * contract (R0's shared discovery helper), filtered to models that declare
+ * `bidiGenerateContent` support.
+ *
+ * That declared method is the ONLY selection criterion. No model-name heuristic
+ * is applied: names carry no reliable capability signal (see this file's header
+ * — a `"native-audio"` substring filter mis-classified a native-audio model as
+ * text-capable because Google left that substring out of its name).
+ *
+ * The filter yields "speaks the Live protocol" and nothing more. It notably does
+ * NOT yield "serves AUDIO": the listing exposes no response-modality field, and
+ * `gemini-3.5-transcribe-live` declares this method while emitting only TEXT.
+ * That remaining capability is resolved from the provider's own refusal, in
+ * `driveGeminiLiveAudio` — never from the id.
+ *
+ * A non-2xx status is surfaced so `resolveLiveModel`/`isInfraSkip` can classify
+ * an auth/rate-limit/5xx listing failure as an honest skip rather than this
+ * function propagating a bare fetch error.
  */
-async function fetchLiveCapableTextModels(
+async function fetchLiveCapableModels(
   apiKey: string,
 ): Promise<{ status: number; models: LiveModelEntry[] }> {
   const url = `https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`;
@@ -84,92 +143,124 @@ async function fetchLiveCapableTextModels(
     models?: { name: string; supportedGenerationMethods?: string[] }[];
   };
   const models: LiveModelEntry[] = (data.models ?? [])
-    .filter(
-      (m) =>
-        m.supportedGenerationMethods?.includes("bidiGenerateContent") &&
-        !m.name.includes("native-audio"),
-    )
+    .filter((m) => m.supportedGenerationMethods?.includes("bidiGenerateContent"))
     .map((m) => ({ id: m.name.replace(/^models\//, "") }));
   return { status: res.status, models };
 }
 
 /**
- * Resolve the live text-capable Live model, memoized per the leg's cache key
- * so all tests in this file make exactly one listing call.
+ * Resolve EVERY Live-capable candidate, memoized per the leg's cache key so all
+ * tests in this file make exactly one listing call.
+ *
+ * A LIST, not one id, because `bidiGenerateContent` does not settle the
+ * RESPONSE MODALITY this leg needs and the listing expresses no other signal —
+ * see `driveGeminiLiveAudio` in ws-providers.ts, and the header above.
  */
-function getLiveCapableTextModel(apiKey: string) {
-  return resolveLiveModel("gemini-live-text", () => fetchLiveCapableTextModels(apiKey));
+function getLiveCapableModels(apiKey: string) {
+  return resolveLiveModelCandidates("gemini-live", () => fetchLiveCapableModels(apiKey));
+}
+
+/** A resolved real AUDIO turn, or `null` when the leg must skip honestly. */
+type RealAudioTurn = { model: string; realResult: WSResult } | null;
+
+/**
+ * Drive the real AUDIO turn both tests below compare against, converting every
+ * honest-skip condition into `null` (with the warning that carries the signal)
+ * and letting every genuine failure propagate.
+ *
+ * Shared so the two legs cannot drift apart on WHICH conditions are a skip —
+ * they are: an infra listing status, a listing with no Live-capable model, a WS
+ * handshake infra status, and a listing whose Live-capable models ALL refuse
+ * AUDIO. That last one is new: `gemini-3.5-transcribe-live` declares
+ * `bidiGenerateContent` and serves only TEXT, so "the listing has a Live model"
+ * no longer implies "this leg has something it can grade".
+ */
+async function driveRealAudioTurn(
+  config: { apiKey: string },
+  ctx: { skip: () => void },
+  prompt: string,
+  tools?: object[],
+): Promise<RealAudioTurn> {
+  const resolved = await getLiveCapableModels(config.apiKey);
+  if ("infra" in resolved) {
+    console.warn(`[gemini-live drift] listing infra status ${resolved.infra} — skipping`);
+    ctx.skip();
+    return null;
+  }
+  if ("unavailable" in resolved) {
+    console.warn("[gemini-live drift] listing exposes no bidiGenerateContent model — skipping");
+    ctx.skip();
+    return null;
+  }
+
+  // A WS handshake-level infra status (auth/rate-limit/5xx) is an HONEST SKIP,
+  // never a hard-fail that would quarantine the shared drift baseline (mirrors
+  // ws-responses.drift.ts's handling of the same error type).
+  let drive;
+  try {
+    drive = await driveGeminiLiveAudio(config, prompt, tools, resolved.models);
+  } catch (err) {
+    if (err instanceof WSHandshakeError && isInfraSkip(err.status)) {
+      console.warn(`[gemini-live drift] WS handshake infra status ${err.status} — skipping`);
+      ctx.skip();
+      return null;
+    }
+    throw err;
+  }
+
+  if (!drive) {
+    // Every Live-capable model in the listing is a TEXT-only surface (a
+    // streaming transcriber). There is no AUDIO turn to grade — unavailability,
+    // not drift. The provider's own words are logged so the cause is legible.
+    console.warn(
+      "[gemini-live drift] every bidiGenerateContent model refused AUDIO — skipping: " +
+        resolved.models.join(", "),
+    );
+    ctx.skip();
+    return null;
+  }
+
+  // Candidates the provider disqualified are NOT silent: they are the signal
+  // that the listing's shape moved under this leg.
+  for (const { model, reason } of drive.refused) {
+    console.warn(`[gemini-live drift] ${model} refused AUDIO (${reason}) — advanced past it`);
+  }
+
+  return { model: drive.model, realResult: drive.result };
 }
 
 describe.skipIf(!GOOGLE_API_KEY)("Gemini Live WS drift", () => {
   const config = { apiKey: GOOGLE_API_KEY! };
 
-  it("canary: text-capable bidiGenerateContent model availability", async () => {
-    const resolved = await getLiveCapableTextModel(config.apiKey);
-    if ("infra" in resolved) {
-      console.warn(
-        `[CANARY] Gemini model listing hit infra status ${resolved.infra} — cannot determine ` +
-          `text-capable Live model availability this run.`,
-      );
-    } else if ("model" in resolved) {
-      // A text-capable Live model now exists! The tests below discover and
-      // drive it automatically — no manual un-skip/file-edit needed.
-      console.warn(
-        `[CANARY] Text-capable Gemini Live model found: ${resolved.model}. ` +
-          `The drift tests below will now run for real against it.`,
-      );
-    }
-    // This test always passes — it's a canary, not an assertion. When a model
-    // appears (or the listing goes infra-unavailable), the console warning
-    // signals what happened; the tests below self-heal either way.
-    expect(true).toBe(true);
-  });
+  // These tests self-skip at runtime (via `ctx.skip()`) only when the listing
+  // exposes no `bidiGenerateContent` model at all, or is infra-unavailable —
+  // discovered dynamically above, with no hardcoded `.skip` to maintain.
+  //
+  // There is deliberately NO always-passing availability canary here: a test
+  // whose body is `expect(true).toBe(true)` cannot fail, so it reports health it
+  // never checked. The console warnings on the skip paths below carry the same
+  // signal, and the assertions that remain can all actually go red.
 
-  // These tests self-skip at runtime (via `ctx.skip()`) until a text-capable
-  // model supports bidiGenerateContent, discovered dynamically above — no
-  // hardcoded `.skip` and no manual file edit needed when Google adds one.
+  it("WS audio event sequence and shapes match", async (ctx) => {
+    const turn = await driveRealAudioTurn(config, ctx, AUDIO_PROMPT);
+    if (!turn) return;
+    const { model, realResult } = turn;
 
-  it("WS text event sequence and shapes match", async (ctx) => {
-    const resolved = await getLiveCapableTextModel(config.apiKey);
-    if ("infra" in resolved) {
-      console.warn(`[gemini-live drift] listing infra status ${resolved.infra} — skipping`);
-      ctx.skip();
-      return;
-    }
-    if ("unavailable" in resolved) {
-      console.warn(
-        "[gemini-live drift] no text-capable bidiGenerateContent model available yet — skipping",
-      );
-      ctx.skip();
-      return;
-    }
-    const model = `models/${resolved.model}`;
-
-    const sdkEvents = [geminiLiveSetupCompleteShape(), ...geminiLiveTextEventShapes()];
-
-    // Real API — a WS handshake-level infra status (auth/rate-limit/5xx) is an
-    // HONEST SKIP, never a hard-fail that would quarantine the shared drift
-    // baseline (mirrors ws-responses.drift.ts's handling of the same error type).
-    let realResult;
-    try {
-      realResult = await geminiLiveWS(config, "Say hello", undefined, model);
-    } catch (err) {
-      if (err instanceof WSHandshakeError && isInfraSkip(err.status)) {
-        console.warn(`[gemini-live drift] WS handshake infra status ${err.status} — skipping`);
-        ctx.skip();
-        return;
-      }
-      throw err;
-    }
+    const sdkEvents = [geminiLiveSetupCompleteShape(), ...geminiLiveAudioEventShapes()];
 
     // Mock — replicate Gemini Live protocol
     const mockWs = await connectWebSocket(instance.url, GEMINI_WS_PATH);
 
-    // Send setup — same discovered model as the real API call above, so both
-    // sides of the 3-way comparison are driven identically.
+    // Send setup — same discovered model AND the same response modality as the
+    // real API call above, so both sides of the 3-way comparison are driven
+    // identically. Omitting generationConfig here would compare a real AUDIO
+    // turn against an unconstrained mock one.
     mockWs.send(
       JSON.stringify({
-        setup: { model },
+        setup: {
+          model,
+          generationConfig: { responseModalities: GEMINI_LIVE_RESPONSE_MODALITIES },
+        },
       }),
     );
 
@@ -181,7 +272,7 @@ describe.skipIf(!GOOGLE_API_KEY)("Gemini Live WS drift", () => {
     mockWs.send(
       JSON.stringify({
         clientContent: {
-          turns: [{ role: "user", parts: [{ text: "Say hello" }] }],
+          turns: [{ role: "user", parts: [{ text: AUDIO_PROMPT }] }],
           turnComplete: true,
         },
       }),
@@ -207,11 +298,37 @@ describe.skipIf(!GOOGLE_API_KEY)("Gemini Live WS drift", () => {
       dataShape: extractShape(msg),
     }));
 
-    expect(realResult.rawMessages.length, "Real API returned no WS messages").toBeGreaterThan(0);
-    expect(mockEvents.length, "Mock returned no WS messages").toBeGreaterThan(0);
+    // Observe the AUDIO turn on BOTH sides before grading shapes. `compareSSESequences`
+    // only reports a field the SDK shape and the real API BOTH have and the mock
+    // lacks, so on its own it would pass a run in which the provider sent nothing
+    // recognisable as an audio turn — silence read as health. These assertions are
+    // what make the leg observe the modality's actual event sequence.
+    const realTurn = summarizeGeminiLiveTurn(realResult.rawMessages);
+    expect(
+      realTurn.setupCompleteCount,
+      `Real API sent no setupComplete: ${JSON.stringify(realTurn)}`,
+    ).toBe(1);
+    expect(
+      realTurn.audioPartCount,
+      `Real API streamed no inlineData audio parts (AUDIO modality was requested): ${JSON.stringify(realTurn)}`,
+    ).toBeGreaterThan(0);
+    expect(
+      realTurn.turnCompleteCount,
+      `Real API never completed the turn: ${JSON.stringify(realTurn)}`,
+    ).toBeGreaterThan(0);
+
+    const mockTurn = summarizeGeminiLiveTurn(allMockRaw);
+    expect(
+      mockTurn.audioPartCount,
+      `Mock streamed no inlineData audio parts: ${JSON.stringify(mockTurn)}`,
+    ).toBeGreaterThan(0);
+    expect(
+      mockTurn.turnCompleteCount,
+      `Mock never completed the turn: ${JSON.stringify(mockTurn)}`,
+    ).toBeGreaterThan(0);
 
     const diffs = compareSSESequences(sdkEvents, realResult.events, mockEvents);
-    const report = formatDriftReport("Gemini Live WS (text events)", diffs, "gemini-live");
+    const report = formatDriftReport("Gemini Live WS (audio events)", diffs, "gemini-live");
 
     expect(
       diffs.filter((d) => d.severity === "critical"),
@@ -220,21 +337,6 @@ describe.skipIf(!GOOGLE_API_KEY)("Gemini Live WS drift", () => {
   });
 
   it("WS tool call event sequence matches", async (ctx) => {
-    const resolved = await getLiveCapableTextModel(config.apiKey);
-    if ("infra" in resolved) {
-      console.warn(`[gemini-live drift] listing infra status ${resolved.infra} — skipping`);
-      ctx.skip();
-      return;
-    }
-    if ("unavailable" in resolved) {
-      console.warn(
-        "[gemini-live drift] no text-capable bidiGenerateContent model available yet — skipping",
-      );
-      ctx.skip();
-      return;
-    }
-    const model = `models/${resolved.model}`;
-
     const sdkEvents = [geminiLiveSetupCompleteShape(), ...geminiLiveToolCallEventShapes()];
 
     const tools = [
@@ -253,27 +355,25 @@ describe.skipIf(!GOOGLE_API_KEY)("Gemini Live WS drift", () => {
       },
     ];
 
-    // Real API — WS handshake-level infra status → honest skip (see the
-    // first test above for the full rationale).
-    let realResult;
-    try {
-      realResult = await geminiLiveWS(config, "Weather in Paris", tools, model);
-    } catch (err) {
-      if (err instanceof WSHandshakeError && isInfraSkip(err.status)) {
-        console.warn(`[gemini-live drift] WS handshake infra status ${err.status} — skipping`);
-        ctx.skip();
-        return;
-      }
-      throw err;
-    }
+    // Real API — every honest-skip condition (including a listing whose Live
+    // models all refuse AUDIO) is handled by the shared driver above.
+    const turn = await driveRealAudioTurn(config, ctx, "Weather in Paris", tools);
+    if (!turn) return;
+    const { model, realResult } = turn;
 
     // Mock — replicate Gemini Live protocol with tools
     const mockWs = await connectWebSocket(instance.url, GEMINI_WS_PATH);
 
-    // Send setup with tools — same discovered model as the real API call above.
+    // Send setup with tools — same discovered model and response modality as
+    // the real API call above (a Live session has exactly one modality, and
+    // `toolCall` is emitted identically under it).
     mockWs.send(
       JSON.stringify({
-        setup: { model, tools },
+        setup: {
+          model,
+          tools,
+          generationConfig: { responseModalities: GEMINI_LIVE_RESPONSE_MODALITIES },
+        },
       }),
     );
 
@@ -310,8 +410,40 @@ describe.skipIf(!GOOGLE_API_KEY)("Gemini Live WS drift", () => {
       dataShape: extractShape(msg),
     }));
 
-    expect(realResult.rawMessages.length, "Real API returned no WS messages").toBeGreaterThan(0);
-    expect(mockEvents.length, "Mock returned no WS messages").toBeGreaterThan(0);
+    // Observe the tool call on BOTH sides — not merely that bytes arrived. A run
+    // where the provider answered in prose instead of calling the function would
+    // otherwise grade clean, because `compareSSESequences` cannot fail on an
+    // event type the real API simply stopped emitting.
+    const realTurn = summarizeGeminiLiveTurn(realResult.rawMessages);
+    expect(
+      realTurn.setupCompleteCount,
+      `Real API sent no setupComplete: ${JSON.stringify(realTurn)}`,
+    ).toBe(1);
+    expect(
+      realTurn.toolCallCount,
+      `Real API emitted no toolCall despite a functionDeclaration: ${JSON.stringify(realTurn)}`,
+    ).toBeGreaterThan(0);
+
+    const mockTurn = summarizeGeminiLiveTurn(allMockRaw);
+    expect(
+      mockTurn.toolCallCount,
+      `Mock emitted no toolCall: ${JSON.stringify(mockTurn)}`,
+    ).toBeGreaterThan(0);
+    // The mock must SPEAK before it calls. A Live tool turn is an AUDIO turn
+    // that also calls a function, and the mock driven by a text-shaped
+    // tool-only fixture issued a bare `toolCall` with no model turn at all —
+    // reported as `SSE:serverContent … mock:"<absent>"`. Graded here on the mock
+    // side directly, because `compareSSESequences` can only see the absence
+    // while the REAL side happens to send the event, and a provider that
+    // stopped sending it would silently retire the check.
+    //
+    // Deliberately NOT asserted on the real side: what the provider puts in its
+    // pre-`toolCall` `serverContent` is unproven, so requiring audio parts
+    // there would red the leg on an unverified assumption rather than on drift.
+    expect(
+      mockTurn.audioPartCount,
+      `Mock issued a toolCall with no model turn before it: ${JSON.stringify(mockTurn)}`,
+    ).toBeGreaterThan(0);
 
     const diffs = compareSSESequences(sdkEvents, realResult.events, mockEvents);
     const report = formatDriftReport("Gemini Live WS (tool call events)", diffs, "gemini-live");
@@ -327,14 +459,14 @@ describe.skipIf(!GOOGLE_API_KEY)("Gemini Live WS drift", () => {
 // Unit coverage for the self-healing resolution/skip logic (runs unconditionally
 // — does NOT require GOOGLE_API_KEY, since the live describe block above is
 // entirely gated out without one). Exercises the REAL functions the live leg
-// calls (fetchLiveCapableTextModels + providers.ts's resolveLiveModel +
+// calls (fetchLiveCapableModels + providers.ts's resolveLiveModel +
 // ws-providers.ts's WSHandshakeError/isInfraSkip), stubbing only the network
 // boundary (global fetch), so this is the fixture-driven red-green proof for
 // an environment with no armed GOOGLE_API_KEY.
 // ---------------------------------------------------------------------------
 
 describe("Gemini Live model resolution (unit)", () => {
-  const UNIT_CACHE_KEY = "gemini-live-text-unittest";
+  const UNIT_CACHE_KEY = "gemini-live-unittest";
 
   afterEach(() => {
     __resetResolveLiveModelCache();
@@ -347,12 +479,12 @@ describe("Gemini Live model resolution (unit)", () => {
       vi.fn(async () => new Response("", { status: 401 })),
     );
     const resolved = await resolveLiveModel(UNIT_CACHE_KEY, () =>
-      fetchLiveCapableTextModels("fake-key"),
+      fetchLiveCapableModels("fake-key"),
     );
     expect(resolved).toEqual({ infra: 401 });
   });
 
-  it("classifies a 200 listing with no bidi text-capable model as unavailable (today's real state)", async () => {
+  it("classifies a 200 listing with no bidiGenerateContent model at all as unavailable", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(
@@ -360,14 +492,14 @@ describe("Gemini Live model resolution (unit)", () => {
           new Response(
             JSON.stringify({
               models: [
-                {
-                  name: "models/gemini-2.5-flash-native-audio-preview",
-                  supportedGenerationMethods: ["bidiGenerateContent"],
-                },
                 {
                   name: "models/gemini-2.5-flash",
                   supportedGenerationMethods: ["generateContent"],
                 },
+                {
+                  name: "models/text-embedding-004",
+                  supportedGenerationMethods: ["embedContent"],
+                },
               ],
             }),
             { status: 200 },
@@ -375,12 +507,18 @@ describe("Gemini Live model resolution (unit)", () => {
       ),
     );
     const resolved = await resolveLiveModel(UNIT_CACHE_KEY, () =>
-      fetchLiveCapableTextModels("fake-key"),
+      fetchLiveCapableModels("fake-key"),
     );
     expect(resolved).toEqual({ unavailable: true });
   });
 
-  it("discovers a text-capable bidiGenerateContent model when the provider adds one", async () => {
+  it("selects on declared bidiGenerateContent support, never on the model NAME", async () => {
+    // REGRESSION. Selection used to additionally require that the name NOT
+    // contain "native-audio", as a proxy for text-capability. Both models below
+    // are native-audio models, so under that heuristic this listing resolved to
+    // `{unavailable:true}` for the one that admits it in its name and silently
+    // mis-classified `gemini-3.1-flash-live-preview` — whose name hides it — as
+    // text-capable. Names are not a capability signal; the listing is.
     vi.stubGlobal(
       "fetch",
       vi.fn(
@@ -389,11 +527,11 @@ describe("Gemini Live model resolution (unit)", () => {
             JSON.stringify({
               models: [
                 {
-                  name: "models/gemini-2.5-flash-native-audio-preview",
+                  name: "models/gemini-2.5-flash-native-audio-preview-12-2025",
                   supportedGenerationMethods: ["bidiGenerateContent"],
                 },
                 {
-                  name: "models/gemini-live-text-preview",
+                  name: "models/gemini-3.1-flash-live-preview",
                   supportedGenerationMethods: ["bidiGenerateContent"],
                 },
               ],
@@ -403,9 +541,9 @@ describe("Gemini Live model resolution (unit)", () => {
       ),
     );
     const resolved = await resolveLiveModel(UNIT_CACHE_KEY, () =>
-      fetchLiveCapableTextModels("fake-key"),
+      fetchLiveCapableModels("fake-key"),
     );
-    expect(resolved).toEqual({ model: "gemini-live-text-preview" });
+    expect(resolved).toEqual({ model: "gemini-2.5-flash-native-audio-preview-12-2025" });
   });
 
   it("classifies WS handshake auth/rate-limit/5xx statuses as an honest skip via isInfraSkip", () => {

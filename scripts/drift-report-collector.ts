@@ -10,7 +10,13 @@
  * Exit codes:
  *   0 — no critical diffs found (or no drift at all)
  *   2 — at least one critical diff exists
- *   5 — at least one failure was quarantined (unparseable/untrusted — needs review)
+ *   5 — at least one failure was quarantined (unparseable/untrusted — needs review).
+ *       Covers BOTH legs: an HTTP failure that could not be mapped to a
+ *       provider, and an AG-UI failure the collector could not structurally
+ *       interpret. An uninterpretable failure is NEVER silently dropped.
+ *   6 — at least one live leg timed out having observed ZERO messages: the
+ *       surface went silent, so nothing was graded there. Not drift, not a
+ *       collector fault, and NOT a clean baseline.
  *   1 — AG-UI drift detection was skipped (infra), or an unhandled script error
  *
  * Usage:
@@ -31,6 +37,7 @@ import type {
   DriftSeverity,
   ParsedDiff,
   QuarantineEntry,
+  TimeoutEntry,
 } from "./drift-types.js";
 
 // ---------------------------------------------------------------------------
@@ -98,6 +105,27 @@ const PROVIDER_LABEL_MAP: Record<string, ProviderMapping> = {
 // ---------------------------------------------------------------------------
 
 const AGUI_TYPES_FILE = "src/agui-types.ts";
+
+/**
+ * Vitest FILENAME FILTER (substring match on the test file path) selecting the
+ * whole AG-UI drift surface, not one hardcoded file. Keep this in lockstep with
+ * the `agui-schema-drift` job in `.github/workflows/test-drift.yml`, which runs
+ * the same filter.
+ *
+ * NAMING CONTRACT: an AG-UI drift guard MUST be named
+ * `src/__tests__/drift/agui-<something>.drift.ts` so both consumers pick it up
+ * automatically; a differently-named file would silently never run.
+ * `vitest.config.drift.ts` scopes `include` to the drift-suffixed files, so the
+ * filter cannot pull in plain `.test.ts` helpers from the same directory. No
+ * provider API keys are required — these files compare `src/agui-types.ts` against the
+ * cloned canonical ag-ui repo only.
+ */
+const AGUI_DRIFT_TEST_FILTER = "src/__tests__/drift/agui-";
+
+/**
+ * Report metadata only: the file a human should open when AG-UI drift is
+ * reported. Not a run target — see `AGUI_DRIFT_TEST_FILTER` for that.
+ */
 const AGUI_DRIFT_TEST = "src/__tests__/drift/agui-schema.drift.ts";
 
 // ---------------------------------------------------------------------------
@@ -131,8 +159,27 @@ export function parseDriftBlock(text: string): { context: string; diffs: ParsedD
   const diffs: ParsedDiff[] = [];
 
   // Match numbered entries: "  1. [severity] issue text\n     Path:...\n     SDK:...\n     Real:...\n     Mock:..."
+  //
+  // EVERY separator here is `[ \t]*` and every value is `(.*)`, NOT `\s*` and
+  // `(.+)`. `\s` matches newlines, and `compareShapes` sets `mock: ""` on every
+  // diff it produces, so `Mock:\s*(.+)` on an empty value used to run past the end
+  // of its own line: greedy `\s*` swallowed the trailing spaces, the newline and
+  // the blank separator line, and `(.+)` then matched the NEXT ENTRY'S header.
+  // That consumed the successor whole — `lastIndex` advanced past its `N. [sev]`
+  // line, so nothing could match it — and if that successor was the critical diff,
+  // `criticalCount` fell to 0 and the run reported `conclusion: "clean"`.
+  //
+  // The trigger is a single empty-`mock` entry that HAS a successor; it is not
+  // limited to consecutive empty values, and it does not need the block to be
+  // malformed. `fal-queue.drift.ts` and `video.drift.ts` both emit
+  // compareShapes-derived blocks, where the value is empty on 100% of diffs.
+  //
+  // A newline can no longer be crossed inside an entry, and an empty value is
+  // captured as empty instead of forcing the match to look for content elsewhere.
+  // `^` (with `m`) additionally requires the entry number to START a line, so a
+  // numbered list inside prose cannot be read as an entry.
   const entryPattern =
-    /\d+\.\s*\[(\w+)\]\s*(.+)\n\s*Path:\s*(.+)\n\s*SDK:\s*(.+)\n\s*Real:\s*(.+)\n\s*Mock:\s*(.+)/g;
+    /^[ \t]*\d+\.[ \t]*\[(\w+)\][ \t]*(.*)\n[ \t]*Path:[ \t]*(.*)\n[ \t]*SDK:[ \t]*(.*)\n[ \t]*Real:[ \t]*(.*)\n[ \t]*Mock:[ \t]*(.*)/gm;
 
   let match: RegExpExecArray | null;
   while ((match = entryPattern.exec(text)) !== null) {
@@ -373,41 +420,302 @@ export function parseKnownModelsCanary(text: string): CanaryParseResult | null {
 // ---------------------------------------------------------------------------
 
 /**
- * A parsed OpenAI-Realtime WS handshake failure. The socket UPGRADED (101) and
- * the live API sent back an `error` event, but the expected session-lifecycle
- * event never arrived, so the probe's `waitUntil(...)` timed out. That shape is
- * a genuine, actionable protocol drift (e.g. a GA session-config field the
- * probe/mock stopped sending) — NOT a benign network flake (a flake times out
- * having collected ZERO messages and carries no `error` body).
+ * Which WS drift probe a failure came from, and therefore which surface owns it.
+ *
+ * The recognizer below used to test for a `ws-realtime.drift.ts` frame and then
+ * hardcode the `openai-realtime` surface, which made it useful for exactly one of
+ * the three WS surfaces this repo probes. A `gemini-live` handshake that the
+ * provider REJECTED with an error body — the surface most likely to hit this,
+ * since it is the one that actually goes quiet in production — resolved to no
+ * surface and fell through to the exit-5 quarantine, i.e. straight back into the
+ * hard human-triage stop this whole lane exists to avoid.
+ *
+ * Attribution is by the probe's own stack frame OR by the failing test's name,
+ * and BOTH keys read the same CLOSED table on purpose. A failure that matches
+ * neither key yields null and stays quarantined — an unknown WS surface must not
+ * be guessed at, because a confident wrong owner routes remediation at the wrong
+ * file and fails OPEN.
+ */
+const WS_HANDSHAKE_PROBES: readonly {
+  /** The drift probe's filename as it appears in a stack frame. */
+  file: string;
+  /** The registered surface whose failures that probe reports. */
+  surface: keyof typeof SURFACE_REGISTRY;
+}[] = [
+  { file: "ws-realtime.drift.ts", surface: "openai-realtime" },
+  { file: "ws-gemini-live.drift.ts", surface: "gemini-live" },
+  { file: "ws-responses.drift.ts", surface: "openai-responses-ws" },
+];
+
+/** The registered surface a WS failure's stack frames attribute it to, or null. */
+function resolveWSProbeSurface(text: string): keyof typeof SURFACE_REGISTRY | null {
+  return WS_HANDSHAKE_PROBES.find((p) => text.includes(p.file))?.surface ?? null;
+}
+
+/**
+ * The SAME closed set of WS probes, indexed by the registry provider LABEL that
+ * opens their describe-block titles ("Gemini Live WS drift", "OpenAI Realtime API
+ * drift", "OpenAI Responses WS drift").
+ *
+ * NO longest-label-first ordering: match order cannot matter, because no
+ * registered WS label is a prefix of another, so at most one can anchor a title.
+ * That property is asserted by a test (drift-collector.test.ts, "no registered WS
+ * probe label is a prefix of another") rather than papered over here — an
+ * ordering rule that no input can distinguish is coverage that does not exist,
+ * whereas registering a prefix-colliding probe (say `openai-responses`, "OpenAI
+ * Responses", alongside "OpenAI Responses WS") turns that test RED and makes the
+ * ambiguity the author's decision instead of a silent pick.
+ */
+export const WS_PROBE_LABELS: readonly {
+  label: string;
+  surface: keyof typeof SURFACE_REGISTRY;
+}[] = WS_HANDSHAKE_PROBES.map((p) => ({
+  label: SURFACE_REGISTRY[p.surface].provider,
+  surface: p.surface,
+}));
+
+/**
+ * The registered surface the failing TEST'S NAME attributes a WS failure to.
+ *
+ * This key exists because the stack frame key cannot answer for the failures that
+ * actually happen. The client that raises a WS failure is SHARED
+ * (`ws-providers.ts`), and it raises from a socket callback — an async boundary
+ * the probe's own frame does not survive. Verbatim from the run this fixed
+ * (CopilotKit/aimock 31571018005): every frame is the shared client or a node
+ * internal, and `ws-gemini-live.drift.ts` appears NOWHERE in the stack:
+ *
+ *     at rejectClosed (…/src/__tests__/drift/ws-providers.ts:377:21)
+ *     at check (…/src/__tests__/drift/ws-providers.ts:467:21)
+ *     at TLSSocket.<anonymous> (…/src/__tests__/drift/ws-providers.ts:525:47)
+ *     at TLSSocket.emit (node:events:509:28)
+ *     …
+ *
+ * So the probe frame is not merely DEEPER in the stack — it is absent, and no
+ * frame-scanning pattern can recover it. The vitest reporter still knows which
+ * suite failed, and the ancestor title leads with the surface's registry provider
+ * label, so the test name carries the answer the stack lost.
+ *
+ * ANCHORED AT THE START, for the same reason `extractProviderName` is: a label
+ * mentioned later in a title is a qualifier, not the owner, and attributing on an
+ * unanchored occurrence is how a confidently-wrong owner gets invented. A title
+ * that does not START with a registered WS label is unattributable → null → the
+ * caller quarantines it.
+ */
+function resolveWSProbeSurfaceByName(testName: string): keyof typeof SURFACE_REGISTRY | null {
+  return WS_PROBE_LABELS.find((p) => testName.startsWith(p.label))?.surface ?? null;
+}
+
+/**
+ * The registered surface a WS failure is attributed to, from both keys that can
+ * carry the answer: the stack frame FIRST (a probe frame is unambiguous
+ * provenance when it survives), then the failing test's name. Both consult the
+ * same closed WS_HANDSHAKE_PROBES table, so an unregistered surface is still
+ * refused by both.
+ */
+function resolveWSSurface(text: string, testName: string): keyof typeof SURFACE_REGISTRY | null {
+  return resolveWSProbeSurface(text) ?? resolveWSProbeSurfaceByName(testName);
+}
+
+/**
+ * A parsed WS handshake failure. The socket UPGRADED (101) and the live API sent
+ * back an `error` event, but the expected session-lifecycle event never arrived,
+ * so the probe's `waitUntil(...)` timed out. That shape is a genuine, actionable
+ * protocol drift (e.g. a session-config field the probe/mock stopped sending) —
+ * NOT a benign network flake, and NOT the zero-observation timeout lane (a silent
+ * surface collects ZERO messages and carries no `error` body; see
+ * `parseLiveTimeout`, which this recognizer deliberately runs ahead of).
  *
  * Recognizing it here diverts it from the opaque exit-5 quarantine into a
  * parseable, attributed critical DriftEntry (exit 2), so the failing handshake
  * and its error payload are visible and route to a builder for remediation.
- * Narrowly gated (realtime probe origin + a surfaced `error` event body) so it
- * can never reclassify another provider's failure or a bare network timeout.
+ * Gated on a KNOWN probe origin plus a surfaced `error` event body, so it can
+ * neither reclassify an unrelated failure nor claim a bare network timeout.
  */
 export interface WSHandshakeFailure {
+  /** The registered surface slug the failure is attributed to. */
+  surface: keyof typeof SURFACE_REGISTRY;
   errorType: string;
   errorCode: string;
   errorMessage: string;
 }
 
-export function parseWSHandshakeFailure(text: string): WSHandshakeFailure | null {
+export function parseWSHandshakeFailure(
+  text: string,
+  /**
+   * The failing test's `<ancestors> > <title>` name. REQUIRED, not defaulted: the
+   * stack frame alone cannot attribute a failure raised from the shared client's
+   * socket callback, and a caller that silently omitted the name would reproduce
+   * exactly the unattributable quarantine this parameter exists to prevent.
+   */
+  testName: string,
+): WSHandshakeFailure | null {
   // Gate 1: the probe timed out waiting for a lifecycle event (handshake never
-  // completed). Gate 2: it is the OpenAI Realtime WS probe (its stack frame is
-  // always present on a real failure; the surfaced `error` body comes from
-  // ws-providers' openaiRealtimeWS). Gate 3: an `error` event body was surfaced
-  // — this is the "connect succeeded but handshake didn't complete WITH a
-  // protocol error" case. A pure network flake (zero messages, no error body)
-  // fails Gate 3 and stays in the quarantine lane for human review.
+  // completed). Gate 2: the failure came from a KNOWN WS drift probe, which also
+  // resolves WHICH surface owns it (by its stack frame, else by the failing
+  // test's name; the surfaced `error` body comes from the ws-providers helper).
+  // Gate 3: an `error` event body was surfaced — this is the "connect succeeded
+  // but handshake didn't complete WITH a protocol error" case. A pure network
+  // flake or a silent surface carries no error body, fails Gate 3, and is left to
+  // the timeout/quarantine lanes.
   if (!/waitUntil timeout/.test(text)) return null;
-  if (!/ws-realtime\.drift\.ts/.test(text)) return null;
+  const surface = resolveWSSurface(text, testName);
+  if (surface === null) return null;
   if (!/"type"\s*:\s*"error"/.test(text)) return null;
 
   const errorType = text.match(/"error"\s*:\s*\{[^}]*?"type"\s*:\s*"([^"]+)"/)?.[1] ?? "unknown";
   const errorCode = text.match(/"code"\s*:\s*"([^"]+)"/)?.[1] ?? "unknown";
   const errorMessage = text.match(/"message"\s*:\s*"((?:[^"\\]|\\.)*)"/)?.[1] ?? "unknown";
-  return { errorType, errorCode, errorMessage };
+  return { surface, errorType, errorCode, errorMessage };
+}
+
+// ---------------------------------------------------------------------------
+// Server-initiated CLOSE recognizer (provider refusal vs provider hang-up)
+// ---------------------------------------------------------------------------
+
+/**
+ * A server-initiated WebSocket CLOSE observed while a probe was waiting.
+ *
+ * This is a THIRD failure channel, distinct from both lanes around it. The socket
+ * upgrades, and the provider then ends the session out-of-band with an RFC 6455
+ * CLOSE frame instead of an in-band `error` event. Until the drift probe was
+ * taught to preserve the frame, the code and reason were dropped and this arrived
+ * as an ordinary zero-message timeout — byte-identical to a provider that simply
+ * said nothing. Now the frame states its own cause, and a stated cause is the most
+ * actionable signal this system can produce, so it must not be flattened back into
+ * either neighbouring lane.
+ */
+export interface WSServerClose {
+  /** RFC 6455 status code (1005 when the frame carried no code). */
+  code: number;
+  /** The frame's reason text, decoded. Empty when the frame carried none. */
+  reason: string;
+}
+
+/**
+ * The RFC 6455 §7.4.1 close codes that mean "what this end sent was
+ * unacceptable" — the peer is describing OUR payload, protocol or policy. These
+ * are genuine, attributable drift.
+ *
+ * Enumerated rather than expressed as a range, because the numeric span is not
+ * semantically contiguous: 1004 is reserved, and 1005/1006 are codes that are
+ * NEVER sent on the wire (they are local placeholders for "no status received"
+ * and "closed abnormally"). A `1002..1010` range silently swept those three in
+ * and would have reported "the provider refused us" for a connection that
+ * dropped without any code at all.
+ */
+const WS_REFUSAL_CLOSE_CODES: ReadonlySet<number> = new Set([
+  1002, // protocol error
+  1003, // unsupported data
+  1007, // invalid frame payload data
+  1008, // policy violation
+  1009, // message too big
+  1010, // mandatory extension missing
+]);
+
+/**
+ * Does this close code mean the provider REFUSED what this end sent?
+ *
+ * True for the §7.4.1 rejection codes above and for the 4000-4999
+ * application-defined range, which is where a provider puts its own refusal
+ * semantics.
+ *
+ * False for everything else — the connection ending for the peer's or the
+ * transport's own reasons: 1000 normal, 1001 going away, 1004 reserved, 1005 no
+ * code, 1006 abnormal, 1011 internal error, 1012/1013 restarting / try again
+ * later, 1014/1015 gateway and TLS failures. Calling any of those "drift" would
+ * page the team about a provider's own hiccup and hand it to the auto-fixer,
+ * which is the false-drift alarm `drift-retry.ts` exists to suppress. They are
+ * real and worth seeing, but they are not findings about us.
+ */
+export function isRefusalCloseCode(code: number): boolean {
+  return WS_REFUSAL_CLOSE_CODES.has(code) || (code >= 4000 && code <= 4999);
+}
+
+/**
+ * Recognize the drift probe's server-close failure message and recover the
+ * frame's code and reason.
+ *
+ * The reason is emitted `JSON.stringify`-quoted, so it is decoded with `JSON.parse`
+ * rather than by hand — a reason containing a quote, a backslash or a newline is
+ * exactly the input a hand-rolled unquoter gets wrong, and provider reason text is
+ * not under our control.
+ */
+export function parseWSServerClose(text: string): WSServerClose | null {
+  const match = text.match(
+    /WebSocket closed by server during waitUntil:\s*code=(\d+)\s*reason=("(?:[^"\\]|\\.)*")/,
+  );
+  if (!match) return null;
+  let reason: string;
+  try {
+    // The pattern captures a COMPLETE JSON string literal — the surrounding
+    // quotes are part of the match — so a successful parse always yields a
+    // string. `String()` is an identity here; it types the result without a cast
+    // and without an unreachable `typeof` branch. (A branch for "parsed to a
+    // non-string" was here and could not be made to fail under mutation, which
+    // is the definition of coverage that does not exist, so it is gone.)
+    reason = String(JSON.parse(match[2]));
+  } catch {
+    // A reason we cannot decode is not a reason. Returning null leaves the
+    // failure to the quarantine lane rather than reporting a mangled cause —
+    // an undecodable payload must never become a confident diagnosis.
+    return null;
+  }
+  return { code: Number(match[1]), reason };
+}
+
+// ---------------------------------------------------------------------------
+// Zero-observation live-timeout recognizer
+// ---------------------------------------------------------------------------
+
+/**
+ * A live leg that hit its wait budget having observed NOTHING.
+ *
+ * This is the single most common way a live drift leg fails, and it has its own
+ * meaning, distinct from both lanes around it:
+ *
+ *   - It is NOT a drift finding. Zero messages were observed, so there is no
+ *     shape to compare and nothing to attribute to a builder file. (A timeout
+ *     that DID observe messages including a provider `error` body is protocol
+ *     drift, and `parseWSHandshakeFailure` — which runs first — claims it.)
+ *   - It is NOT unparseable output. The message states exactly what happened:
+ *     the wait budget, and that zero messages arrived. Routing it to the
+ *     quarantine lane reported an unreachable live surface as "unparseable —
+ *     manual triage required" (exit 5), which is both wrong and, because exit 5
+ *     hard-fails the base leg, a human-gated stop on every drift PR for as long
+ *     as the surface stays silent.
+ *
+ * So it gets its own lane: recorded as a `TimeoutEntry`, reported as exit 6 /
+ * conclusion "live-timeout".
+ *
+ * DELIBERATELY NARROW. The recognizer requires the probe's own structured
+ * "Collected <n> messages" tail with n === 0, and refuses any message carrying a
+ * drift marker. Anything else — a timeout with messages but no error body, a
+ * bare `AssertionError` with no timeout tail, truncated garbage — is unchanged
+ * and still quarantines. The failure mode to avoid here is the opposite of the
+ * one being fixed: a recognizer loose enough to swallow real output would trade
+ * a loud stop for a silent pass.
+ */
+export interface LiveTimeout {
+  /** The wait budget that expired, in milliseconds. */
+  timeoutMs: number;
+}
+
+/** A drift marker anywhere in the text disqualifies the timeout lane. */
+const DRIFT_MARKERS = [/API DRIFT DETECTED/i, /LLMOCK DRIFT/i];
+
+export function parseLiveTimeout(text: string): LiveTimeout | null {
+  // Gate 1: the probe's own timeout tail, WITH its collected-message count. The
+  // count is what makes this classifiable rather than a guess — `Collected 0`
+  // is the probe stating, structurally, that it observed nothing.
+  const match = text.match(/waitUntil timeout after (\d+)ms\.\s*Collected (\d+) messages\s*:/);
+  if (!match) return null;
+  // Gate 2: ZERO observations. A timeout that collected messages saw SOMETHING;
+  // that output is evidence and must not be discarded as "surface was silent".
+  if (Number(match[2]) !== 0) return null;
+  // Gate 3: no drift marker. A message that carries a drift report is drift,
+  // whatever else it also says.
+  if (DRIFT_MARKERS.some((re) => re.test(text))) return null;
+  return { timeoutMs: Number(match[1]) };
 }
 
 // ---------------------------------------------------------------------------
@@ -701,6 +1009,12 @@ export function classifyUnparseableAsInfra(unparseableMessages: string[]): boole
 export interface CollectResult {
   entries: DriftEntry[];
   quarantine: QuarantineEntry[];
+  /**
+   * Live legs that timed out having observed nothing (see `parseLiveTimeout`).
+   * A recognized outcome in its own right — neither a drift finding nor
+   * unparseable output.
+   */
+  timeouts: TimeoutEntry[];
 }
 
 /**
@@ -729,6 +1043,7 @@ export const TRUNCATED_DELTA_ID = "openai-realtime:unknown-models-truncated";
 export function collectDriftEntries(results: VitestJsonResult): CollectResult {
   const entries: DriftEntry[] = [];
   const quarantine: QuarantineEntry[] = [];
+  const timeouts: TimeoutEntry[] = [];
   let unparseable = 0;
 
   for (const file of results.testResults) {
@@ -737,6 +1052,10 @@ export function collectDriftEntries(results: VitestJsonResult): CollectResult {
       if (assertion.failureMessages.length === 0) continue;
 
       const fullMessage = assertion.failureMessages.join("\n");
+      // Hoisted above every lane: the WS lanes attribute by the failing test's
+      // name when the shared client's stack has no probe frame to key off.
+      const ancestorText = assertion.ancestorTitles.join(" ");
+      const testName = `${ancestorText} > ${assertion.title}`;
       const parsed = parseDriftBlock(fullMessage);
       if (!parsed || parsed.diffs.length === 0) {
         // Check for the ws-realtime canary assertion shapes BEFORE classifying
@@ -856,11 +1175,15 @@ export function collectDriftEntries(results: VitestJsonResult): CollectResult {
         // provider `error` event, is a parseable critical drift (exit 2) — not
         // an opaque exit-5 quarantine. Recognized narrowly so a bare network
         // timeout (no error body) still falls through to the quarantine lane.
-        const wsFailure = parseWSHandshakeFailure(fullMessage);
+        const wsFailure = parseWSHandshakeFailure(fullMessage, testName);
         if (wsFailure !== null) {
-          const mapping = SURFACE_REGISTRY["openai-realtime"];
+          // Attribution follows the probe that reported the failure, resolved in
+          // parseWSHandshakeFailure. Hardcoding openai-realtime here is what made
+          // a rejected gemini-live handshake quarantine instead of routing to
+          // src/ws-gemini-live.ts.
+          const mapping = SURFACE_REGISTRY[wsFailure.surface];
           entries.push({
-            provider: "OpenAI Realtime",
+            provider: mapping.provider,
             scenario: "WS handshake",
             builderFile: mapping.builderFile,
             builderFunctions: mapping.builderFunctions,
@@ -870,12 +1193,14 @@ export function collectDriftEntries(results: VitestJsonResult): CollectResult {
               {
                 severity: "critical" as const,
                 issue:
-                  "OpenAI Realtime WS handshake did not complete — the live API returned an " +
+                  `${mapping.provider} WS handshake did not complete — the live API returned an ` +
                   `error event (${wsFailure.errorType}/${wsFailure.errorCode}) and the expected ` +
-                  "session lifecycle event never arrived. The realtime session config sent by the " +
+                  "session lifecycle event never arrived. The session config sent by the " +
                   `probe/mock likely drifted from the live protocol. Error: ${wsFailure.errorMessage}`,
-                path: `session.${wsFailure.errorCode}`,
-                expected: "(handshake completes: session.created/updated received)",
+                // Display only — the delta key is the explicit `id` below, so this
+                // string is free to be provider-neutral without moving any key.
+                path: `handshake.${wsFailure.errorCode}`,
+                expected: "(handshake completes: the session lifecycle event is received)",
                 real: `error ${wsFailure.errorType}: ${wsFailure.errorMessage}`,
                 mock: "<no mock leg — live handshake probe>",
                 id: `ws-handshake:${wsFailure.errorCode}`,
@@ -884,12 +1209,95 @@ export function collectDriftEntries(results: VitestJsonResult): CollectResult {
           });
           continue;
         }
+
+        // A session the provider ENDED. Split by what the CLOSE frame actually
+        // says, because the two halves are different evidence:
+        //   - a REFUSAL code names something WE sent as unacceptable → genuine,
+        //     attributable critical drift, exactly like an in-band error event;
+        //   - any other code says only that the peer left → a hang-up, which is
+        //     real and worth seeing but is not a finding about our payload.
+        // Neither half may fall through to the unparseable lane: this message
+        // states its own cause, and a stated cause routed to "manual triage" is
+        // the failure that blocked every drift PR in the first place.
+        const closed = parseWSServerClose(fullMessage);
+        if (closed !== null) {
+          const rawLocation = extractRawLocation(fullMessage);
+          const surface = resolveWSSurface(fullMessage, testName);
+          if (isRefusalCloseCode(closed.code)) {
+            if (surface === null) {
+              // A refusal we cannot attribute. Held for review rather than guessed
+              // at — the same rule the handshake lane follows, and the message says
+              // what is missing so the human is not left reading a stack trace.
+              quarantine.push({
+                provider: "unknown",
+                testName,
+                rawLocation,
+                message:
+                  `Provider REFUSED the WS session (close code ${closed.code}` +
+                  `${closed.reason ? `: ${closed.reason}` : ""}) but neither the stack frame nor ` +
+                  `the test name "${testName}" names a probe registered in WS_HANDSHAKE_PROBES, ` +
+                  `so the owning surface is unknown. Register the probe (its file, and a suite ` +
+                  `title that leads with its registry provider label) to attribute this ` +
+                  `automatically.\n${fullMessage}`,
+              });
+              continue;
+            }
+            const mapping = SURFACE_REGISTRY[surface];
+            entries.push({
+              provider: mapping.provider,
+              scenario: "WS session refused",
+              builderFile: mapping.builderFile,
+              builderFunctions: mapping.builderFunctions,
+              typesFile: mapping.typesFile ?? null,
+              sdkShapesFile: SDK_SHAPES_FILE,
+              diffs: [
+                {
+                  severity: "critical" as const,
+                  issue:
+                    `${mapping.provider} REFUSED the WS session — the provider closed the ` +
+                    `connection with RFC 6455 code ${closed.code} instead of completing the ` +
+                    `exchange. The stated reason is the diagnosis: ` +
+                    `${closed.reason || "(the frame carried no reason text)"}`,
+                  // Display only; the delta key is the explicit `id` below.
+                  path: `ws-close.${closed.code}`,
+                  expected: "(the session proceeds: the awaited message is received)",
+                  real: `close ${closed.code}${closed.reason ? `: ${closed.reason}` : ""}`,
+                  mock: "<no mock leg — live session probe>",
+                  // Keyed by close CODE, not by the reason prose: providers reword
+                  // reason text freely, and a key that moves on a reword would
+                  // re-report the same refusal as new-in-head on every PR.
+                  id: `ws-close:${closed.code}`,
+                },
+              ],
+            });
+            continue;
+          }
+          // Not a refusal — the peer hung up for its own reasons. Nothing was
+          // graded, so this shares the exit-6 lane: visible, alerted, and never a
+          // clean baseline, but not a finding and not a hard stop.
+          timeouts.push({ testName, rawLocation, message: fullMessage, serverClose: closed });
+          continue;
+        }
+
+        // A live leg that reached its wait budget having observed NOTHING. A
+        // recognized outcome with its own lane (exit 6) — see parseLiveTimeout
+        // for why it is neither drift nor unparseable. Checked AFTER the two
+        // recognizers above so a timeout that DID surface a provider error body
+        // stays the critical drift they classify it as.
+        const liveTimeout = parseLiveTimeout(fullMessage);
+        if (liveTimeout !== null) {
+          timeouts.push({
+            testName: `${assertion.ancestorTitles.join(" ")} > ${assertion.title}`,
+            rawLocation: extractRawLocation(fullMessage),
+            timeoutMs: liveTimeout.timeoutMs,
+            message: fullMessage,
+          });
+          continue;
+        }
+
         unparseable++;
         continue;
       }
-
-      const ancestorText = assertion.ancestorTitles.join(" ");
-      const testName = `${ancestorText} > ${assertion.title}`;
 
       // Resolution order (see WS-5 spec §3c):
       //
@@ -976,15 +1384,28 @@ export function collectDriftEntries(results: VitestJsonResult): CollectResult {
       for (const assertion of file.assertionResults) {
         if (assertion.status !== "failed" || assertion.failureMessages.length === 0) continue;
         const fullMessage = assertion.failureMessages.join("\n");
+        const testName = `${assertion.ancestorTitles.join(" ")} > ${assertion.title}`;
         const parsed = parseDriftBlock(fullMessage);
         if (!parsed || parsed.diffs.length === 0) {
           // Canary and WS-handshake shapes are handled above (they became
-          // entries) — only truly unparseable messages reach here.
+          // entries) — only truly unparseable messages reach here. The handshake
+          // check is given the SAME `testName` the first pass used so the two
+          // passes cannot reach different verdicts on the same input. (This pass
+          // only runs when there are zero entries, which already implies the
+          // handshake recognizer claimed nothing, so no input distinguishes the
+          // two arguments today; passing the real name keeps that a property of
+          // the precondition rather than of a value chosen here.)
           if (parseKnownModelsCanary(fullMessage) !== null) continue;
-          if (parseWSHandshakeFailure(fullMessage) !== null) continue;
+          if (parseWSHandshakeFailure(fullMessage, testName) !== null) continue;
+          // Recognized zero-observation live timeouts were claimed by the
+          // timeout lane in the pass above; they are not unparseable.
+          if (parseLiveTimeout(fullMessage) !== null) continue;
+          // A recognized server close was claimed above too — either as an
+          // attributed refusal, an explicit quarantine entry, or the exit-6 lane.
+          if (parseWSServerClose(fullMessage) !== null) continue;
           unparseableFailures.push({
             message: fullMessage,
-            testName: `${assertion.ancestorTitles.join(" ")} > ${assertion.title}`,
+            testName,
             rawLocation: extractRawLocation(fullMessage),
           });
         }
@@ -1037,7 +1458,32 @@ export function collectDriftEntries(results: VitestJsonResult): CollectResult {
     );
   }
 
-  return { entries, quarantine };
+  if (timeouts.length > 0) {
+    // Reported as what it is, with the one thing a reader needs to act on: the
+    // surface that went quiet. Explicitly NOT the quarantine wording — nothing
+    // here needs collector triage, so nobody should be sent looking for it.
+    console.warn(
+      `WARNING: ${timeouts.length} live drift leg(s) timed out having observed ZERO messages — ` +
+        `the live surface accepted the connection and then sent nothing. This is neither drift ` +
+        `nor unparseable output (exit 6, conclusion "live-timeout"): there is no collector fault ` +
+        `to triage. Check the surface below for an outage, a retired model, or a rejected session.`,
+    );
+    for (const t of timeouts) {
+      const why = t.serverClose
+        ? `session closed by the server (code ${t.serverClose.code}` +
+          `${t.serverClose.reason ? `: ${t.serverClose.reason}` : ", no reason given"})`
+        : `no messages in ${t.timeoutMs}ms`;
+      console.warn(`  - ${t.testName} — ${why} @ ${t.rawLocation || "<no frame>"}`);
+    }
+    console.warn(
+      `  If this persists across runs it is not a flake. A leg that reports NO close code and no ` +
+        `messages was met with genuine silence; one that reports a close code was hung up on, and ` +
+        `the code names who ended it. A close code in the refusal range is reported separately, as ` +
+        `attributed critical drift, not here.`,
+    );
+  }
+
+  return { entries, quarantine, timeouts };
 }
 
 // ---------------------------------------------------------------------------
@@ -1054,52 +1500,130 @@ export function collectDriftEntries(results: VitestJsonResult): CollectResult {
  * Returns drift entries in the same DriftEntry format as HTTP API drift,
  * or an empty array if the canonical repo is unavailable or tests pass.
  */
-function ensureAgUiRepo(): boolean {
-  const agUiPath = resolve("..", "ag-ui");
+/**
+ * The one file the AG-UI drift tests actually read out of the canonical
+ * checkout. A directory merely NAMED `ag-ui` proves nothing: if this file is
+ * absent the drift suites' `describe.skipIf` gates fire and the whole AG-UI leg
+ * silently reports NOTHING — which the collector would otherwise certify as a
+ * clean baseline. Presence of this file is the checkout's usability test.
+ */
+export const AGUI_CANONICAL_TYPES_RELPATH = "sdks/typescript/packages/core/src/types.ts";
+
+/**
+ * What a candidate `../ag-ui` directory actually is.
+ *
+ *   - `ok`         — a usable canonical checkout (the canonical types file is there).
+ *   - `absent`     — no such directory; cloning is the correct next step.
+ *   - `incomplete` — a directory named `ag-ui` EXISTS but does not contain the
+ *                    canonical sources. This is a stale/wrong/partial checkout,
+ *                    NOT a git or network failure, and must be reported as such:
+ *                    misreporting it sends the reader hunting a network problem
+ *                    that isn't there while the drift leg grades nothing.
+ */
+export type AgUiCheckoutStatus =
+  | { kind: "ok" }
+  | { kind: "absent" }
+  | { kind: "incomplete"; reason: string };
+
+/**
+ * Classify a candidate canonical AG-UI checkout. Pure w.r.t. the filesystem it
+ * is handed (no cloning, no mutation) so it is unit-testable against a temp dir.
+ */
+export function classifyAgUiCheckout(agUiPath: string): AgUiCheckoutStatus {
+  let isDir = false;
   try {
-    if (existsSync(agUiPath) && statSync(agUiPath).isDirectory()) {
-      return true;
-    }
+    isDir = existsSync(agUiPath) && statSync(agUiPath).isDirectory();
   } catch (statErr: unknown) {
     const msg = statErr instanceof Error ? statErr.message : String(statErr);
-    console.warn(`Could not stat AG-UI repo path: ${msg}`);
+    return {
+      kind: "incomplete",
+      reason: `could not stat AG-UI repo path ${agUiPath}: ${msg}`,
+    };
   }
-  {
-    // Not present — try to clone
-    console.log("AG-UI canonical repo not found. Cloning...");
-    try {
-      execSync("git clone --depth 1 https://github.com/ag-ui-protocol/ag-ui.git ../ag-ui", {
-        encoding: "utf-8",
-        stdio: ["pipe", "pipe", "pipe"],
-        timeout: 60_000,
-      });
-      console.log("AG-UI repo cloned successfully.");
-      return true;
-    } catch (cloneErr: unknown) {
-      const msg = cloneErr instanceof Error ? cloneErr.message : String(cloneErr);
-      console.warn(`Could not clone AG-UI repo: ${msg}`);
-      console.warn("AG-UI schema drift detection will be skipped.");
-      return false;
-    }
+  if (!isDir) return { kind: "absent" };
+  if (!existsSync(resolve(agUiPath, AGUI_CANONICAL_TYPES_RELPATH))) {
+    return {
+      kind: "incomplete",
+      reason:
+        `${agUiPath} exists but ${AGUI_CANONICAL_TYPES_RELPATH} is missing — the canonical ` +
+        `AG-UI checkout is STALE or INCOMPLETE. This is not a git/network failure: remove the ` +
+        `directory and re-clone (git clone --depth 1 https://github.com/ag-ui-protocol/ag-ui.git).`,
+    };
   }
+  return { kind: "ok" };
 }
 
-function runAgUiDriftTests(): VitestJsonResult | null {
-  if (!ensureAgUiRepo()) return null;
+function ensureAgUiRepo(): boolean {
+  const agUiPath = resolve("..", "ag-ui");
+  const status = classifyAgUiCheckout(agUiPath);
+  if (status.kind === "ok") return true;
+  if (status.kind === "incomplete") {
+    // N5: do NOT proceed. Running the drift suites against an unusable checkout
+    // makes every AG-UI assertion skip, and a leg that graded nothing must never
+    // be able to certify AG-UI as drift-free.
+    console.warn(`AG-UI canonical checkout unusable: ${status.reason}`);
+    console.warn("AG-UI schema drift detection will be skipped.");
+    return false;
+  }
 
+  // Not present — try to clone
+  console.log("AG-UI canonical repo not found. Cloning...");
   try {
-    const stdout = execSync(
-      `npx vitest run ${AGUI_DRIFT_TEST} --config vitest.config.drift.ts --reporter=json`,
-      {
-        encoding: "utf-8",
-        stdio: ["pipe", "pipe", "pipe"],
-        maxBuffer: 50 * 1024 * 1024,
-      },
+    execSync("git clone --depth 1 https://github.com/ag-ui-protocol/ag-ui.git ../ag-ui", {
+      encoding: "utf-8",
+      stdio: ["pipe", "pipe", "pipe"],
+      timeout: 60_000,
+    });
+  } catch (cloneErr: unknown) {
+    const msg = cloneErr instanceof Error ? cloneErr.message : String(cloneErr);
+    console.warn(`Could not clone AG-UI repo: ${msg}`);
+    console.warn("AG-UI schema drift detection will be skipped.");
+    return false;
+  }
+  // A clone that "succeeded" but still lacks the canonical sources is the same
+  // unusable checkout as above — re-verify rather than assume.
+  const afterClone = classifyAgUiCheckout(agUiPath);
+  if (afterClone.kind !== "ok") {
+    console.warn(
+      `AG-UI repo cloned but the checkout is still unusable: ` +
+        `${afterClone.kind === "incomplete" ? afterClone.reason : `${agUiPath} is absent`}`,
     );
-    const result = parseVitestOutput(stdout, "AG-UI drift JSON parse of successful run failed");
-    if (result) return result;
-    // Tests passed, no failures — return empty result
-    return { testResults: [] };
+    console.warn("AG-UI schema drift detection will be skipped.");
+    return false;
+  }
+  console.log("AG-UI repo cloned successfully.");
+  return true;
+}
+
+/** How the AG-UI leg shells out. Injectable so the parse contract is testable. */
+export type VitestExec = (command: string) => string;
+
+const defaultAgUiExec: VitestExec = (command) =>
+  execSync(command, {
+    encoding: "utf-8",
+    stdio: ["pipe", "pipe", "pipe"],
+    maxBuffer: 50 * 1024 * 1024,
+  });
+
+/**
+ * Run the AG-UI drift lane and return its vitest JSON.
+ *
+ * `null` means the leg could not run at all (infra) — the caller maps that to
+ * the collector's exit-1 "skipped" lane.
+ *
+ * FAIL-CLOSED (twin symmetry): a ZERO-exit run whose stdout cannot be parsed as
+ * vitest JSON THROWS, exactly as the HTTP twin `runDriftTests()` does. It used
+ * to `return { testResults: [] }` — an empty result the collector reads as "no
+ * failures", i.e. exit 0 / `conclusion: "clean"` — so a lane that produced
+ * garbage instead of a report certified AG-UI as drift-free. The two legs face
+ * the same condition and must not disagree about whether it is clean.
+ */
+export function runAgUiVitest(exec: VitestExec = defaultAgUiExec): VitestJsonResult | null {
+  let stdout: string;
+  try {
+    stdout = exec(
+      `npx vitest run ${AGUI_DRIFT_TEST_FILTER} --config vitest.config.drift.ts --reporter=json`,
+    );
   } catch (err: unknown) {
     if (hasStdout(err)) {
       const result = parseVitestOutput(err.stdout, "AG-UI drift JSON parse of failed run");
@@ -1109,6 +1633,14 @@ function runAgUiDriftTests(): VitestJsonResult | null {
     console.warn(`AG-UI schema drift tests failed to run: ${msg}`);
     return null;
   }
+  const result = parseVitestOutput(stdout, "AG-UI drift JSON parse of successful run failed");
+  if (result) return result;
+  throw new Error("AG-UI drift tests passed but produced unparseable output");
+}
+
+function runAgUiDriftTests(): VitestJsonResult | null {
+  if (!ensureAgUiRepo()) return null;
+  return runAgUiVitest();
 }
 
 /**
@@ -1121,9 +1653,26 @@ function runAgUiDriftTests(): VitestJsonResult | null {
  *
  * These are converted to DriftEntry objects that point at `src/agui-types.ts`
  * as the builder file (the file that needs fixing).
+ *
+ * FAIL-CLOSED INVARIANT (W5/N1): a FAILED AG-UI assertion this function cannot
+ * structurally interpret MUST NOT vanish. Previously any failure that matched
+ * none of the recognizers above was dropped — no entry, no counter, no warning —
+ * so a genuinely failing assertion in `agui-schema.drift.ts` (e.g. `should parse
+ * aimock event types`, whose bare `expect` message matches none of the three
+ * shapes) produced zero entries, exit 0 and `conclusion: "clean"`. The same went
+ * for a FAILED assertion carrying no message at all. Every such failure is now returned
+ * as a `QuarantineEntry`, reusing the collector's EXISTING quarantine/exit-5
+ * lane — the same "held for review, never silently swallowed" contract the HTTP
+ * leg already uses. Note this is per-assertion and UNCONDITIONAL: unlike the
+ * HTTP leg's `entries.length === 0`-gated rescue, an unrecognized AG-UI failure
+ * survives a mixed run in which other failures DID parse.
  */
-function collectAgUiDriftEntries(results: VitestJsonResult): DriftEntry[] {
+export function collectAgUiDriftEntries(results: VitestJsonResult): {
+  entries: DriftEntry[];
+  quarantine: QuarantineEntry[];
+} {
   const entries: DriftEntry[] = [];
+  const quarantine: QuarantineEntry[] = [];
 
   // Accumulate all diffs across assertions into a single entry per scenario
   const missingTypesDiffs: ParsedDiff[] = [];
@@ -1132,7 +1681,23 @@ function collectAgUiDriftEntries(results: VitestJsonResult): DriftEntry[] {
   for (const file of results.testResults) {
     for (const assertion of file.assertionResults) {
       if (assertion.status !== "failed") continue;
-      if (assertion.failureMessages.length === 0) continue;
+
+      const testNameForQuarantine =
+        `${assertion.ancestorTitles.join(" ")} > ${assertion.title}`.trim();
+
+      if (assertion.failureMessages.length === 0) {
+        // A FAILED assertion carrying no message is the least interpretable
+        // failure there is — the collector cannot even see what broke. Skipping
+        // it read as exit 0 / "clean", which is the same fail-open the
+        // quarantine lane below exists to close, so it takes the same lane.
+        quarantine.push({
+          provider: "AG-UI",
+          testName: testNameForQuarantine,
+          rawLocation: "",
+          message: "AG-UI drift assertion failed with no failure message reported by vitest.",
+        });
+        continue;
+      }
 
       const fullMessage = assertion.failureMessages.join("\n");
       const testName = assertion.title || assertion.ancestorTitles.join(" > ");
@@ -1178,11 +1743,11 @@ function collectAgUiDriftEntries(results: VitestJsonResult): DriftEntry[] {
       // If THIS assertion did not extract any structured data, try a generic fallback
       const thisAssertionExtracted =
         missingTypesDiffs.length > missingTypesBefore || fieldDriftDiffs.length > fieldDriftBefore;
-      if (
+      const genericCritical =
         !thisAssertionExtracted &&
         (fullMessage.includes("Missing event types") ||
-          fullMessage.includes("Critical field drift"))
-      ) {
+          fullMessage.includes("Critical field drift"));
+      if (genericCritical) {
         // Generic critical failure from the ag-ui schema drift test
         missingTypesDiffs.push({
           severity: "critical",
@@ -1191,6 +1756,20 @@ function collectAgUiDriftEntries(results: VitestJsonResult): DriftEntry[] {
           expected: "(see test output)",
           real: "(see test output)",
           mock: "(see test output)",
+        });
+      }
+
+      if (!thisAssertionExtracted && !genericCritical) {
+        // The fail-closed lane. This assertion FAILED and none of the shapes
+        // above claimed it, so the collector cannot say what drifted — but it
+        // absolutely must not say "clean". Held for review (exit 5), with the
+        // raw pre-strip frame so a human can find the assertion, exactly as the
+        // HTTP leg quarantines its unmappable failures.
+        quarantine.push({
+          provider: "AG-UI",
+          testName: testNameForQuarantine,
+          rawLocation: extractRawLocation(fullMessage),
+          message: fullMessage,
         });
       }
     }
@@ -1220,7 +1799,16 @@ function collectAgUiDriftEntries(results: VitestJsonResult): DriftEntry[] {
     });
   }
 
-  return entries;
+  if (quarantine.length > 0) {
+    console.warn(
+      `WARNING: ${quarantine.length} AG-UI drift failure(s) could not be interpreted by the ` +
+        `collector — quarantined for review (exit 5), NOT reported as clean:`,
+    );
+    for (const q of quarantine)
+      console.warn(`  - ${q.testName} @ ${q.rawLocation || "<no frame>"}`);
+  }
+
+  return { entries, quarantine };
 }
 
 // ---------------------------------------------------------------------------
@@ -1249,10 +1837,17 @@ export function computeExitCode(
   criticalCount: number,
   quarantineCount: number,
   agUiSkipped: boolean,
-): 0 | 1 | 2 | 5 {
+  timeoutCount: number = 0,
+): 0 | 1 | 2 | 5 | 6 {
   if (criticalCount > 0) return 2;
   if (quarantineCount > 0) return 5;
   if (agUiSkipped) return 1;
+  // 6 — every leg that failed did so by observing nothing at all. Distinct from
+  // 5 so a silent live surface is never reported as a collector fault needing
+  // manual triage, and distinct from 0 so it is never a clean baseline: the legs
+  // that timed out graded NOTHING, and a run that graded nothing must not be
+  // able to certify that surface as drift-free.
+  if (timeoutCount > 0) return 6;
   return 0;
 }
 
@@ -1262,7 +1857,7 @@ export function computeExitCode(
  * `report.conclusion` directly. Only exit 0 ("clean") is a reusable baseline;
  * "critical"/"quarantine" (and the exit-1 "skipped" case) are not.
  */
-export function conclusionForExitCode(exitCode: 0 | 1 | 2 | 5): string {
+export function conclusionForExitCode(exitCode: 0 | 1 | 2 | 5 | 6): string {
   switch (exitCode) {
     case 0:
       return "clean";
@@ -1270,6 +1865,11 @@ export function conclusionForExitCode(exitCode: 0 | 1 | 2 | 5): string {
       return "critical";
     case 5:
       return "quarantine";
+    case 6:
+      // NOT in drift-delta's REUSABLE_CONCLUSIONS, deliberately: a run whose
+      // legs observed nothing cannot serve as a baseline that says they were
+      // clean.
+      return "live-timeout";
     default:
       return "skipped";
   }
@@ -1298,25 +1898,30 @@ function main(): void {
   const agUiResults = runAgUiDriftTests();
   const agUiSkipped = agUiResults === null;
   let agUiEntries: DriftEntry[] = [];
+  let agUiQuarantine: QuarantineEntry[] = [];
   if (agUiResults) {
     console.log("Collecting AG-UI schema drift entries...");
-    agUiEntries = collectAgUiDriftEntries(agUiResults);
+    const agUiResult = collectAgUiDriftEntries(agUiResults);
+    agUiEntries = agUiResult.entries;
+    agUiQuarantine = agUiResult.quarantine;
   } else {
     console.warn("WARNING: AG-UI schema drift tests could not run — results will be incomplete.");
   }
 
   const entries = [...httpEntries, ...agUiEntries];
-  const quarantine = httpResult.quarantine;
+  const quarantine = [...httpResult.quarantine, ...agUiQuarantine];
+  const timeouts = httpResult.timeouts;
 
   const criticalCount = entries.reduce(
     (sum, e) => sum + e.diffs.filter((d) => d.severity === "critical").length,
     0,
   );
   const quarantineCount = quarantine.length;
+  const timeoutCount = timeouts.length;
 
   // Compute the exit code BEFORE writing so the report can carry the coarse
   // `conclusion` derived from it (base-report reuse contract).
-  const exitCode = computeExitCode(criticalCount, quarantineCount, agUiSkipped);
+  const exitCode = computeExitCode(criticalCount, quarantineCount, agUiSkipped, timeoutCount);
 
   const timestamp = new Date().toISOString();
   const report: DriftReport = {
@@ -1327,6 +1932,7 @@ function main(): void {
     conclusion: conclusionForExitCode(exitCode),
     entries,
     ...(quarantine.length > 0 ? { quarantine } : {}),
+    ...(timeouts.length > 0 ? { timeouts } : {}),
   };
 
   try {
@@ -1342,10 +1948,12 @@ function main(): void {
     console.log(`  AG-UI schema entries: SKIPPED (could not run tests)`);
   } else {
     console.log(`  AG-UI schema entries: ${agUiEntries.length}`);
+    console.log(`  AG-UI uninterpretable failures (quarantined): ${agUiQuarantine.length}`);
   }
   console.log(`  Total entries: ${entries.length}`);
   console.log(`  Critical diffs: ${criticalCount}`);
   console.log(`  Quarantined failures: ${quarantineCount}`);
+  console.log(`  Live timeouts (zero observations): ${timeoutCount}`);
 
   switch (exitCode) {
     case 2:
@@ -1355,6 +1963,13 @@ function main(): void {
     case 5:
       console.warn(`Exiting with code 5 (${quarantineCount} failure(s) quarantined for review).`);
       process.exit(5);
+    // eslint-disable-next-line no-fallthrough
+    case 6:
+      console.warn(
+        `Exiting with code 6 (${timeoutCount} live leg(s) timed out with zero observations — ` +
+          `no drift graded on those surfaces; NOT a collector fault).`,
+      );
+      process.exit(6);
     // eslint-disable-next-line no-fallthrough
     case 1:
       console.warn("Exiting with code 1 (AG-UI drift detection was skipped — infra failure).");

@@ -140,12 +140,12 @@ describe("C4: checkDeprecatedFamiliesLive (infra-error short-circuit via isInfra
 
 describe("C4: isFamilyStillReferenced (real source-tree ref-scan, zero-LLM)", () => {
   it("finds a real reference (gpt-4 and gpt-4o are both referenced in src/server.ts)", () => {
-    expect(isFamilyStillReferenced("gpt-4", "openai")).toBe(true);
-    expect(isFamilyStillReferenced("gpt-4o", "openai")).toBe(true);
+    expect(isFamilyStillReferenced("gpt-4")).toBe(true);
+    expect(isFamilyStillReferenced("gpt-4o")).toBe(true);
   });
 
   it("reports zero-reference for a synthetic family that appears nowhere in src/", () => {
-    expect(isFamilyStillReferenced("zzz-totally-fictional-family-not-real", "openai")).toBe(false);
+    expect(isFamilyStillReferenced("zzz-totally-fictional-family-not-real")).toBe(false);
   });
 
   it("does not false-positive from being a strict substring of a longer live id", () => {
@@ -154,7 +154,7 @@ describe("C4: isFamilyStillReferenced (real source-tree ref-scan, zero-LLM)", ()
     // not confuse the two. gpt-4 IS separately, exactly referenced in
     // DEFAULT_MODELS (asserted above) — this confirms the match is a real
     // boundary hit, not a substring artifact.
-    expect(isFamilyStillReferenced("gpt-4-turbo-nonexistent-suffix", "openai")).toBe(false);
+    expect(isFamilyStillReferenced("gpt-4-turbo-nonexistent-suffix")).toBe(false);
   });
 });
 
@@ -382,6 +382,9 @@ describe("full live /models wave is fully classified (2026-07-16 drift)", () => 
       "gemini-3.5-flash",
       "gemini-3.5-flash-lite",
       "gemini-3.6-flash",
+      "gemini-3.7-flash",
+      // Restricted EAP surface — explicit exclude (text-capable, but pre-GA)
+      "gemini-3.7-flash-video-understanding-eap",
       // Preview text tiers — auto-excluded by the -preview pattern rule
       "gemini-3-flash-preview",
       "gemini-3-pro-preview",
@@ -399,6 +402,11 @@ describe("full live /models wave is fully classified (2026-07-16 drift)", () => 
       // image / audio / tts / video / music / robotics / embeddings
       "gemini-2.5-flash-image",
       "gemini-2.5-flash-native-audio-latest",
+      // 2026-08-26/27 GA line (run 33296393200): speech-to-text pair + the
+      // conversational video-generation tier — all explicit excludes
+      "gemini-3.5-transcribe",
+      "gemini-3.5-transcribe-live",
+      "gemini-omni-1.1-flash",
       "gemini-2.5-flash-preview-tts", // explicit exclude (-preview-tts)
       "gemini-2.5-pro-preview-tts", // explicit exclude (-preview-tts)
       "gemini-3-pro-image",
