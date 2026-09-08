@@ -343,6 +343,8 @@ export const ADOPTER_DISPLAY: Record<string, AdopterDisplay> = {
   "Zoo-Code-Org/Zoo-Code": { name: "Zoo Code", url: "https://www.zoocode.dev" },
   "BodhiSearch/BodhiApp": { name: "Bodhi", url: "https://getbodhi.app" },
   "liveloveapp/hashbrown": { name: "Hashbrown", url: "https://www.hashbrown.dev" },
+  "octelium/octelium": { name: "Octelium", url: "https://octelium.com" },
+  "supabitapp/supaterm": { name: "Supaterm", url: "https://supaterm.com" },
 };
 
 /**
