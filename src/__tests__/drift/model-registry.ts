@@ -92,6 +92,19 @@ export const includeFamilies: Record<Provider, Set<string>> = {
     "gpt-5.6-luna",
     "gpt-5.6-sol",
     "gpt-5.6-terra",
+    // gpt-6 named variant (text chat), first listed 2026-08-27. Classified on a
+    // DECLARED-CAPABILITY probe, not on the name — "astra" carries no modality
+    // signal, and the /v1/models listing exposes none either (id / owned_by /
+    // created only), so shape alone could not decide this. A minimal
+    // /v1/chat/completions call returns 200 with `finish_reason: "stop"` and a
+    // real assistant turn, byte-for-byte the same shape the already-included
+    // `gpt-5.6-luna` returns; the negative control `whisper-1` is refused on the
+    // same endpoint with "This is not a chat model". So it is plain text chat,
+    // the surface aimock mocks.
+    //
+    // Decision: INCLUDE, recorded in
+    // drift-proposals/openai-gpt-6-astra-new-family.md.
+    "gpt-6-astra",
     // Codex line (coding chat; text output)
     "gpt-5-codex",
     "gpt-5.1-codex",
@@ -135,6 +148,18 @@ export const includeFamilies: Record<Provider, Set<string>> = {
     // the forward-looking rationale for the exclude-by-rule patterns below,
     // PREVIEW_FAMILY / GEMMA_FAMILY).
     "claude-fable-5",
+    // Point release of the already-included `claude-fable-5`, exactly as
+    // `claude-opus-4-1` is of `claude-opus-4`. Anthropic's /v1/models carries no
+    // capability field at all (id / display_name / created_at only), so the
+    // capability probe available for the OpenAI and Gemini entries has no
+    // equivalent here; the argument is the same one commit 72f85f8 used for
+    // `claude-opus-5`. The canary reported exactly ONE unclassified anthropic
+    // family this run, so every other live id normalized into this set — i.e.
+    // the whole live listing is text-chat Claude families plus this one.
+    //
+    // Decision: INCLUDE, recorded in
+    // drift-proposals/anthropic-claude-fable-5-1-new-family.md.
+    "claude-fable-5-1",
   ]),
   gemini: familySet("gemini", [
     // Gemini 2.0 / 2.5 text families
@@ -149,6 +174,18 @@ export const includeFamilies: Record<Provider, Set<string>> = {
     "gemini-3.5-flash-lite",
     "gemini-3.6-flash",
     "gemini-3.7-flash",
+    // Stable GA text tier. Google's live /models entry declares
+    // `supportedGenerationMethods: [generateContent, countTokens,
+    // createCachedContent, batchGenerateContent]` — set-identical to the
+    // already-included `gemini-3.7-flash`, `gemini-3.6-flash`, `gemini-3.5-flash`
+    // — with `displayName: "Gemini 3.8 Flash"` and no preview, experimental,
+    // confidential or EAP marker. No `bidiGenerateContent` (not a Live /
+    // native-audio surface), no `embedContent`, no `predict`. Next release in the
+    // flash line aimock already mocks at 3.5 through 3.7.
+    //
+    // Decision: INCLUDE, recorded in
+    // drift-proposals/gemini-gemini-3.8-flash-new-family.md.
+    "gemini-3.8-flash",
   ]),
 };
 
@@ -351,6 +388,26 @@ export const excludeFamilies: Record<Provider, Set<string>> = {
     // Decision: EXCLUDE, recorded in
     // drift-proposals/gemini-gemini-3.7-flash-video-understanding-eap-new-family.md.
     "gemini-3.7-flash-video-understanding-eap",
+    // Lyria 3.5, the GA tier of Google's music-generation line. Non-text
+    // generative media, same category as the imagen-* / veo-* /
+    // gemini-omni-1.1-flash entries.
+    //
+    // This one is the sharpest case yet for classifying on the model card rather
+    // than on `supportedGenerationMethods` ALONE: it declares
+    // `[generateContent, countTokens]`, so a methods-only rule would have called
+    // it text-capable and argued INCLUDE. Its own live entry settles it —
+    // `displayName: "Lyria 3.5"`, `description: "Music Generation model"`. It
+    // emits audio, not a text turn, so it can never be text-generation drift.
+    // (Mirrors `gemini-omni-1.1-flash` above, where the name argued the wrong way
+    // and the card decided.)
+    //
+    // Its `-preview` siblings `lyria-3-clip-preview` and `lyria-3-pro-preview`
+    // are already auto-excluded by PREVIEW_FAMILY; this GA id carries no
+    // `-preview` token, so that rule cannot reach it and it must be enumerated.
+    //
+    // Decision: EXCLUDE, recorded in
+    // drift-proposals/gemini-lyria-3.5-new-family.md.
+    "lyria-3.5",
     // NOTE: every `-preview` family (gemini-3.x preview tiers, deep-research
     // previews, antigravity-preview-05, computer-use-preview-10, image/tts/robotics
     // previews, lyria/veo/nano-banana previews, gemini-embedding-2-preview, …) is
