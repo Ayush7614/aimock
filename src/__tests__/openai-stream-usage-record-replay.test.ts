@@ -17,8 +17,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { collapseOpenAISSE } from "../stream-collapse.js";
 import { createServer, type ServerInstance } from "../server.js";
-import { validateFixtures } from "../fixture-loader.js";
-import type { Fixture, FixtureFile, SSEChunk, TextResponse } from "../types.js";
+import { entryToFixture, validateFixtures } from "../fixture-loader.js";
+import type { Fixture, FixtureFile, FixtureFileEntry, SSEChunk, TextResponse } from "../types.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -73,8 +73,16 @@ function createUpstream(
   });
 }
 
-/** The single fixture the recorder wrote into `dir`. */
-function readRecordedFixture(dir: string): Fixture {
+/**
+ * The single fixture ENTRY the recorder wrote into `dir`.
+ *
+ * Returns `FixtureFileEntry` — the on-disk JSON shape — not the runtime
+ * `Fixture`. They are different types (`FixtureFile.fixtures` is
+ * `FixtureFileEntry[]`), and the only caller that needs a runtime fixture
+ * converts with `entryToFixture`, exactly as the control API does when it
+ * accepts fixtures over the wire.
+ */
+function readRecordedFixture(dir: string): FixtureFileEntry {
   const files = readdirSync(dir).filter((f) => f.endsWith(".json"));
   expect(files).toHaveLength(1);
   const file = JSON.parse(readFileSync(join(dir, files[0]), "utf-8")) as FixtureFile;
@@ -274,7 +282,9 @@ describe("recorder persists provider usage (#368)", () => {
       native_tokens_completion: 550,
     });
     // A fixture the recorder writes must always pass load-time validation.
-    expect(validateFixtures([fixture]).filter((r) => r.severity === "error")).toEqual([]);
+    expect(
+      validateFixtures([entryToFixture(fixture)]).filter((r) => r.severity === "error"),
+    ).toEqual([]);
   });
 
   it("writes usage from a NON-streaming completion envelope too", async () => {
@@ -369,7 +379,9 @@ describe("recorder persists provider usage (#368)", () => {
 
     const fixture = readRecordedFixture(tmpDir);
     expect((fixture.response as TextResponse).usage).toEqual({ prompt_tokens: 3 });
-    expect(validateFixtures([fixture]).filter((r) => r.severity === "error")).toEqual([]);
+    expect(
+      validateFixtures([entryToFixture(fixture)]).filter((r) => r.severity === "error"),
+    ).toEqual([]);
   });
 });
 
@@ -458,7 +470,7 @@ describe("replay of recorded usage (#368)", () => {
     });
     await new Promise<void>((resolve) => recorder.server.close(() => resolve()));
 
-    instance = await createServer([readRecordedFixture(tmpDir)]);
+    instance = await createServer([entryToFixture(readRecordedFixture(tmpDir))]);
     const res = await httpPost(`${instance.url}${OR}`, {
       model: "openai/gpt-4o",
       messages: [{ role: "user", content: "hi" }],
