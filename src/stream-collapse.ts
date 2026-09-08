@@ -122,6 +122,22 @@ export interface CollapseResult {
    */
   redactedThinking?: string[];
   webSearches?: string[];
+  /**
+   * The provider-reported `usage` object from the stream's final usage frame,
+   * captured VERBATIM (#368). OpenAI-compatible streams (including OpenRouter)
+   * close with a `chat.completion.chunk` whose `choices` is empty and whose
+   * `usage` carries the real token counts — plus, on OpenRouter,
+   * `cost` / `cost_details` / `native_tokens_*`. Collapsing dropped that frame,
+   * so a recorded fixture could only ever replay estimated (`ceil(len/4)`) token
+   * counts and never a provider-reported cost. Last-usage-wins: a stream that
+   * emits several usage frames keeps the final one. Absent when the upstream
+   * stream carried no usage (e.g. `stream_options.include_usage` unset).
+   *
+   * Kept as a loose record because the field set is provider-specific and
+   * forward-extending; the recorder sanitizes it into the fixture
+   * `response.usage` override shape before persisting.
+   */
+  usage?: Record<string, unknown>;
   toolCalls?: ToolCall[];
   droppedChunks?: number;
   firstDroppedSample?: string;
@@ -372,6 +388,8 @@ export function collapseOpenAISSE(rawBody: string): CollapseResult {
   let transcriptUsage: Record<string, unknown> | undefined;
   let reasoning = "";
   const webSearchQueries: string[] = [];
+  // Provider-reported usage from the stream's final usage frame (#368).
+  let usage: Record<string, unknown> | undefined;
   let droppedChunks = 0;
   let firstDroppedSample: string | undefined;
   let harmonyUnparsed = false;
@@ -386,6 +404,14 @@ export function collapseOpenAISSE(rawBody: string): CollapseResult {
   // it (they are small per-stream counters), so synthetic keys never collide.
   let nextSyntheticIndex = 1_000_000;
   const idKeyMap = new Map<string, number>();
+  // The key of the most-recently-opened tool call (real, id-correlated, or
+  // synthetic). A delta that omits BOTH `index` and `id` carries no identity of
+  // its own; without a fallback each such fragment would mint a fresh synthetic
+  // key, splitting one call's arguments streamed across multiple bare deltas
+  // into separate tool-call entries with no drop/truncation signal. Correlate
+  // it to the last-open call instead (real OpenAI always streams `index`, so
+  // this only affects the degenerate index-and-id-less case).
+  let lastToolCallKey: number | undefined;
   // Cross-channel order atoms (#274), in stream arrival order. A toolCall atom
   // references the same accumulator object stored in toolCallMap, so later arg
   // deltas mutate the block in place.
@@ -429,7 +455,15 @@ export function collapseOpenAISSE(rawBody: string): CollapseResult {
           )
           .map((language) => ({ code: language.code as string }));
       }
-      if (parsed.usage && typeof parsed.usage === "object") {
+      // Only capture a real usage OBJECT. `typeof === "object"` alone admits an
+      // array (a type lie once cast to Record) and an empty `{}` (meaningless);
+      // guard against both, exactly like any chat usage capture would.
+      if (
+        parsed.usage &&
+        typeof parsed.usage === "object" &&
+        !Array.isArray(parsed.usage) &&
+        Object.keys(parsed.usage).length > 0
+      ) {
         transcriptUsage = parsed.usage as Record<string, unknown>;
       }
       continue;
@@ -552,6 +586,23 @@ export function collapseOpenAISSE(rawBody: string): CollapseResult {
       continue;
     }
 
+    // Final usage frame (#368). OpenAI-compatible providers close an
+    // include_usage stream with a `chat.completion.chunk` carrying EMPTY
+    // `choices` and a populated `usage` — the only frame with the real token
+    // counts, and on OpenRouter the only one with `cost`. Capture it BEFORE the
+    // empty-`choices` guard below, which would otherwise skip the frame
+    // entirely. Some providers also attach `usage` to the finish chunk (non-empty
+    // choices), so this runs for every chat chunk, last-NON-EMPTY-usage-wins:
+    // a trailing bare `usage: {}` frame must not clobber a good capture (#369).
+    if (
+      parsed.usage &&
+      typeof parsed.usage === "object" &&
+      !Array.isArray(parsed.usage) &&
+      Object.keys(parsed.usage).length > 0
+    ) {
+      usage = parsed.usage as Record<string, unknown>;
+    }
+
     const choices = parsed.choices as Array<Record<string, unknown>> | undefined;
     if (!choices || choices.length === 0) continue;
 
@@ -592,9 +643,17 @@ export function collapseOpenAISSE(rawBody: string): CollapseResult {
             index = nextSyntheticIndex++;
             idKeyMap.set(rawId, index);
           }
+        } else if (lastToolCallKey !== undefined) {
+          // No `index` AND no `id`: correlate to the last-open tool call so a
+          // call's arguments streamed across multiple bare deltas concatenate
+          // into one entry instead of fragmenting under fresh synthetic keys.
+          index = lastToolCallKey;
         } else {
           index = nextSyntheticIndex++;
         }
+        // Remember this key so a following index-and-id-less delta correlates
+        // to whichever call most recently opened.
+        lastToolCallKey = index;
 
         if (!toolCallMap.has(index)) {
           const created = {
@@ -692,6 +751,8 @@ export function collapseOpenAISSE(rawBody: string): CollapseResult {
       ...(reasoning ? { reasoning } : {}),
       // webSearches parity with the text-only return branch.
       ...(webSearchQueries.length > 0 ? { webSearches: webSearchQueries } : {}),
+      // Provider-reported usage parity with the text-only return branch (#368).
+      ...(usage ? { usage } : {}),
       ...(droppedChunks > 0 ? { droppedChunks } : {}),
       ...(firstDroppedSample ? { firstDroppedSample } : {}),
       ...(harmonyUnparsed ? { harmonyUnparsed: true } : {}),
@@ -713,6 +774,7 @@ export function collapseOpenAISSE(rawBody: string): CollapseResult {
     content,
     ...(reasoning ? { reasoning } : {}),
     ...(webSearchQueries.length > 0 ? { webSearches: webSearchQueries } : {}),
+    ...(usage ? { usage } : {}),
     ...(droppedChunks > 0 ? { droppedChunks } : {}),
     ...(firstDroppedSample ? { firstDroppedSample } : {}),
     ...(harmonyUnparsed ? { harmonyUnparsed: true } : {}),
@@ -1283,9 +1345,6 @@ export function collapseCohereSSE(rawBody: string): CollapseResult {
       } else {
         index = nextSyntheticIndex++;
       }
-      // Track the most-recent start key (real OR synthetic) so a following
-      // index-less delta correlates to whichever call just opened.
-      lastStartKey = index;
       const delta = parsed.delta as Record<string, unknown> | undefined;
       const message = delta?.message as Record<string, unknown> | undefined;
       const toolCalls = message?.tool_calls as Record<string, unknown> | undefined;
@@ -1297,6 +1356,13 @@ export function collapseCohereSSE(rawBody: string): CollapseResult {
           arguments: "",
         };
         toolCallMap.set(index, created);
+        // Track the most-recent start key (real OR synthetic) so a following
+        // index-less delta correlates to whichever call just opened. Advance it
+        // ONLY after confirming this start actually carried a tool_calls payload
+        // and created an entry; a payload-less start must not steal correlation
+        // from a prior valid start (which would miscount the next index-less
+        // delta as a dropped chunk).
+        lastStartKey = index;
         // Record the tool atom at the position its tool-call-start arrived; it
         // references `created` so later tool-call-delta args fill it in place.
         orderAtoms.push({ kind: "toolCall", ref: created });
@@ -1590,14 +1656,29 @@ export function collapseBedrockEventStream(rawBody: Buffer): CollapseResult {
       if (redactedData !== undefined) {
         redactedThinking.push(redactedData);
       }
-      if (block?.type === "tool_use" && index !== undefined) {
-        const created = {
-          id: (block.id as string) ?? "",
-          name: (block.name as string) ?? "",
-          arguments: "",
-        };
-        toolCallMap.set(index, created);
-        orderAtoms.push({ kind: "toolCall", ref: created });
+      if (block?.type === "tool_use") {
+        if (index !== undefined) {
+          const created = {
+            id: (block.id as string) ?? "",
+            name: (block.name as string) ?? "",
+            arguments: "",
+          };
+          toolCallMap.set(index, created);
+          orderAtoms.push({ kind: "toolCall", ref: created });
+        } else {
+          // A tool_use start with no block index cannot be keyed, so no later
+          // input_json_delta can ever correlate to it and the tool call's
+          // identity is silently lost. Account for it as a dropped chunk —
+          // matching the sibling uncorrelated arg-delta path below — rather
+          // than vanishing without a trace.
+          droppedChunks++;
+          if (droppedChunks === 1) {
+            firstDroppedSample = `tool_use content_block_start with no index — tool call identity lost: ${surrogateSafeSlice(
+              frameStr,
+              200,
+            )}`;
+          }
+        }
       }
       continue;
     }
@@ -1610,15 +1691,28 @@ export function collapseBedrockEventStream(rawBody: Buffer): CollapseResult {
         | number
         | undefined;
       const start = blockStart.start as Record<string, unknown> | undefined;
-      if (start?.toolUse && index !== undefined) {
-        const toolUse = start.toolUse as Record<string, unknown>;
-        const created = {
-          id: (toolUse.toolUseId as string) ?? "",
-          name: (toolUse.name as string) ?? "",
-          arguments: "",
-        };
-        toolCallMap.set(index, created);
-        orderAtoms.push({ kind: "toolCall", ref: created });
+      if (start?.toolUse) {
+        if (index !== undefined) {
+          const toolUse = start.toolUse as Record<string, unknown>;
+          const created = {
+            id: (toolUse.toolUseId as string) ?? "",
+            name: (toolUse.name as string) ?? "",
+            arguments: "",
+          };
+          toolCallMap.set(index, created);
+          orderAtoms.push({ kind: "toolCall", ref: created });
+        } else {
+          // Same accounting as the native path: an unkeyable toolUse start
+          // would lose its identity, so count it as a dropped chunk rather
+          // than dropping it silently.
+          droppedChunks++;
+          if (droppedChunks === 1) {
+            firstDroppedSample = `contentBlockStart toolUse with no index — tool call identity lost: ${surrogateSafeSlice(
+              frameStr,
+              200,
+            )}`;
+          }
+        }
       }
     }
 
@@ -1950,8 +2044,16 @@ export function collapseStreamingResponse(
   if (ct.includes("text/event-stream")) {
     const str = typeof body === "string" ? body : body.toString("utf8");
     switch (providerKey) {
+      // OpenRouter belongs here with OpenAI/Azure: it IS the OpenAI SSE wire
+      // format (it is the OpenAI-compatible gateway), and `openrouter` is a
+      // first-class RecordProviderKey set by every `/api/v1/chat/completions`
+      // record. Without this case it fell to the `default` arm, which collapsed
+      // it correctly but logged `unknown SSE provider "openrouter"` on EVERY
+      // recorded OpenRouter stream — telling users aimock does not recognize a
+      // provider it ships first-class support for.
       case "openai":
       case "azure":
+      case "openrouter":
         return collapseOpenAISSE(str);
       case "anthropic":
         return collapseAnthropicSSE(str);

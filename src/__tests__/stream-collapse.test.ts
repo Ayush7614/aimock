@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import {
   collapseOpenAISSE,
   collapseAnthropicSSE,
@@ -225,6 +225,27 @@ describe("collapseOpenAISSE", () => {
     expect(result.toolCalls).toHaveLength(1);
     expect(result.toolCalls![0].name).toBe("lookup");
     expect(result.toolCalls![0].arguments).toBe('{"q":"test"}');
+  });
+
+  it("does not let a trailing empty usage frame clobber a populated one (#369 F4)", () => {
+    const body = [
+      `data: ${JSON.stringify({
+        choices: [],
+        usage: { prompt_tokens: 11, completion_tokens: 5, total_tokens: 16 },
+      })}`,
+      "",
+      `data: ${JSON.stringify({ choices: [], usage: {} })}`,
+      "",
+      "data: [DONE]",
+      "",
+    ].join("\n");
+
+    const result = collapseOpenAISSE(body);
+    expect(result.usage).toEqual({
+      prompt_tokens: 11,
+      completion_tokens: 5,
+      total_tokens: 16,
+    });
   });
 });
 
@@ -749,6 +770,31 @@ describe("collapseStreamingResponse", () => {
     const result = collapseStreamingResponse("text/event-stream", "openai", buf);
     expect(result).not.toBeNull();
     expect(result!.content).toBe("buf-hi");
+  });
+
+  it("routes the openrouter provider key to the OpenAI collapser without warning", () => {
+    // OpenRouter is a first-class RecordProviderKey (set by every
+    // /api/v1/chat/completions record) and speaks the OpenAI SSE wire format.
+    // It must be a recognized case, not the unknown-provider fallback, which
+    // logged a misleading warning on every recorded OpenRouter stream.
+    const openrouterSse = [
+      'data: {"choices":[{"delta":{"content":"hi"}}]}',
+      "",
+      'data: {"choices":[],"usage":{"prompt_tokens":4,"completion_tokens":1,"cost":0.001}}',
+      "",
+      "data: [DONE]",
+      "",
+    ].join("\n");
+    const logger = { warn: vi.fn(), error: vi.fn(), info: vi.fn(), debug: vi.fn() };
+    const result = collapseStreamingResponse(
+      "text/event-stream",
+      "openrouter",
+      openrouterSse,
+      logger as unknown as Parameters<typeof collapseStreamingResponse>[3],
+    );
+    expect(result?.content).toBe("hi");
+    expect(result?.usage).toEqual({ prompt_tokens: 4, completion_tokens: 1, cost: 0.001 });
+    expect(logger.warn).not.toHaveBeenCalled();
   });
 
   it("unknown SSE provider key falls back to OpenAI SSE format", () => {
@@ -4849,5 +4895,171 @@ describe("stream block-order instrumentation (#274)", () => {
       const result = collapseGeminiInteractionsSSE(body);
       expect(result.blocks).toBeUndefined();
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Stream-collapse integrity: uncorrelated tool_use-start accounting (Bedrock)
+// ---------------------------------------------------------------------------
+
+describe("collapseBedrockEventStream uncorrelated tool_use start accounting", () => {
+  // A Bedrock native tool_use content_block_start with an undefined block index
+  // cannot be keyed, so it must be accounted as a dropped chunk (matching the
+  // sibling arg-delta path), never silently lose the tool call's identity.
+  it("native: tool_use content_block_start with no index is accounted, not silently lost", () => {
+    const frame = encodeEventStreamMessage("chunk", {
+      type: "content_block_start",
+      // No `index` — the tool call's identity cannot be keyed.
+      content_block: { type: "tool_use", id: "toolu_x", name: "get_weather", input: {} },
+    });
+    const result = collapseBedrockEventStream(Buffer.from(frame));
+    // Either captured or counted as dropped — but NOT silently vanished.
+    const captured = (result.toolCalls?.length ?? 0) > 0;
+    const accounted = (result.droppedChunks ?? 0) > 0;
+    expect(captured || accounted).toBe(true);
+    // Sibling accounting behavior: an unkeyable tool_use start is a dropped chunk.
+    expect(result.droppedChunks).toBe(1);
+  });
+
+  // The Converse contentBlockStart path shares the same `index !== undefined`
+  // guard and must account an unkeyable toolUse start too.
+  it("converse: toolUse contentBlockStart with no index is accounted, not silently lost", () => {
+    const frame = encodeEventStreamMessage("contentBlockStart", {
+      // No contentBlockIndex anywhere — the tool call cannot be keyed.
+      contentBlockStart: {
+        start: { toolUse: { toolUseId: "tu_1", name: "get_weather" } },
+      },
+    });
+    const result = collapseBedrockEventStream(Buffer.from(frame));
+    expect(result.droppedChunks).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Stream-collapse integrity: Cohere tool-call-start correlation ordering
+// ---------------------------------------------------------------------------
+
+describe("collapseCohereSSE tool-call-start correlation ordering", () => {
+  // A payload-less tool-call-start must NOT advance lastStartKey; otherwise a
+  // following index-less tool-call-delta is stolen away from the prior valid
+  // start and miscounted as a dropped chunk.
+  it("payload-less tool-call-start does not steal correlation from a prior start", () => {
+    const body = [
+      `event: tool-call-start`,
+      `data: ${JSON.stringify({
+        type: "tool-call-start",
+        index: 0,
+        delta: {
+          message: {
+            tool_calls: { id: "call_1", type: "function", function: { name: "fn", arguments: "" } },
+          },
+        },
+      })}`,
+      "",
+      // A start event carrying NO tool_calls payload and NO index.
+      `event: tool-call-start`,
+      `data: ${JSON.stringify({ type: "tool-call-start" })}`,
+      "",
+      // An index-less delta that should correlate to the prior valid start (0).
+      `event: tool-call-delta`,
+      `data: ${JSON.stringify({
+        type: "tool-call-delta",
+        delta: { message: { tool_calls: { function: { arguments: '{"x":1}' } } } },
+      })}`,
+      "",
+    ].join("\n");
+    const result = collapseCohereSSE(body);
+    expect(result.toolCalls).toHaveLength(1);
+    expect(result.toolCalls![0].arguments).toBe('{"x":1}');
+    expect(result.droppedChunks).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Stream-collapse integrity: OpenAI index-and-id-less tool-call correlation
+// ---------------------------------------------------------------------------
+
+describe("collapseOpenAISSE index-and-id-less tool-call correlation", () => {
+  // Arg deltas that omit BOTH index and id must fall back to the last-open
+  // tool-call key so one call's arguments streamed across multiple such deltas
+  // concatenate into one tool call instead of fragmenting.
+  it("arg deltas lacking both index and id concatenate into one tool call", () => {
+    const body = [
+      `data: ${JSON.stringify({
+        choices: [{ delta: { tool_calls: [{ function: { name: "foo", arguments: '{"a":' } }] } }],
+      })}`,
+      "",
+      `data: ${JSON.stringify({
+        choices: [{ delta: { tool_calls: [{ function: { arguments: "1}" } }] } }],
+      })}`,
+      "",
+      "data: [DONE]",
+      "",
+    ].join("\n");
+    const result = collapseOpenAISSE(body);
+    expect(result.toolCalls).toHaveLength(1);
+    expect(result.toolCalls![0].name).toBe("foo");
+    expect(result.toolCalls![0].arguments).toBe('{"a":1}');
+  });
+
+  // Distinct calls still separate when each carries its own id, and a trailing
+  // bare delta correlates to whichever call opened most recently.
+  it("bare delta correlates to the last-open call, not a merge of all calls", () => {
+    const body = [
+      `data: ${JSON.stringify({
+        choices: [
+          { delta: { tool_calls: [{ id: "a", function: { name: "fa", arguments: '{"x":1}' } }] } },
+        ],
+      })}`,
+      "",
+      `data: ${JSON.stringify({
+        choices: [
+          { delta: { tool_calls: [{ id: "b", function: { name: "fb", arguments: '{"y":' } }] } },
+        ],
+      })}`,
+      "",
+      `data: ${JSON.stringify({
+        choices: [{ delta: { tool_calls: [{ function: { arguments: "2}" } }] } }],
+      })}`,
+      "",
+      "data: [DONE]",
+      "",
+    ].join("\n");
+    const result = collapseOpenAISSE(body);
+    expect(result.toolCalls).toHaveLength(2);
+    expect(result.toolCalls![0]).toMatchObject({ name: "fa", arguments: '{"x":1}' });
+    expect(result.toolCalls![1]).toMatchObject({ name: "fb", arguments: '{"y":2}' });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Stream-collapse integrity: transcription usage capture guards
+// ---------------------------------------------------------------------------
+
+describe("collapseOpenAISSE transcription usage capture guards", () => {
+  // An array-valued usage is a type lie once cast to a Record — never capture it.
+  it("array-valued usage is not captured", () => {
+    const result = collapseOpenAISSE(
+      'data: {"type":"transcript.text.done","text":"hi","usage":[]}\n\n',
+    );
+    expect(result.transcription).toBeDefined();
+    expect(result.transcription!.usage).toBeUndefined();
+  });
+
+  // An empty usage object carries no information — never capture it.
+  it("empty usage object is not captured", () => {
+    const result = collapseOpenAISSE(
+      'data: {"type":"transcript.text.done","text":"hi","usage":{}}\n\n',
+    );
+    expect(result.transcription).toBeDefined();
+    expect(result.transcription!.usage).toBeUndefined();
+  });
+
+  // A real, non-empty usage object is still captured.
+  it("non-empty usage object is still captured", () => {
+    const result = collapseOpenAISSE(
+      'data: {"type":"transcript.text.done","text":"hi","usage":{"total_tokens":5}}\n\n',
+    );
+    expect(result.transcription!.usage).toEqual({ total_tokens: 5 });
   });
 });

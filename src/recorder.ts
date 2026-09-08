@@ -12,6 +12,7 @@ import type {
   RecordConfig,
   RecordedTimings,
   RecordProviderKey,
+  ResponseOverrides,
   ToolCall,
 } from "./types.js";
 import { getLastMessageByRole, getTextContent, currentTurnHasToolResult } from "./router.js";
@@ -691,6 +692,20 @@ export async function proxyAndRecord(
         `Harmony tokens present but unparseable — content preserved verbatim${collapsed.harmonyNote ? ` (${collapsed.harmonyNote})` : ""}`,
       );
     }
+    // Provider-reported usage captured from the stream's final usage frame
+    // (#368). Persisted on the text / toolCall fixture shapes so replay serves
+    // the REAL token counts instead of the `ceil(len/4)` estimate, and so
+    // OpenRouter's `usage.cost` round-trips to the replayed usage chunk /
+    // completion envelope. Omitted when the stream carried no usage, keeping
+    // every pre-#368 recorded fixture byte-identical. Transcription fixtures
+    // carry their own `usage` slot, so the transcription branch below is left
+    // untouched. The audio shape (`AudioResponse` in types.ts) has NO usage
+    // field, so the audio branch cannot carry `usage` at all — inert today (a
+    // collapse never yields both `audioB64` and a stream usage frame), but a
+    // future collapser that set both would drop the usage on the audio path
+    // with no compiler signal.
+    const collapsedUsage = sanitizeRecordedUsage(collapsed.usage);
+    const usageSpread = collapsedUsage ? { usage: collapsedUsage } : {};
     // Audio from streamed inlineData (e.g. Gemini SSE with audio parts).
     // A single Gemini turn can interleave audio with a functionCall and/or
     // text/thought parts; preserve those companion modalities so the tool call
@@ -753,6 +768,7 @@ export async function proxyAndRecord(
         ...reasoningSignatureSpread,
         ...redactedThinkingSpread,
         ...webSearchesSpread,
+        ...usageSpread,
       };
     } else {
       const reasoningSpread = collapsed.reasoning ? { reasoning: collapsed.reasoning } : {};
@@ -802,6 +818,7 @@ export async function proxyAndRecord(
             ...reasoningSignatureSpread,
             ...redactedThinkingSpread,
             ...webSearchesSpread,
+            ...usageSpread,
           };
         } else {
           fixtureResponse = {
@@ -810,6 +827,7 @@ export async function proxyAndRecord(
             ...reasoningSignatureSpread,
             ...redactedThinkingSpread,
             ...webSearchesSpread,
+            ...usageSpread,
           };
         }
       } else {
@@ -819,6 +837,7 @@ export async function proxyAndRecord(
           ...reasoningSignatureSpread,
           ...redactedThinkingSpread,
           ...webSearchesSpread,
+          ...usageSpread,
         };
       }
     }
@@ -1513,6 +1532,70 @@ function toToolCallArguments(raw: unknown): string {
 }
 
 /**
+ * `usage` sub-objects that carry numeric breakdowns rather than a scalar. The
+ * inner fields are NOT allowlisted here on purpose: the recorder keeps every
+ * finite-numeric inner field (documented or forward-compat), matching the
+ * load-time validator in fixture-loader.ts, whose index-signature escape hatch
+ * accepts undocumented numeric inner keys too. A `Set` (own-key membership via
+ * `.has()`, no prototype-chain walk) mirrors that validator's
+ * `new Set(Object.keys(...))` classification so anything this recorder writes
+ * loads cleanly.
+ */
+const USAGE_OBJECT_FIELDS: ReadonlySet<string> = new Set([
+  "cost_details",
+  "prompt_tokens_details",
+  "completion_tokens_details",
+]);
+
+/**
+ * Sanitize a provider-reported `usage` object into the fixture
+ * `response.usage` override shape (#368).
+ *
+ * The recorder persists real upstream usage so replay can serve the provider's
+ * ACTUAL token counts (instead of the `ceil(len/4)` estimate) and OpenRouter's
+ * `cost` — which previously never survived recording at all. Upstream usage is
+ * provider-specific and forward-extending, so this passes fields through rather
+ * than whitelisting them, but only in the shapes the fixture contract accepts:
+ *
+ * - numeric scalars (`prompt_tokens`, `cost`, `native_tokens_prompt`, …) — kept
+ * - `is_byok` boolean — kept
+ * - the documented breakdown objects — kept, with non-numeric inner fields
+ *   dropped (the load-time validator rejects those, and a fixture the recorder
+ *   writes must always load)
+ * - anything else (strings, arrays, nulls, unknown objects) — DROPPED, because
+ *   `fixture-loader.ts` errors on a non-numeric extra `usage` key and a recorded
+ *   fixture that fails validation is worse than one missing an exotic field
+ *
+ * Returns `undefined` when nothing survives, so the caller omits `usage`
+ * entirely and keeps pre-#368 fixtures byte-identical.
+ */
+export function sanitizeRecordedUsage(raw: unknown): ResponseOverrides["usage"] | undefined {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return undefined;
+  const out: Record<string, unknown> = {};
+  for (const [key, val] of Object.entries(raw as Record<string, unknown>)) {
+    if (val === undefined || val === null) continue;
+    if (USAGE_OBJECT_FIELDS.has(key)) {
+      if (typeof val !== "object" || val === null || Array.isArray(val)) continue;
+      const inner: Record<string, unknown> = {};
+      for (const [innerKey, innerVal] of Object.entries(val as Record<string, unknown>)) {
+        // Documented inner fields must be numeric (validator-enforced); undocumented
+        // ones are unvalidated, so pass them through only when numeric too — keeping
+        // the recorded object uniformly safe to re-load.
+        if (typeof innerVal === "number" && Number.isFinite(innerVal)) inner[innerKey] = innerVal;
+      }
+      if (Object.keys(inner).length > 0) out[key] = inner;
+      continue;
+    }
+    if (key === "is_byok") {
+      if (typeof val === "boolean") out[key] = val;
+      continue;
+    }
+    if (typeof val === "number" && Number.isFinite(val)) out[key] = val;
+  }
+  return Object.keys(out).length > 0 ? (out as ResponseOverrides["usage"]) : undefined;
+}
+
+/**
  * Detect the response format from the parsed upstream JSON and convert
  * it into an aimock FixtureResponse.
  */
@@ -1760,6 +1843,15 @@ function buildFixtureResponse(
             ? message.reasoning
             : undefined;
 
+      // Provider-reported usage from the non-streaming envelope (#368), at
+      // parity with the collapsed-stream path (both capture usage for
+      // OpenAI-compatible providers only — only `collapseOpenAISSE` sets
+      // `CollapseResult.usage`): replay then serves the real token counts rather
+      // than the `ceil(len/4)` estimate, and OpenRouter's `usage.cost` survives
+      // recording. Omitted when upstream sent no usage.
+      const openaiUsage = sanitizeRecordedUsage(obj.usage);
+      const usageSpread = openaiUsage ? { usage: openaiUsage } : {};
+
       if (hasToolCalls) {
         const toolCalls: ToolCall[] = (message.tool_calls as Array<Record<string, unknown>>).map(
           (tc) => {
@@ -1776,19 +1868,29 @@ function buildFixtureResponse(
             content: message.content as string,
             toolCalls,
             ...(openaiReasoning ? { reasoning: openaiReasoning } : {}),
+            ...usageSpread,
           };
         }
-        return { toolCalls, ...(openaiReasoning ? { reasoning: openaiReasoning } : {}) };
+        return {
+          toolCalls,
+          ...(openaiReasoning ? { reasoning: openaiReasoning } : {}),
+          ...usageSpread,
+        };
       }
       // Text content only
       if (hasContent) {
         return {
           content: message.content as string,
           ...(openaiReasoning ? { reasoning: openaiReasoning } : {}),
+          ...usageSpread,
         };
       }
       // Recognized OpenAI shape but empty content (e.g. content filtering, zero max_tokens)
-      return { content: "", ...(openaiReasoning ? { reasoning: openaiReasoning } : {}) };
+      return {
+        content: "",
+        ...(openaiReasoning ? { reasoning: openaiReasoning } : {}),
+        ...usageSpread,
+      };
     }
   }
 

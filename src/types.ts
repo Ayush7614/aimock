@@ -177,9 +177,12 @@ export interface FixtureMatch {
  * When total_tokens (or provider equivalent) is omitted, it is auto-computed
  * from the component fields.
  *
- * Provider support: OpenAI Chat (all 7), Responses API (5: no role,
- * systemFingerprint), Claude (5: no created, systemFingerprint),
- * Gemini (2: only finishReason, usage).
+ * Provider support: seven fields are common (id, created, model, usage,
+ * systemFingerprint, finishReason, role); provider and nativeFinishReason are
+ * OpenRouter-only and ignored elsewhere. OpenAI Chat honors the seven common
+ * fields; OpenRouter additionally honors provider/nativeFinishReason; Responses
+ * API (5: no role, systemFingerprint); Claude (5: no created,
+ * systemFingerprint); Gemini (2: only finishReason, usage).
  */
 export interface ResponseOverrides {
   id?: string;
@@ -232,6 +235,16 @@ export interface ResponseOverrides {
      * overridden (avoids asserting a fake BYOK state by default).
      */
     is_byok?: boolean;
+    /**
+     * Forward-compat escape hatch for provider usage fields aimock does not
+     * model (OpenRouter `native_tokens_prompt` / `native_tokens_completion`,
+     * future breakdowns, …). The recorder persists such fields when an upstream
+     * usage frame carries them, and OpenRouter-shaped replays pass any extra key
+     * through verbatim onto the emitted `usage` object. The load-time validator
+     * still requires extra scalars to be numbers (see fixture-loader.ts), so a
+     * typo'd field is caught rather than silently emitted as a string.
+     */
+    [key: string]: unknown;
   };
   systemFingerprint?: string;
   finishReason?: string;
@@ -790,6 +803,12 @@ export interface OpenRouterUsageExtras {
   };
   completion_tokens_details?: { reasoning_tokens: number; [key: string]: unknown };
   is_byok?: boolean;
+  /**
+   * Provider usage fields aimock does not model, passed through verbatim from a
+   * fixture's `response.usage` (typically written by the recorder from a real
+   * upstream usage frame — e.g. OpenRouter `native_tokens_prompt`).
+   */
+  [key: string]: unknown;
 }
 
 export interface SSEChunk {

@@ -93,6 +93,39 @@ export interface OpenRouterShaping {
 }
 
 /**
+ * `usage` keys that are already accounted for elsewhere and must therefore NOT
+ * be re-emitted through the forward-compat passthrough below: the canonical
+ * token counts (and their per-provider aliases), which `resolveUsage` folds into
+ * `prompt_tokens` / `completion_tokens` / `total_tokens` on the base usage
+ * object, plus every field this function shapes explicitly.
+ */
+const SHAPED_OR_CANONICAL_USAGE_KEYS = new Set([
+  "prompt_tokens",
+  "completion_tokens",
+  "total_tokens",
+  "input_tokens",
+  "output_tokens",
+  "promptTokenCount",
+  "candidatesTokenCount",
+  "totalTokenCount",
+  "cost",
+  "cost_details",
+  "prompt_tokens_details",
+  "completion_tokens_details",
+  "is_byok",
+]);
+
+/**
+ * Keys that must never flow through the passthrough assignment below: a
+ * JSON-parsed usage frame (fixtures are attacker-adjacent — they mirror upstream
+ * provider responses) can carry a real own `__proto__`/`constructor`/`prototype`
+ * key, and a plain `usageExtras[key] = value` for one of those hits the
+ * prototype setter, corrupting the emitted object's prototype chain instead of
+ * emitting a data field. Real providers never send these, so skipping is safe.
+ */
+const UNSAFE_PROTO_KEYS = new Set(["__proto__", "constructor", "prototype"]);
+
+/**
  * Resolve the shaping context from a fixture's response overrides and the
  * winning model slug. `provider` defaults to the winning slug's author;
  * `native_finish_reason` mirrors `finish_reason` unless overridden. `cost` and
@@ -133,6 +166,20 @@ export function resolveOpenRouterShaping(
   }
   if (u?.is_byok !== undefined) {
     usageExtras.is_byok = u.is_byok;
+  }
+  // Forward-compat passthrough (#368): a fixture's `usage` may carry provider
+  // fields aimock does not model — typically written by the recorder straight
+  // from a real upstream usage frame (OpenRouter `native_tokens_prompt`,
+  // `native_tokens_completion`, …). Emit them verbatim rather than silently
+  // dropping them, so a recorded usage object round-trips on replay. The
+  // canonical token counts and every field shaped above are excluded: those are
+  // already resolved onto the base usage object (see helpers.ts `resolveUsage`)
+  // or handled with their own required-member defaults.
+  for (const [key, value] of Object.entries(u ?? {})) {
+    if (value === undefined) continue;
+    if (SHAPED_OR_CANONICAL_USAGE_KEYS.has(key)) continue;
+    if (UNSAFE_PROTO_KEYS.has(key)) continue;
+    usageExtras[key] = value;
   }
   return {
     provider: overrides?.provider ?? deriveOpenRouterProvider(winningModel),
