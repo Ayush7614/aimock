@@ -3145,6 +3145,32 @@ export async function createServerWithResolvedAuth(
     socket: import("node:net").Socket,
     head: Buffer,
   ): Promise<void> {
+    // `Upgrade: h2c` + `Connection: Upgrade` on plain requests — including
+    // ones with a body — to probe for HTTP/2 cleartext support. Only actual
+    // WebSocket upgrades belong on this path.
+    //
+    // Node detaches its HTTP parser from the socket the moment "upgrade"
+    // fires, so `req` never receives a body: any bytes already read land in
+    // `head` instead, and reconnecting them to `req` (e.g. via `req.push`)
+    // would still leave chunked bodies and further framing unhandled. Rather
+    // than reimplementing body parsing, rebuild the request line and headers
+    // with `Upgrade`/`Connection` dropped — the only thing that made this
+    // look like an upgrade — replay them plus `head` onto the socket, and
+    // let Node re-parse the connection from scratch as an ordinary request.
+    if ((req.headers.upgrade ?? "").toLowerCase() !== "websocket") {
+      const requestLine = `${req.method} ${req.url} HTTP/${req.httpVersion}\r\n`;
+      const headerLines: string[] = [];
+      for (let i = 0; i < req.rawHeaders.length; i += 2) {
+        if (/^(?:upgrade|connection)$/i.test(req.rawHeaders[i])) continue;
+        headerLines.push(`${req.rawHeaders[i]}: ${req.rawHeaders[i + 1]}`);
+      }
+      const rebuilt = Buffer.from(requestLine + headerLines.join("\r\n") + "\r\n\r\n");
+      socket.unshift(head);
+      socket.unshift(rebuilt);
+      server.emit("connection", socket);
+      return;
+    }
+
     const parsedUrl = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
     let pathname = parsedUrl.pathname;
 
