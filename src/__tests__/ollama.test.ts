@@ -979,6 +979,47 @@ describe("POST /api/chat (h2c upgrade probe)", () => {
     expect(body.error.message).toMatch(/messages/i);
     expect(body.error.message).not.toMatch(/Malformed JSON/i);
   });
+
+  // The test above proves the body was PARSED. This one proves it arrived
+  // INTACT and was matched on: a validation error only needs enough of the
+  // body to know a field is missing, so it would still pass if the replay
+  // delivered a truncated body. Matching a fixture on `userMessage` cannot.
+  it("delivers the body intact — the request matches a fixture on its content", async () => {
+    instance = await createServer(allFixtures);
+    const res = await requestWithH2cUpgradeHeaders(
+      `${instance.url}/api/chat`,
+      "POST",
+      JSON.stringify({
+        model: "llama3",
+        messages: [{ role: "user", content: "hello" }],
+        stream: false,
+      }),
+    );
+
+    expect(res.status).toBe(200);
+    expect(JSON.parse(res.body).message.content).toBe("Hi there!");
+  });
+
+  // A body far larger than any single read, so the replay cannot pass by
+  // happening to fit in one buffer. Node >= 26 parses the body onto `req` and
+  // leaves `head` empty, so a replay that forwards only `head` stalls here
+  // forever rather than failing — which is why this asserts a real response.
+  it("delivers a body far larger than one read", async () => {
+    instance = await createServer(allFixtures);
+    const filler = "x".repeat(200_000);
+    const res = await requestWithH2cUpgradeHeaders(
+      `${instance.url}/api/chat`,
+      "POST",
+      JSON.stringify({
+        model: "llama3",
+        messages: [{ role: "user", content: `hello ${filler}` }],
+        stream: false,
+      }),
+    );
+
+    expect(res.status).toBe(200);
+    expect(JSON.parse(res.body).message.content).toBe("Hi there!");
+  });
 });
 
 // ─── Integration tests: journal ─────────────────────────────────────────────
