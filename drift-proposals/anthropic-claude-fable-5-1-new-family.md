@@ -27,20 +27,20 @@ Decision: INCLUDE (applied — includeFamilies.anthropic in
 `src/__tests__/drift/model-registry.ts`, with the `includeFamilies.anthropic`
 re-pin in `src/__tests__/drift/logic-pin.test.ts`).
 
-Rationale: point release of the already-included `claude-fable-5`, exactly as
-`claude-opus-4-1` is of `claude-opus-4`.
+Rationale: GA text chat, measured. Anthropic's `/v1/models` carries no
+capability field (`id` / `display_name` / `created_at` only), so the
+`supportedGenerationMethods` evidence used for the Gemini entries has no
+equivalent here — but `/v1/messages` does: a minimal call
+(`max_tokens: 16`, one user turn) returns **HTTP 200** with
+`stop_reason: "end_turn"`, `model: "claude-fable-5-1"` and a real assistant
+turn. Its listing entry is `display_name: "Claude Fable 5.1"`,
+`created_at: 2026-08-28`, i.e. the point release of the already-included
+`claude-fable-5` ("Claude Fable 5", 2026-06-07) — the same relationship
+`claude-opus-4-1` has to `claude-opus-4`.
 
-EVIDENCE LIMIT, stated plainly: no live capability probe was run for this one.
-Anthropic's `/v1/models` carries no capability field at all (`id` /
-`display_name` / `created_at` only), so the `supportedGenerationMethods` /
-chat-probe evidence used for the Gemini and OpenAI entries in this wave has no
-Anthropic equivalent — and separately, the only Anthropic key indexed for this
-repo is invalid (`/v1/models` → HTTP 401 `authentication_error`, so it needs
-rotating; tracked outside this note). The argument is therefore the same one
-commit 72f85f8 used to classify `claude-opus-5`: the family is present on the
-live listing (drift run 34193766572, 2026-09-08), its sibling `claude-fable-5` is
-already included, and the canary reported exactly ONE unclassified anthropic
-family that run — so every other live id normalized into `includeFamilies`,
-i.e. the whole live Anthropic listing is text-chat Claude families plus this one.
-If that inference is ever wrong the canary is the thing that catches it, which is
-why this is recorded rather than assumed.
+Corroborating: all 11 ids on the live listing are text-chat Claude families
+(`claude-fable-5-1`, `claude-opus-5`, `claude-sonnet-5`, `claude-fable-5`,
+`claude-opus-4-8`, `claude-opus-4-7`, `claude-sonnet-4-6`, `claude-opus-4-6`,
+`claude-opus-4-5`, `claude-haiku-4-5`, `claude-sonnet-4-5`), and the canary
+reported exactly ONE unclassified anthropic family — so every other live id
+already normalized into `includeFamilies`.

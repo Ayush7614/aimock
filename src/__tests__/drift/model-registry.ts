@@ -149,13 +149,17 @@ export const includeFamilies: Record<Provider, Set<string>> = {
     // PREVIEW_FAMILY / GEMMA_FAMILY).
     "claude-fable-5",
     // Point release of the already-included `claude-fable-5`, exactly as
-    // `claude-opus-4-1` is of `claude-opus-4`. Anthropic's /v1/models carries no
-    // capability field at all (id / display_name / created_at only), so the
-    // capability probe available for the OpenAI and Gemini entries has no
-    // equivalent here; the argument is the same one commit 72f85f8 used for
-    // `claude-opus-5`. The canary reported exactly ONE unclassified anthropic
-    // family this run, so every other live id normalized into this set — i.e.
-    // the whole live listing is text-chat Claude families plus this one.
+    // `claude-opus-4-1` is of `claude-opus-4` — `display_name: "Claude Fable
+    // 5.1"`, `created_at: 2026-08-28`, against Fable 5's 2026-06-07.
+    //
+    // Classified on a DECLARED-CAPABILITY probe like the rest of this wave.
+    // Anthropic's /v1/models carries no capability field (id / display_name /
+    // created_at only), so there is no `supportedGenerationMethods` to compare
+    // — but /v1/messages answers the same question directly: a minimal call
+    // returns 200 with `stop_reason: "end_turn"` and a real assistant turn.
+    // Corroborating: all 11 ids on the live listing are text-chat Claude
+    // families, and the canary reported exactly ONE unclassified anthropic
+    // family, so every other live id already normalized into this set.
     //
     // Decision: INCLUDE, recorded in
     // drift-proposals/anthropic-claude-fable-5-1-new-family.md.
