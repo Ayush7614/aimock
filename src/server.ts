@@ -3147,11 +3147,75 @@ export async function createServerWithResolvedAuth(
     },
   );
 
+  /**
+   * Body bytes the platform already parsed onto `req` for an upgrade request.
+   *
+   * Node >= 26 delivers an upgrade request's body here and leaves `head`
+   * empty; Node <= 24 leaves the body in `head` and ends `req` with nothing.
+   * The stream has already ended in both cases, so this resolves on the next
+   * tick either way — it never waits on the network.
+   */
+  function drainParsedRequestBody(req: http.IncomingMessage): Promise<Buffer> {
+    return new Promise((resolve) => {
+      const chunks: Buffer[] = [];
+      let settled = false;
+      const done = (): void => {
+        if (settled) return;
+        settled = true;
+        resolve(Buffer.concat(chunks));
+      };
+      req.on("data", (c: Buffer) => chunks.push(c));
+      req.on("end", done);
+      req.on("error", done);
+      req.on("close", done);
+      req.resume();
+    });
+  }
+
   async function handleUpgradeRequest(
     req: http.IncomingMessage,
     socket: import("node:net").Socket,
     head: Buffer,
   ): Promise<void> {
+    // `Upgrade: h2c` + `Connection: Upgrade` on plain requests — including
+    // ones with a body — to probe for HTTP/2 cleartext support. Only actual
+    // WebSocket upgrades belong on this path.
+    //
+    // Node fires "upgrade" instead of "request" for any `Connection: Upgrade`,
+    // whatever protocol is named, and the request never reaches the normal
+    // pipeline. Rather than reimplementing body parsing, rebuild the request
+    // line and headers with `Upgrade`/`Connection` dropped — the only thing
+    // that made this look like an upgrade — replay them onto the socket, and
+    // let Node re-parse the connection from scratch as an ordinary request.
+    //
+    // WHERE THE BODY LIVES DEPENDS ON THE NODE VERSION, and both cases must be
+    // replayed or the re-parsed request stalls forever waiting on a
+    // `Content-Length` worth of bytes that will never arrive:
+    //
+    //   - Node <= 24 detaches the parser at "upgrade", so `req` yields nothing
+    //     and any body bytes already read land in `head` (or, if the client
+    //     sent them later, still arrive on the socket afterwards).
+    //   - Node >= 26 parses the body onto `req` and leaves `head` EMPTY. The
+    //     bytes are not on the socket either — draining `req` is the only way
+    //     to get them back.
+    //
+    // Draining `req` is safe on both: on the older behaviour it ends
+    // immediately with zero bytes, so the concat below is a no-op there and
+    // `head` carries the body as before.
+    if ((req.headers.upgrade ?? "").toLowerCase() !== "websocket") {
+      const parsedBody = await drainParsedRequestBody(req);
+      const requestLine = `${req.method} ${req.url} HTTP/${req.httpVersion}\r\n`;
+      const headerLines: string[] = [];
+      for (let i = 0; i < req.rawHeaders.length; i += 2) {
+        if (/^(?:upgrade|connection)$/i.test(req.rawHeaders[i])) continue;
+        headerLines.push(`${req.rawHeaders[i]}: ${req.rawHeaders[i + 1]}`);
+      }
+      const rebuilt = Buffer.from(requestLine + headerLines.join("\r\n") + "\r\n\r\n");
+      socket.unshift(Buffer.concat([rebuilt, parsedBody, head]));
+      server.emit("connection", socket);
+      return;
+    }
+
     const parsedUrl = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
     let pathname = parsedUrl.pathname;
 
