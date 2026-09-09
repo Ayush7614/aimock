@@ -33,7 +33,8 @@ import type {
  * Header values override the server default — same precedence pattern as chaos
  * config headers (see resolveChaosConfig in chaos.ts).
  *
- * Header: `X-AIMock-Strict` — "true"/"1" → strict on, "false"/"0" → strict off.
+ * Header: `X-AIMock-Strict` — "true"/"1" → strict on, "false"/"0" → strict off
+ * (case-insensitive, surrounding whitespace trimmed).
  * When absent or unrecognised, falls back to the server-level default.
  */
 export function resolveStrictMode(
@@ -42,9 +43,13 @@ export function resolveStrictMode(
 ): boolean {
   if (rawHeaders) {
     const header = rawHeaders["x-aimock-strict"];
-    const val = typeof header === "string" ? header : Array.isArray(header) ? header[0] : undefined;
-    if (val === "true" || val === "1") return true;
-    if (val === "false" || val === "0") return false;
+    const rawVal =
+      typeof header === "string" ? header : Array.isArray(header) ? header[0] : undefined;
+    if (typeof rawVal === "string") {
+      const val = rawVal.trim().toLowerCase();
+      if (val === "true" || val === "1") return true;
+      if (val === "false" || val === "0") return false;
+    }
   }
   return serverDefault ?? false;
 }

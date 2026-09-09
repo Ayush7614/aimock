@@ -79,6 +79,60 @@ describe("resolveStrictMode", () => {
     expect(resolveStrictMode(true, { "x-aimock-strict": "0" })).toBe(false);
   });
 
+  // The header arrives from clients, proxies and shell snippets that do not
+  // agree on casing or padding. HTTP header VALUES are case-sensitive by spec,
+  // so this is a deliberate tolerance, not something the platform does for us —
+  // which is exactly why it needs pinning: before this, `True` silently fell
+  // through to the server default, and a caller asking for strict got whatever
+  // the server already was.
+  it("accepts any casing", () => {
+    for (const on of ["TRUE", "True", "TrUe"]) {
+      expect(resolveStrictMode(false, { "x-aimock-strict": on })).toBe(true);
+    }
+    for (const off of ["FALSE", "False", "FaLsE"]) {
+      expect(resolveStrictMode(true, { "x-aimock-strict": off })).toBe(false);
+    }
+  });
+
+  it("tolerates surrounding whitespace, including tabs and newlines", () => {
+    for (const on of [" true", "true ", "  true  ", "\ttrue\t", "true\r\n"]) {
+      expect(resolveStrictMode(false, { "x-aimock-strict": on })).toBe(true);
+    }
+    for (const off of [" 0", "0 ", "  false  ", "\tfalse"]) {
+      expect(resolveStrictMode(true, { "x-aimock-strict": off })).toBe(false);
+    }
+  });
+
+  it("accepts casing and whitespace together", () => {
+    expect(resolveStrictMode(false, { "x-aimock-strict": "  TRUE  " })).toBe(true);
+    expect(resolveStrictMode(true, { "x-aimock-strict": "  False " })).toBe(false);
+    expect(resolveStrictMode(false, { "x-aimock-strict": " 1 " })).toBe(true);
+  });
+
+  // A repeated header arrives as an array; the first value is the one that
+  // decides, and it gets the same normalisation as the string form.
+  it("normalises the first value of a repeated header", () => {
+    expect(resolveStrictMode(false, { "x-aimock-strict": [" TRUE "] })).toBe(true);
+    expect(resolveStrictMode(true, { "x-aimock-strict": [" False ", "true"] })).toBe(false);
+  });
+
+  // NEGATIVE CONTROLS: trimming and lower-casing must not widen what counts as
+  // a valid value. Without these, the assertions above would also pass on an
+  // implementation that treated any non-empty string as truthy.
+  it("does not turn unrecognised values into a match after normalising", () => {
+    for (const bogus of ["", "   ", "truthy", "true-ish", "t", "yes", "on", "2", "-1", "10"]) {
+      expect(resolveStrictMode(true, { "x-aimock-strict": bogus })).toBe(true);
+      expect(resolveStrictMode(false, { "x-aimock-strict": bogus })).toBe(false);
+    }
+  });
+
+  // Whitespace is trimmed from the ENDS only — an inner space is not noise, it
+  // makes the value a different token.
+  it("does not strip interior whitespace", () => {
+    expect(resolveStrictMode(false, { "x-aimock-strict": "tr ue" })).toBe(false);
+    expect(resolveStrictMode(true, { "x-aimock-strict": "fa lse" })).toBe(true);
+  });
+
   it("ignores unrecognised header values and falls back to server default", () => {
     expect(resolveStrictMode(true, { "x-aimock-strict": "yes" })).toBe(true);
     expect(resolveStrictMode(false, { "x-aimock-strict": "maybe" })).toBe(false);
