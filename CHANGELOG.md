@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [1.40.0] - 2026-09-08
+
 ### Added
 
 - **`GET /__aimock/fixtures` — read-only fixture-count introspection.** The control API could already add fixtures (`POST`) and clear them (`DELETE`), but offered no way to ASK what was loaded, so a CI job or test harness wanting to confirm its tape was registered had to send a probe chat request and infer the answer from the reply. `GET /__aimock/fixtures` returns `{ count }`. It sits behind the same `AIMOCK_API_KEYS` boundary and CORS headers as every other `/__aimock/*` route, and serializes the count ONLY — fixtures carry predicate closures, so none of their contents cross the wire (#407)
