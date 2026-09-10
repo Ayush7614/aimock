@@ -292,9 +292,11 @@ function unresolvedPartToken(raw: unknown): string {
 /**
  * The synthetic user message a submit is matched on.
  *
- * Concatenated text of every `type: "text"` part, then ALWAYS a newline and
+ * Concatenated text of every `type: "text"` part, then ALWAYS
  * `[media: <role>:<sha256 first 12 hex>, …]` — one entry per non-text part in
- * array order, `[media: ]` when there are none.
+ * array order, `[media: ]` when there are none. The separating newline is
+ * present only when there IS text: a key with no text part is the bare
+ * `[media: …]` suffix, unprefixed.
  *
  * WHY the digest: a Seedance image-to-video job carries NO text part, so a
  * text-only key would record `{ endpoint, model }` — a wildcard matching every
@@ -1270,9 +1272,24 @@ async function proxyBytePlusVideoRecordPoll(args: {
   // Terminal is derived from the NON-terminal pair, not from a second copy of
   // the four terminal tokens: a vendor-added end state is captured rather than
   // proxied until the client gives up.
-  const upstreamStatus = String(upstreamBody.status ?? "");
+  //
+  // The status must FIRST clear what replay demands of it — a non-empty string,
+  // the exact predicate `serializeBytePlusVideoTask` applies. Coercing instead
+  // (`String(status ?? "")`) turned an absent status into `""` and a numeric
+  // `123` into `"123"`, and since terminal is the COMPLEMENT of the non-terminal
+  // pair, both read as terminal. Capture then wrote an envelope replay cannot
+  // serve and swapped the job to replay, so every later poll 502s on that same
+  // envelope and a corrected upstream response is never fetched for the job —
+  // and the unusable fixture is on disk. Treating it as NOT terminal relays it
+  // verbatim and leaves the job upstream-backed, which is also what lets a
+  // later well-formed response record normally.
+  //
+  // Scope: this is malformed-upstream robustness only. Ark is not known to emit
+  // such a body, and non-2xx / non-JSON / non-object bodies are rejected above.
+  const rawStatus = upstreamBody.status;
+  const upstreamStatus = typeof rawStatus === "string" ? rawStatus : "";
 
-  if (!isBytePlusTerminalStatus(upstreamStatus)) {
+  if (!upstreamStatus || !isBytePlusTerminalStatus(upstreamStatus)) {
     if (jobs.get(key) === job) jobs.set(key, job); // TTL refresh
     relayJson(relayBody);
     return;

@@ -28,6 +28,12 @@ const UPSTREAM_TASK_ID = "cgt-upstream-1";
 interface ArkUpstreamOptions {
   /** Widened past the vendor's four so an UNRECOGNIZED terminal state is testable. */
   finalStatus?: string;
+  /**
+   * Corrupt the terminal poll body's `status` the way only a MALFORMED upstream
+   * could: drop it entirely, or send a number. Neither is a shape Ark is known
+   * to emit — this exists solely to pin the handler's robustness to it.
+   */
+  malformedTerminalStatus?: "omit" | "numeric";
   pollsBeforeTerminal?: number;
   submitHttpStatus?: number;
   pollHttpStatus?: number;
@@ -156,6 +162,8 @@ function startArkUpstream(opts: ArkUpstreamOptions = {}): Promise<ArkUpstream> {
           } else if (finalStatus === "failed") {
             terminal.error = { code: "QuotaExceeded", message: "no quota" };
           }
+          if (opts.malformedTerminalStatus === "omit") delete terminal.status;
+          else if (opts.malformedTerminalStatus === "numeric") terminal.status = 123;
           send(200, terminal);
           return;
         }
@@ -865,5 +873,94 @@ describe("BytePlus video record — capture correctness", () => {
     const body = (await (await fetch(`${mock.url}${SUBMIT}/${res.json.id}`)).json()) as ArkBody;
     expect(body.status).toBe("succeeded");
     expect(readFixtures(dir)).toHaveLength(1);
+  });
+});
+
+// ─── Malformed upstream status ──────────────────────────────────────────────
+// A 2xx JSON object poll body whose `status` is absent or non-string is NOT a
+// shape BytePlus Ark is known to emit; these pin robustness to it, nothing
+// more. The pre-fix handler coerced such a body with `String(status ?? "")`,
+// and because terminal is the COMPLEMENT of queued/running, the coerced value
+// read as terminal. That captured the malformed envelope as a fixture and
+// swapped the job to replay — after which every later poll 502s on that same
+// envelope and the corrected upstream response is never fetched for the job.
+// The status a capture stores must satisfy what replay demands of it: a
+// non-empty string. Anything else is not terminal, so it is relayed and the
+// job stays upstream-backed.
+
+describe("BytePlus video record — a malformed upstream status is never captured", () => {
+  let mock: LLMock | undefined;
+  let upstream: ArkUpstream | undefined;
+  let dir: string | undefined;
+
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    await mock?.stop();
+    await upstream?.close();
+    if (dir) fs.rmSync(dir, { recursive: true, force: true });
+    mock = upstream = undefined;
+    dir = undefined;
+  });
+
+  test.each([
+    ["absent", "omit" as const],
+    ["numeric", "numeric" as const],
+  ])(
+    "a %s status keeps the job upstream-backed instead of persisting an unusable fixture",
+    async (_label, malformedTerminalStatus) => {
+      upstream = await startArkUpstream({ malformedTerminalStatus });
+      dir = tmpFixtureDir();
+      mock = new LLMock({
+        port: 0,
+        record: { providers: { byteplus: upstream.url }, fixturePath: dir },
+      });
+      await mock.start();
+
+      const submitted = await submit(mock, goBody);
+      expect(submitted.status).toBe(200);
+
+      // Poll 1 relays the malformed body verbatim, as every non-terminal poll does.
+      const first = await fetch(`${mock.url}${SUBMIT}/${submitted.json.id}`);
+      expect(first.status).toBe(200);
+
+      // Poll 2 must reach UPSTREAM again. Pre-fix it 502'd off a captured
+      // replay envelope, and upstream was never asked a second time.
+      const second = await fetch(`${mock.url}${SUBMIT}/${submitted.json.id}`);
+      expect(second.status).toBe(200);
+      expect(upstream.paths.poll.length).toBe(2);
+
+      // Nothing unusable reached disk.
+      expect(readFixtures(dir)).toEqual([]);
+    },
+  );
+
+  test("a corrected upstream status on a LATER poll still records normally", async () => {
+    // The point of not capturing: the job is still upstream-backed, so when the
+    // upstream starts answering properly the recording happens as it should.
+    // The helper closes over this object, so clearing the flag mid-test is what
+    // "the upstream started answering properly" looks like on the wire.
+    const upstreamOpts: ArkUpstreamOptions = { malformedTerminalStatus: "omit" };
+    upstream = await startArkUpstream(upstreamOpts);
+    dir = tmpFixtureDir();
+    mock = new LLMock({
+      port: 0,
+      record: { providers: { byteplus: upstream.url }, fixturePath: dir },
+    });
+    await mock.start();
+
+    const submitted = await submit(mock, goBody);
+    await fetch(`${mock.url}${SUBMIT}/${submitted.json.id}`);
+    expect(readFixtures(dir)).toEqual([]);
+
+    // Upstream is fixed mid-flight.
+    upstreamOpts.malformedTerminalStatus = undefined;
+
+    const recovered = await fetch(`${mock.url}${SUBMIT}/${submitted.json.id}`);
+    expect(recovered.status).toBe(200);
+    expect((await recovered.json()).status).toBe("succeeded");
+
+    const fixtures = readFixtures(dir);
+    expect(fixtures.length).toBe(1);
+    expect(fixtures[0].response.json.status).toBe("succeeded");
   });
 });
