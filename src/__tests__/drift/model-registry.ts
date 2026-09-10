@@ -286,6 +286,15 @@ export const excludeFamilies: Record<Provider, Set<string>> = {
     // it says the family is accounted for, NOT that aimock mocks it (same
     // reading as the gpt-transcribe / gpt-live-transcribe block above).
     //
+    // PAIRED ENTRY: `gpt-live-1` is ALSO in `knownVoiceModelFamilies`
+    // (voice-models.ts). The two sets are deliberately DISJOINT surfaces — this
+    // one silences the `/models` classification check in models.drift.ts, that
+    // one silences the realtime canary in ws-realtime.drift.ts — so a VOICE
+    // family needs the entry in BOTH or the half it is missing from stays red.
+    // Same pairing as the gpt-transcribe / gpt-live-transcribe block above
+    // (936b59c: "the two sets are deliberately disjoint surfaces, so both need
+    // the entry").
+    //
     // Decision: EXCLUDE, recorded in
     // drift-proposals/openai-gpt-live-1-new-family.md.
     "gpt-live-1",

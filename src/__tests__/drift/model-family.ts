@@ -18,7 +18,8 @@
  * Both are anchored to the end and applied in a loop so a trailing dated
  * snapshot that itself follows a build tag is fully reduced. A short numeric
  * suffix like `gpt-live-1`'s trailing `-1` is a SINGLE digit and is deliberately
- * NOT stripped, so `gpt-live-1` normalizes to `gpt-live-1` — an unknown family —
+ * NOT stripped, so `gpt-live-1-mini` normalizes to `gpt-live-1-mini` rather than
+ * collapsing onto the classified `gpt-live-1` — it stays an unknown family —
  * and stays flagged (the whole point of the canary).
  *
  * The `provider` argument selects a per-provider EXTRA rule on top of the shared

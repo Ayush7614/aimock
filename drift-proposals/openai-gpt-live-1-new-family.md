@@ -8,46 +8,67 @@ This model family appeared in a live /models listing but matches no classificati
 
 ## Decision
 
-<!-- drift-sync never auto-classifies a new family. A HUMAN decides, by
-     changing the line below to either:
+<!-- drift-sync never auto-classifies a new family. To approve adding it to
+     the registry, a HUMAN changes the line below to `Decision: include` or
+     `Decision: exclude` — the NEXT drift-sync run then applies the mechanical
+     registry edit (still zero-LLM: this is a human-authored decision, not
+     generated code). -->
 
-       Decision: include   — aimock mocks this family on the chat surface
-       Decision: exclude   — wrong modality / retired / preview; not ours
+<!-- DELIBERATELY NOT USING THE `Decision:` MARKER. Read this before adding one.
 
-     The NEXT drift-sync run then applies the mechanical registry edit to
-     includeFamilies or excludeFamilies respectively, and re-pins that
-     set's membership checksum in the same commit (still zero-LLM: this
-     is a human-authored decision, not generated code). -->
+     PR #423 mechanized the `exclude` verdict (before it, `exclude` fail-closed
+     to `pending` and only `include` was automated). But that automated path is
+     INCOMPLETE FOR VOICE/AUDIO FAMILIES, which is exactly what this one is:
 
-<!-- NOTE: the `Decision: exclude` marker below is drift-sync's AUTOMATED path,
-     added in PR #423 (before that, only `Decision: include` was mechanized and
-     `exclude` fail-closed to `pending`). It is recorded here for the record and
-     for durability, but nothing in this change RELIES on it: the registry edit,
-     the membership re-pin and the offline /models wave update were all applied
-     by hand in the same commit. Because `gpt-live-1` is classified as of that
-     commit, `unclassifiedFamiliesForSync` will never return it again, so the
-     addition half of drift-sync never revisits this note — the marker is inert
-     unless the exclude entry is ever removed, in which case re-applying it is
-     the correct behavior. -->
+       - It writes `excludeFamilies[provider]` and re-pins that set. It NEVER
+         writes `knownVoiceModelFamilies` (voice-models.ts).
+       - `isVoiceModelId("gpt-live-1")` is true, so `ws-realtime.drift.ts` — which
+         is in drift-sync's gate-3 re-collect — would still report
+         `UNKNOWN_REALTIME_MODELS=gpt-live-1` and emit a CRITICAL.
+       - Gate-3 red REVERTS both edited files, so the run ends `gate-failed`. The
+         automated path would therefore APPLY AND REVERT, every run, forever —
+         and it looks like it worked.
 
-Decision: exclude (applied 2026-09-10 — excludeFamilies.openai in
-`src/__tests__/drift/model-registry.ts`, plus the static OpenAI /models wave in
-`src/__tests__/drift/models.drift.ts`, plus the `excludeFamilies.openai`
-membership pin in `src/__tests__/drift/logic-pin.test.ts`).
+     Verified empirically here: with `gpt-live-1` in `excludeFamilies.openai` but
+     NOT in `knownVoiceModelFamilies`, `detectVoiceModelDrift(["gpt-realtime",
+     "gpt-live-1"])` returns `unknown = ["gpt-live-1"]` — the exact value
+     ws-realtime.drift.ts asserts is empty.
+
+     So this decision is recorded in PROSE and applied BY HAND to both sets, the
+     way commit 936b59c did for the gpt-transcribe / gpt-live-transcribe pair:
+     "The two sets are deliberately disjoint surfaces, so both need the entry."
+
+     A literal `Decision: exclude` line here would be a live hazard, not just
+     inert bookkeeping: if the exclude entry were ever removed, the next
+     drift-sync run would re-add it to `excludeFamilies` ONLY and wedge the job
+     on gate-3. Until #423's apply half also writes `knownVoiceModelFamilies`
+     for voice families, do not put one here. -->
+
+DECISION: **EXCLUDE** — applied by hand on 2026-09-10 to BOTH disjoint surfaces:
+
+- `excludeFamilies.openai` in `src/__tests__/drift/model-registry.ts`
+  (silences the `/models` classification check in `models.drift.ts`)
+- `knownVoiceModelFamilies` in `src/__tests__/drift/voice-models.ts`
+  (silences the realtime/voice canary in `ws-realtime.drift.ts`)
+- both `DATA_FROZEN` membership pins re-pinned in
+  `src/__tests__/drift/logic-pin.test.ts`
+- the id added to the static OpenAI `/models` wave in
+  `src/__tests__/drift/models.drift.ts`, so the offline test grades it
 
 Rationale: wrong modality AND wrong endpoint. `gpt-live-1` is OpenAI's
 GPT-Live-1, a full-duplex voice model served on the NEW `/v1/live/sessions`
 endpoint. It is a SIBLING of the Realtime API, not a successor — its model page
 marks Realtime as "Not supported" — and it never answers on
-/v1/chat/completions, so it can never be text-generation drift. This mirrors the
-treatment every other voice/audio/realtime family already gets here
+`/v1/chat/completions`, so it can never be text-generation drift. This mirrors
+the treatment every other voice/audio/realtime family already gets
 (`gpt-realtime*`, `gpt-audio*`, `gpt-transcribe`, `gpt-live-transcribe`,
 `tts-1`, `whisper-1`), recorded in
-drift-proposals/openai-gpt-live-transcribe-new-family.md (PR #343).
+drift-proposals/openai-gpt-live-transcribe-new-family.md (PR #343, commit
+936b59c).
 
-Membership in `excludeFamilies` is a CLASSIFICATION for the `/models` listing
-check in models.drift.ts and nothing more: it says the family is accounted for,
-NOT which endpoints aimock implements for it.
+Membership in these sets is a CLASSIFICATION for the two listing canaries and
+nothing more: it says the family is accounted for, NOT which endpoints aimock
+implements for it.
 
 ## Scope: aimock does NOT mock /v1/live, and this note does not propose that
 
@@ -56,29 +77,22 @@ it (no open issue; the only realtime ask closed in May), and a real mock would
 need a new route, a sideband socket and full-duplex framing. This note records a
 classification, not a roadmap item.
 
-## Deliberately NOT added to `knownVoiceModelFamilies`
+## `gpt-live-1-mini` is deliberately left UNCLASSIFIED
 
-`knownVoiceModelFamilies` (src/\_\_tests\_\_/drift/voice-models.ts) is a
-DIFFERENT canary's inventory: the realtime/voice canary in ws-realtime.drift.ts,
-which asks "does the account's listing carry a voice family this repo has not
-seen before". Two reasons `gpt-live-1` stays out of it:
+Only `gpt-live-1` was decided. `gpt-live-1-mini` has not been observed in a live
+listing; it appears in this repo solely as the realtime canary's NEW-FAMILY
+negative control (`ws-realtime-canary.test.ts`, `logic-pin.test.ts`). Leaving it
+unclassified keeps that control live — it is what still proves the matcher
+reaches a voice id carrying no "realtime" substring, and that the new
+`gpt-live-1` key does not swallow families that merely EXTEND it. If OpenAI ships
+a real `gpt-live-1-mini`, it flags, and that is its own decision with its own
+note.
 
-1. Different meaning. Membership there asserts the realtime canary RECOGNIZES
-   the family as part of the surface it watches over `/v1/realtime`. `gpt-live-1`
-   lives on `/v1/live/sessions`, which aimock does not implement and does not
-   intend to — marking it "known" would assert coverage that does not exist. The
-   `excludeFamilies` entry makes the accurate, narrower statement ("not
-   chat-surface drift").
-2. Blast radius. `gpt-live-1` is the canonical worked EXAMPLE of "a genuinely new
-   voice family" throughout the voice canary and its frozen-logic pins —
-   ws-realtime-canary.test.ts (the `knownVoiceModelFamilies.has(...) === false`
-   negative control), logic-pin.test.ts, model-family.test.ts, and the docblocks
-   in voice-models.ts and model-family.ts. Adding it would require rewriting the
-   canary's own negative control, which is a larger and riskier edit than the
-   classification this note is about.
+## Follow-up: #423's automated exclude path should write both sets
 
-Whether `gpt-live-1` actually appears in this account's live `GET /v1/models`
-payload — and therefore whether the voice canary will emit an
-`UNKNOWN_REALTIME_MODELS=` marker for it — has NOT been observed here. If and
-when the nightly voice canary does flag it, that is a separate decision and gets
-its own note.
+The gate-3 defect described above is a real gap in `scripts/drift-sync.ts`, not
+a quirk of this family: any future voice/audio family a human marks
+`Decision: exclude` will apply-then-revert the same way. The durable fix is for
+the apply half to also add the family literal to `knownVoiceModelFamilies` (and
+re-pin it) when `isVoiceModelId(family)` is true. That is out of scope here and
+is not attempted by this change.

@@ -67,7 +67,12 @@ const REPRESENTATIVE_MODELS = [
   "text-embedding-3-large",
   "text-embedding-3-small",
   "omni-moderation-latest",
-  // --- NEW voice family with no "realtime" substring (the blind spot) ---
+  // --- voice family with no "realtime" substring (the blind spot) ---
+  // `gpt-live-1` was classified EXCLUDE on 2026-09-10 and is now in
+  // knownVoiceModelFamilies, so it is the KNOWN half of this pair. The
+  // unclassified `gpt-live-1-mini` is the NEW-family negative control: it keeps
+  // proving the matcher reaches a voice id lacking "realtime", and that the
+  // `gpt-live-1` key does not swallow families that merely EXTEND it.
   "gpt-live-1",
   "gpt-live-1-mini",
 ];
@@ -76,9 +81,11 @@ describe("ws-realtime known-voice-models canary detection", () => {
   it("flags a new voice family whose id lacks the 'realtime' substring (gpt-live-*)", () => {
     const { unknown } = detectVoiceModelDrift(REPRESENTATIVE_MODELS);
 
-    // The whole point: the new gpt-live-* family is surfaced as unknown drift.
-    expect(unknown).toContain("gpt-live-1");
+    // The whole point: an UNCLASSIFIED gpt-live-* family is surfaced as unknown
+    // drift even though its id carries no "realtime" substring.
     expect(unknown).toContain("gpt-live-1-mini");
+    // ...and the classified sibling does NOT false-positive.
+    expect(unknown).not.toContain("gpt-live-1");
   });
 
   it("does not flag legitimately-known voice/audio models (no false positives)", () => {
@@ -120,11 +127,14 @@ describe("ws-realtime known-voice-models canary detection", () => {
       "gpt-4o-mini-transcribe",
     );
     expect(normalizeVoiceModelFamily("gpt-4o-mini-tts-2025-03-20")).toBe("gpt-4o-mini-tts");
-    // A single-digit trailing tag is NOT a build tag: gpt-live-1 stays a new
-    // family and must remain flaggable.
+    // A single-digit trailing tag is NOT a build tag, so neither id collapses
+    // onto a shorter key. `gpt-live-1` is a classified family as of 2026-09-10;
+    // `gpt-live-1-mini` is not, and must remain flaggable — over-stripping it
+    // onto `gpt-live-1` would silence it.
     expect(normalizeVoiceModelFamily("gpt-live-1")).toBe("gpt-live-1");
     expect(normalizeVoiceModelFamily("gpt-live-1-mini")).toBe("gpt-live-1-mini");
-    expect(knownVoiceModelFamilies.has("gpt-live-1")).toBe(false);
+    expect(knownVoiceModelFamilies.has("gpt-live-1")).toBe(true);
+    expect(knownVoiceModelFamilies.has("gpt-live-1-mini")).toBe(false);
   });
 
   it("is byte-identical to the shared normalizeModelFamily(id, 'openai') primitive", () => {
@@ -168,10 +178,11 @@ describe("ws-realtime known-voice-models canary detection", () => {
     expect(hasGA).toBe(true);
   });
 
-  it("gpt-live-* is the ONLY unknown in the representative payload", () => {
-    // Confirms the matcher is neither too narrow (misses gpt-live) nor too broad
-    // (drags in non-voice models). The unknown set is exactly the new family.
+  it("the unclassified gpt-live-* is the ONLY unknown in the representative payload", () => {
+    // Confirms the matcher is neither too narrow (misses gpt-live-*) nor too
+    // broad (drags in non-voice models). The unknown set is exactly the one
+    // family that is still unclassified.
     const { unknown } = detectVoiceModelDrift(REPRESENTATIVE_MODELS);
-    expect([...unknown].sort()).toEqual(["gpt-live-1", "gpt-live-1-mini"]);
+    expect([...unknown].sort()).toEqual(["gpt-live-1-mini"]);
   });
 });
