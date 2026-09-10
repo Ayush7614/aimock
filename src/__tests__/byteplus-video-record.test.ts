@@ -26,7 +26,8 @@ const SUBMIT = "/api/v3/contents/generations/tasks";
 const UPSTREAM_TASK_ID = "cgt-upstream-1";
 
 interface ArkUpstreamOptions {
-  finalStatus?: "succeeded" | "failed" | "cancelled" | "expired";
+  /** Widened past the vendor's four so an UNRECOGNIZED terminal state is testable. */
+  finalStatus?: string;
   pollsBeforeTerminal?: number;
   submitHttpStatus?: number;
   pollHttpStatus?: number;
@@ -709,5 +710,160 @@ describe("BytePlus video record — upstream failure handling", () => {
     // The job is gone with the old world, so the poll 404s and nothing lands.
     expect(res.status).toBe(404);
     expect(readFixtures(dir!)).toHaveLength(0);
+  });
+});
+
+// ─── Capture correctness: signalling, serialization, terminal vocabulary ────
+
+describe("BytePlus video record — capture correctness", () => {
+  let mock: LLMock | undefined;
+  let upstream: ArkUpstream | undefined;
+  let dir: string | undefined;
+  let blockerDir: string | undefined;
+
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    await mock?.stop();
+    await upstream?.close();
+    if (dir) fs.rmSync(dir, { recursive: true, force: true });
+    if (blockerDir) fs.rmSync(blockerDir, { recursive: true, force: true });
+    mock = upstream = undefined;
+    dir = blockerDir = undefined;
+  });
+
+  test("a persist failure on the terminal poll sets X-AIMock-Record-Error", async () => {
+    // A full disk, a bad fixturePath, or a permissions error must reach the
+    // client on the wire the way every sibling video surface signals it — not
+    // only as a log line behind a 200 indistinguishable from a clean record.
+    upstream = await startArkUpstream();
+    blockerDir = fs.mkdtempSync(path.join(os.tmpdir(), "aimock-byteplus-pin-"));
+    const blockerFile = path.join(blockerDir, "not-a-dir");
+    fs.writeFileSync(blockerFile, "in the way");
+    mock = new LLMock({
+      port: 0,
+      logLevel: "silent",
+      record: { providers: { byteplus: upstream.url }, fixturePath: blockerFile },
+    });
+    await mock.start();
+
+    const res = await submit(mock, goBody);
+    expect(res.status).toBe(200);
+    const poll = await fetch(`${mock.url}${SUBMIT}/${res.json.id}`);
+    expect(poll.status).toBe(200);
+    expect(((await poll.json()) as ArkBody).status).toBe("succeeded");
+    expect(poll.headers.get("x-aimock-record-error")).toBeTruthy();
+  });
+
+  test("two CONCURRENT terminal polls persist exactly one fixture", async () => {
+    // The single job-map identity gate is what serializes a double capture:
+    // poll B resumes from its upstream await after poll A already swapped the
+    // replay job into the map, so B relays and persists nothing. Without the
+    // gate B captures a second, duplicate fixture. It must also do this
+    // QUIETLY — a concurrent poll is ordinary, not an error worth a log line.
+    let pollsSeen = 0;
+    let releaseBoth: (() => void) | undefined;
+    const bothArrived = new Promise<void>((resolve) => {
+      releaseBoth = resolve;
+    });
+    const terminal = {
+      id: UPSTREAM_TASK_ID,
+      model: MODEL,
+      status: "succeeded",
+      created_at: 1785000000,
+      updated_at: 1785000010,
+      content: { video_url: "https://ark-content/out.mp4" },
+    };
+    const server = http.createServer((req, res) => {
+      req.resume();
+      req.on("end", () => {
+        const send = (body: unknown): void => {
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify(body));
+        };
+        if (req.method === "POST") {
+          send({ id: UPSTREAM_TASK_ID });
+          return;
+        }
+        // Hold BOTH polls upstream until both have arrived, so they resume
+        // into the capture path in the same tick window.
+        pollsSeen++;
+        if (pollsSeen >= 2) releaseBoth?.();
+        void bothArrived.then(() => send(terminal));
+      });
+    });
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+    const port = (server.address() as AddressInfo).port;
+    dir = tmpFixtureDir();
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    mock = new LLMock({
+      port: 0,
+      logLevel: "warn",
+      record: { providers: { byteplus: `http://127.0.0.1:${port}` }, fixturePath: dir },
+    });
+    await mock.start();
+
+    const res = await submit(mock, goBody);
+    expect(res.status).toBe(200);
+    const [a, b] = await Promise.all([
+      fetch(`${mock.url}${SUBMIT}/${res.json.id}`),
+      fetch(`${mock.url}${SUBMIT}/${res.json.id}`),
+    ]);
+    expect(a.status).toBe(200);
+    expect(b.status).toBe(200);
+    expect(((await a.json()) as ArkBody).status).toBe("succeeded");
+    expect(((await b.json()) as ArkBody).status).toBe("succeeded");
+    await new Promise<void>((r) => server.close(() => r()));
+
+    expect(readFixtures(dir)).toHaveLength(1);
+    expect(warnSpy.mock.calls.filter((c) => c.join(" ").includes("discarded"))).toHaveLength(0);
+    warnSpy.mockRestore();
+  });
+
+  test("an UNRECOGNIZED terminal status is captured, not polled forever", async () => {
+    // The terminal vocabulary is derived as "not queued and not running", so a
+    // vendor-added terminal state records instead of silently proxying until
+    // the client times out.
+    upstream = await startArkUpstream({ finalStatus: "rejected" });
+    dir = tmpFixtureDir();
+    mock = new LLMock({
+      port: 0,
+      logLevel: "silent",
+      record: { providers: { byteplus: upstream.url }, fixturePath: dir },
+    });
+    await mock.start();
+
+    const res = await submit(mock, goBody);
+    const poll = await (await fetch(`${mock.url}${SUBMIT}/${res.json.id}`)).json();
+    expect((poll as ArkBody).status).toBe("rejected");
+
+    const written = readFixtures(dir);
+    expect(written).toHaveLength(1);
+    expect(written[0].response.json.status).toBe("rejected");
+    // The upstream id is still scrubbed on this branch.
+    expect(written[0].response.json.id).toBeUndefined();
+    // And a SECOND poll is served from the captured fixture, not proxied again.
+    await fetch(`${mock.url}${SUBMIT}/${res.json.id}`);
+    expect(upstream.paths.poll).toHaveLength(1);
+  });
+
+  test("queued and running are still proxied through, never captured", async () => {
+    upstream = await startArkUpstream({ pollsBeforeTerminal: 2 });
+    dir = tmpFixtureDir();
+    mock = new LLMock({
+      port: 0,
+      logLevel: "silent",
+      record: { providers: { byteplus: upstream.url }, fixturePath: dir },
+    });
+    await mock.start();
+
+    const res = await submit(mock, goBody);
+    for (let i = 0; i < 2; i++) {
+      const body = (await (await fetch(`${mock.url}${SUBMIT}/${res.json.id}`)).json()) as ArkBody;
+      expect(body.status).toBe("running");
+    }
+    expect(readFixtures(dir)).toHaveLength(0);
+    const body = (await (await fetch(`${mock.url}${SUBMIT}/${res.json.id}`)).json()) as ArkBody;
+    expect(body.status).toBe("succeeded");
+    expect(readFixtures(dir)).toHaveLength(1);
   });
 });

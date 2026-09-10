@@ -71,15 +71,35 @@ import { readEnvelopeText, upstreamTimeoutSignal } from "./video-proxy-shared.js
  */
 export const BYTEPLUS_VIDEO_TASKS_PATH = "/api/v3/contents/generations/tasks";
 
-/** The vendor's six task states (`wire-types.ts:38-44`). Non-terminal: queued, running. */
+/**
+ * The vendor's two NON-terminal task states (`wire-types.ts:38-44`). This is
+ * the primitive: "terminal" is derived as everything else, so a vendor-added
+ * terminal state records instead of proxying forever (see
+ * `isBytePlusTerminalStatus`).
+ */
+const BYTEPLUS_NON_TERMINAL_STATUSES = new Set(["queued", "running"]);
+
+/** The vendor's six task states. Anything outside this set is an authoring/vendor surprise. */
 const BYTEPLUS_TASK_STATUSES = new Set([
-  "queued",
-  "running",
+  ...BYTEPLUS_NON_TERMINAL_STATUSES,
   "succeeded",
   "failed",
   "cancelled",
   "expired",
 ]);
+
+/**
+ * Terminal is the COMPLEMENT of the two non-terminal tokens, never a second
+ * hardcoded list of the four terminal ones. An unrecognized status is treated
+ * as terminal deliberately: a status the mock does not know is far more likely
+ * to be a new vendor end state than a new intermediate one, and guessing wrong
+ * in that direction costs a captured fixture the operator can inspect, while
+ * guessing wrong the other way costs a record run that polls until the client
+ * times out and writes nothing.
+ */
+function isBytePlusTerminalStatus(status: string): boolean {
+  return !BYTEPLUS_NON_TERMINAL_STATUSES.has(status);
+}
 
 /** Ark output URLs expire 24h after the task produced them, anchored on `updated_at`. */
 const BYTEPLUS_URL_TTL_SECONDS = 24 * 60 * 60;
@@ -92,11 +112,30 @@ const BYTEPLUS_VIDEO_TTL_MS = 3_600_000; // 1 hour
 /** Internal lifecycle position. The TERMINAL body comes from the envelope. */
 type BytePlusVideoPhase = "queued" | "running" | "terminal";
 
-/** Latches so each authoring/staleness warn fires at most once per job. */
+/** Latches so each authoring/staleness warn fires at most once per ENVELOPE. */
 interface BytePlusWarnLatches {
   unknownStatus?: boolean;
   missingUrl?: boolean;
   expiredUrl?: boolean;
+  nonTerminalEnvelope?: boolean;
+}
+
+/**
+ * Warn latches keyed on the ENVELOPE OBJECT, not the job. A suite that replays
+ * one aged fixture across a hundred tests mints a hundred jobs off the SAME
+ * envelope object (the fixture's `response.json`), and a per-job latch would
+ * emit a hundred identical lines — noise, not signal. The envelope is the thing
+ * being complained about, so it owns the latch. WeakMap so a fixtures reset
+ * drops the latches with the fixtures.
+ */
+const bytePlusWarnLatches = new WeakMap<Record<string, unknown>, BytePlusWarnLatches>();
+
+function warnLatchesFor(envelope: Record<string, unknown>): BytePlusWarnLatches {
+  const existing = bytePlusWarnLatches.get(envelope);
+  if (existing !== undefined) return existing;
+  const fresh: BytePlusWarnLatches = {};
+  bytePlusWarnLatches.set(envelope, fresh);
+  return fresh;
 }
 
 interface BytePlusVideoReplayJob {
@@ -106,9 +145,8 @@ interface BytePlusVideoReplayJob {
   pollCount: number;
   pollsBeforeRunning: number;
   pollsBeforeTerminal: number;
-  /** The recorded/authored Ark task envelope. Frozen — never mutated. */
+  /** The recorded/authored Ark task envelope. Never mutated. */
   envelope: Record<string, unknown>;
-  warned: BytePlusWarnLatches;
 }
 
 /**
@@ -125,9 +163,6 @@ interface BytePlusVideoRecordJob {
   upstreamTaskId: string;
   upstreamPollingUrl: string;
   match: Fixture["match"];
-  phase: BytePlusVideoPhase;
-  /** Set synchronously before the first await of the capture sequence. */
-  capturing?: boolean;
 }
 
 export type BytePlusVideoJob = BytePlusVideoReplayJob | BytePlusVideoRecordJob;
@@ -286,7 +321,29 @@ function advanceJob(job: BytePlusVideoReplayJob): void {
 
 // ─── Serialization ──────────────────────────────────────────────────────────
 
-/** Ark's error envelope SHAPE, carrying a message only — never an invented code. */
+/**
+ * Ark's error envelope SHAPE, carrying a message only — never an invented code.
+ *
+ * KNOWN, DELIBERATE, UNRESOLVED DIVERGENCE. The live canary in
+ * `src/__tests__/drift/byteplus-video.drift.ts` asserts that real Ark supplies a
+ * string `error.code`, so a consumer that reads `error.code` off an aimock-
+ * authored error (404 unknown task, 404 no fixture, 400 validation, 502 bad
+ * envelope, 503 strict) sees `undefined` where live Ark would give it a token.
+ *
+ * We omit it rather than close the gap because we do not know the value. No
+ * live Ark error body has ever been observed here — the canary has never run
+ * (there is no `ARK_API_KEY` in repo secrets) and `@tanstack/ai-byteplus` is not
+ * installed, so nobody has verified what the client does with a missing `code`
+ * either. Minting one would put an aimock-authored token into a consumer's
+ * assertions and into any fixture recorded past it, which is the failure this
+ * module exists to avoid; the governing rule is that the mock never authors a
+ * wire value it did not observe, and an honest absence beats a plausible
+ * invention. Recorded fixtures are unaffected: a real `error.code` captured
+ * from upstream replays verbatim.
+ *
+ * To close it: run the canary against a real key, then carry the OBSERVED code
+ * per error class. Do not guess one.
+ */
 function arkErrorBody(message: string): string {
   return JSON.stringify({ error: { message } });
 }
@@ -300,9 +357,12 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
 /**
  * Build the poll body for a replay job.
  *
- * Non-terminal: `{ id, model?, status, created_at?, updated_at? }` — the status
- * token is the ONLY synthesized value, and `content`/`error`/`usage` are
- * withheld, matching the vendor's documented behavior.
+ * Non-terminal: `{ id, model?, status, created_at? }` — the status token is the
+ * ONLY synthesized value, and `content`/`error`/`usage`/`updated_at` are
+ * withheld. `created_at` is a property of the task and is true at every phase;
+ * `updated_at` on a recorded envelope is the timestamp of the TERMINAL
+ * transition, so emitting it mid-flight would assert a field COMBINATION never
+ * observed live (and a consumer diffing it across polls would see it constant).
  *
  * Terminal: the stored envelope VERBATIM with `id` rewritten. Its status is
  * whatever was recorded, including `cancelled` / `expired`.
@@ -322,13 +382,32 @@ export function serializeBytePlusVideoTask(
     const body: Record<string, unknown> = { id: job.id, status: job.phase };
     if (envelope.model !== undefined) body.model = envelope.model;
     if (envelope.created_at !== undefined) body.created_at = envelope.created_at;
-    if (envelope.updated_at !== undefined) body.updated_at = envelope.updated_at;
     return body;
   }
 
   // Terminal: recorded envelope verbatim, id stamped.
-  if (!BYTEPLUS_TASK_STATUSES.has(status) && !job.warned.unknownStatus) {
-    job.warned.unknownStatus = true;
+  const warned = warnLatchesFor(envelope);
+
+  // The one authoring error UNIQUE to this surface. Every sibling video handler
+  // SYNTHESIZES the terminal status, so a fixture cannot express "terminal but
+  // not terminal"; storing the envelope verbatim makes it expressible for the
+  // first time. The job has reached its terminal poll and will now serve this
+  // same body forever, so the client polls to its own timeout with no
+  // diagnostic: the status is one of the vendor's six (unknownStatus stays
+  // silent) and it is a non-empty string (the 502 authoring-error path stays
+  // silent). Name it, the way every other authoring error here is named.
+  if (!isBytePlusTerminalStatus(status) && !warned.nonTerminalEnvelope) {
+    warned.nonTerminalEnvelope = true;
+    logger.warn(
+      `BytePlus video fixture for job ${job.id} has reached its terminal poll but its envelope ` +
+        `carries the NON-TERMINAL status "${status}" — every later poll returns this same body, ` +
+        `so the client will poll it forever and fail on its own timeout. Re-record the fixture, ` +
+        `or author a terminal status (succeeded, failed, cancelled, expired)`,
+    );
+  }
+
+  if (!BYTEPLUS_TASK_STATUSES.has(status) && !warned.unknownStatus) {
+    warned.unknownStatus = true;
     logger.warn(
       `BytePlus video fixture for job ${job.id} carries status "${status}", which is not one of ` +
         `the vendor's six (queued, running, succeeded, failed, cancelled, expired) — serving it ` +
@@ -338,8 +417,8 @@ export function serializeBytePlusVideoTask(
 
   const content = asRecord(envelope.content);
   const videoUrl = content?.video_url;
-  if (status === "succeeded" && typeof videoUrl !== "string" && !job.warned.missingUrl) {
-    job.warned.missingUrl = true;
+  if (status === "succeeded" && typeof videoUrl !== "string" && !warned.missingUrl) {
+    warned.missingUrl = true;
     logger.warn(
       `BytePlus video fixture for job ${job.id} reports status "succeeded" but carries no ` +
         `content.video_url — the client will throw "Video is not ready for download. Check ` +
@@ -347,11 +426,23 @@ export function serializeBytePlusVideoTask(
     );
   }
 
+  // Gated on the SAME two facts the missing-url warn above is gated on: the
+  // 24h TTL is a property of a succeeded task's OUTPUT url, so without a
+  // `succeeded` status AND a url actually present there is nothing that can
+  // have expired. Ungated, this told the operator that a `failed` /
+  // `cancelled` / `expired` envelope — which carries no `content` at all —
+  // "has a content.video_url that expired", a wire fact that is not true.
   const updatedAt = envelope.updated_at;
-  if (typeof updatedAt === "number" && Number.isFinite(updatedAt) && !job.warned.expiredUrl) {
+  if (
+    status === "succeeded" &&
+    typeof videoUrl === "string" &&
+    typeof updatedAt === "number" &&
+    Number.isFinite(updatedAt) &&
+    !warned.expiredUrl
+  ) {
     const expiresAt = updatedAt + BYTEPLUS_URL_TTL_SECONDS;
     if (expiresAt * 1000 < Date.now()) {
-      job.warned.expiredUrl = true;
+      warned.expiredUrl = true;
       logger.warn(
         `BytePlus video fixture for job ${job.id} has a content.video_url that expired at ` +
           `${new Date(expiresAt * 1000).toISOString()} (Ark output urls live 24h from ` +
@@ -647,7 +738,6 @@ export async function handleBytePlusVideoCreate(
     pollsBeforeRunning: progression.pollsBeforeInProgress,
     pollsBeforeTerminal: progression.pollsBeforeCompleted,
     envelope,
-    warned: {},
   };
   if (progression.pollsBeforeCompleted === 0) job.phase = "terminal";
 
@@ -945,7 +1035,6 @@ async function proxyBytePlusVideoSubmit(args: {
     upstreamTaskId,
     upstreamPollingUrl,
     match: buildFixtureMatch(matchRequest, record),
-    phase: "queued",
   };
   if (jobs.generation === worldGeneration) {
     jobs.set(`${testId}:${id}`, job);
@@ -1102,46 +1191,54 @@ async function proxyBytePlusVideoRecordPoll(args: {
     res.end(JSON.stringify(body));
   };
 
+  // Terminal is derived from the NON-terminal pair, not from a second copy of
+  // the four terminal tokens: a vendor-added end state is captured rather than
+  // proxied until the client gives up.
   const upstreamStatus = String(upstreamBody.status ?? "");
-  const terminal =
-    upstreamStatus === "succeeded" ||
-    upstreamStatus === "failed" ||
-    upstreamStatus === "cancelled" ||
-    upstreamStatus === "expired";
 
-  if (!terminal) {
-    if (jobs.get(key) === job) {
-      if (!job.capturing && job.phase !== "terminal") {
-        job.phase = upstreamStatus === "running" ? "running" : "queued";
-      }
-      jobs.set(key, job); // TTL refresh
-    }
-    relayJson(relayBody);
-    return;
-  }
-
-  if (record.proxyOnly) {
-    if (jobs.get(key) === job) {
-      job.phase = "terminal";
-      jobs.set(key, job); // TTL refresh
-    }
-    relayJson(relayBody);
-    return;
-  }
-
-  if (job.capturing || jobs.get(key) !== job) {
+  if (!isBytePlusTerminalStatus(upstreamStatus)) {
     if (jobs.get(key) === job) jobs.set(key, job); // TTL refresh
     relayJson(relayBody);
     return;
   }
 
-  // Open the capturing window SYNCHRONOUSLY, before any await.
-  job.capturing = true;
-  job.phase = "terminal";
-  jobs.set(key, job);
+  if (record.proxyOnly) {
+    if (jobs.get(key) === job) jobs.set(key, job); // TTL refresh
+    relayJson(relayBody);
+    return;
+  }
 
-  relayJson(relayBody);
+  // THE capture gate, and the only one — map identity, checked once, here.
+  //
+  // It does two jobs at once. (a) It serializes two concurrent terminal polls:
+  // both awaited upstream, and whichever resumes second finds that the first
+  // already swapped the replay job into the map, so it relays without
+  // capturing again. (b) It is the world-generation guard: a fixtures reset
+  // clears the job map, so a job the map no longer holds belongs to a world
+  // that is gone, and persisting would push a stale fixture into the NEXT
+  // world's array. Either way the right answer is the same — relay what
+  // upstream said, persist nothing, say nothing.
+  //
+  // There is NO await between here and the persist below, which is why one
+  // check suffices. Two things previously sat on this path and could not fire:
+  // a `job.capturing` flag (set and cleared inside a single tick, so never
+  // observable by another poll) and a second copy of this identity check
+  // inside the capture body, whose warning named a fixtures reset that this
+  // check had already ruled out one statement earlier. Both are gone. If the
+  // capture is ever made asynchronous, re-check identity immediately before
+  // `persistFixture` — that is the point where it would start to matter.
+  if (jobs.get(key) !== job) {
+    relayJson(relayBody);
+    return;
+  }
 
+  // Capture BEFORE relaying, so a persist failure can still ride an
+  // X-AIMock-Record-Error header on this response — grok-video.ts:1105's
+  // ordering. Nothing here downloads bytes: the capture is a synchronous
+  // persist plus a map swap, so relaying after it costs the client one
+  // filesystem write, and openrouter-video.ts:2521's "the relay left before the
+  // capture started" constraint (which forced it to drop the header) does not
+  // apply.
   captureBytePlusVideoRecordFixture({
     job,
     key,
@@ -1153,11 +1250,18 @@ async function proxyBytePlusVideoRecordPoll(args: {
     upstreamBody,
     res,
   });
+
+  relayJson(relayBody);
 }
 
 /**
  * Capture a terminal record job into a fixture (PERSIST only — NO byte
  * download) and mutate the map entry into a terminal replay job.
+ *
+ * Runs BEFORE the caller relays, and is fully synchronous, so a persist failure
+ * still reaches the client as an `X-AIMock-Record-Error` header rather than
+ * only as a log line behind a 200 the client cannot distinguish from a clean
+ * record.
  *
  * The upstream `id` is REMOVED at capture: replay stamps its own, and keeping a
  * real Ark task id in a committed artifact leaks it for no benefit.
@@ -1180,16 +1284,6 @@ function captureBytePlusVideoRecordFixture(args: {
     const { id: _discardedUpstreamId, ...envelope } = upstreamBody;
     void _discardedUpstreamId;
 
-    // World-generation guard: a fixtures reset clears the job map, so map
-    // identity is a valid proxy for "same world".
-    if (jobs.get(key) !== job) {
-      logger.warn(
-        `BytePlus video capture for task ${job.upstreamTaskId} discarded: the job map no longer ` +
-          `holds this job (fixtures reset or TTL eviction) — nothing persisted`,
-      );
-      return;
-    }
-
     const persistResult = persistFixture({
       record,
       providerKey: "byteplus",
@@ -1202,28 +1296,20 @@ function captureBytePlusVideoRecordFixture(args: {
       res.setHeader("X-AIMock-Record-Error", sanitizeHeaderValue(persistResult.error));
     }
 
-    if (jobs.get(key) === job) {
-      jobs.set(key, {
-        kind: "replay",
-        id: job.id,
-        phase: "terminal",
-        pollCount: 0,
-        pollsBeforeRunning: 0,
-        pollsBeforeTerminal: 0,
-        envelope,
-        warned: {},
-      });
-    }
+    jobs.set(key, {
+      kind: "replay",
+      id: job.id,
+      phase: "terminal",
+      pollCount: 0,
+      pollsBeforeRunning: 0,
+      pollsBeforeTerminal: 0,
+      envelope,
+    });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     logger.error(
       `BytePlus video capture for task ${job.upstreamTaskId} failed unexpectedly (${msg}) — ` +
         `fixture not persisted; the job keeps proxying live`,
     );
-  } finally {
-    // Reset unconditionally: the flag lives on this `job` object, so clearing
-    // it is always safe, and a guarded reset would be a latent landmine if the
-    // capture were ever made async.
-    job.capturing = false;
   }
 }
