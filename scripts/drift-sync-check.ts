@@ -93,7 +93,18 @@ export class SyncCheckConfigError extends Error {}
  * frozen logic surfaces — see the pin re-assert in gate (2), which still
  * blocks an edit here that touches one of those surfaces.
  */
-const ALLOWED_EXACT_FILES: ReadonlySet<string> = new Set(["src/__tests__/drift/model-registry.ts"]);
+const ALLOWED_EXACT_FILES: ReadonlySet<string> = new Set([
+  "src/__tests__/drift/model-registry.ts",
+  // The membership checksums live here, and drift-sync re-pins the ONE affected
+  // key in the same run that applies a human-approved classification. Admitting
+  // the file at the path level is not what keeps this narrow — `onlyPinsChanged`
+  // in drift-sync.ts refuses to write unless the edit is confined to `pin:`
+  // string literals, so the frozen LOGIC in this file remains untouchable by the
+  // sync. Without the entry the approved edit lands and gate-2 immediately reds
+  // on the now-stale pin, so every approval reported gate-failed instead of
+  // ok-applied — the approval affordance the note advertises never worked.
+  "src/__tests__/drift/logic-pin.test.ts",
+]);
 
 /**
  * Needs-human dedup note files (C2) live under this prefix — never a code

@@ -54,6 +54,7 @@ import {
   computeChangesetKey,
   SyncCoreReason,
   MODEL_REGISTRY_REL_PATH,
+  LOGIC_PIN_REL_PATH,
   type SyncCoreDeps,
   type SyncCoreOutcome,
   type ProviderChurnInput,
@@ -242,12 +243,20 @@ function runSync(recollect: () => DriftReport, inputs = churnInputs()): RunResul
   const reverted: string[] = [];
   let recollectCalls = 0;
 
+  let logicPinSource = fixtureLogicPin();
   const deps: SyncCoreDeps = {
     isReferenced: (family) => family === "gemini-2.0-flash",
     isRecorded: () => false,
     readRegistrySource: () => registrySource,
     writeRegistrySource: (text) => {
       registrySource = text;
+    },
+    // The sync re-pins the membership checksum in the same run it applies a
+    // classification, so a harness that omits these gets a (correct) refusal
+    // rather than an applied edit.
+    readLogicPinSource: () => logicPinSource,
+    writeLogicPinSource: (text) => {
+      logicPinSource = text;
     },
     readProposalNote: () => null,
     writeProposalNote: () => {
@@ -356,12 +365,20 @@ function approvedNewFamilyRun(recollect: () => DriftReport): RunResult {
   let registrySource = fixtureRegistrySource();
   const reverted: string[] = [];
   let recollectCalls = 0;
+  let logicPinSource = fixtureLogicPin();
   const deps: SyncCoreDeps = {
     isReferenced: () => false,
     isRecorded: () => false,
     readRegistrySource: () => registrySource,
     writeRegistrySource: (text) => {
       registrySource = text;
+    },
+    // The sync re-pins the membership checksum in the same run it applies a
+    // classification, so a harness that omits these gets a (correct) refusal
+    // rather than an applied edit.
+    readLogicPinSource: () => logicPinSource,
+    writeLogicPinSource: (text) => {
+      logicPinSource = text;
     },
     // An already-approved note for the new family — the sync applies it.
     readProposalNote: () => "Decision: include\n",
@@ -453,7 +470,9 @@ describe("negative controls — the gate still refuses a wrong edit", () => {
     expect(run.outcome.ok).toBe(false);
     expect(run.outcome.reason).toBe(SyncCoreReason.GATE_FAILED);
     expect(run.outcome.detail).toContain(SyncCheckReason.RESIDUAL_CRITICAL_DRIFT);
-    expect(run.reverted).toEqual([MODEL_REGISTRY_REL_PATH]);
+    // Both mutated files revert: the registry edit AND the pin that was moved
+    // to match it. Reverting one without the other leaves a lying canary.
+    expect(run.reverted).toEqual([MODEL_REGISTRY_REL_PATH, LOGIC_PIN_REL_PATH]);
   });
 
   it("WRONG EDIT: an off-allowlist file -> reverted, gate-1 never reaches the re-collect", () => {
@@ -486,3 +505,21 @@ describe("negative controls — the gate still refuses a wrong edit", () => {
     expect(verdict.reason).toBe(SyncCheckReason.PIN_CHECK_FAILED);
   });
 });
+
+/** DATA_FROZEN stand-in covering every key this file's runs can move. */
+function fixtureLogicPin(): string {
+  const keys = [
+    "includeFamilies.openai",
+    "includeFamilies.anthropic",
+    "includeFamilies.gemini",
+    "excludeFamilies.openai",
+    "excludeFamilies.anthropic",
+    "excludeFamilies.gemini",
+  ];
+  return [
+    "const DATA_FROZEN = {",
+    ...keys.flatMap((k, i) => [`  "${k}": {`, `    pin: "${String(i).repeat(64)}",`, "  },"]),
+    "};",
+    "",
+  ].join("\n");
+}

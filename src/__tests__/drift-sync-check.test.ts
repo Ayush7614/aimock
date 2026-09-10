@@ -59,6 +59,10 @@ function report(criticalCounts: number[]): DriftReport {
 describe("isAllowedSyncFile / checkChangedFileAllowlist", () => {
   it("allows the model-registry data file", () => {
     expect(isAllowedSyncFile("src/__tests__/drift/model-registry.ts")).toBe(true);
+    // drift-sync re-pins the membership checksum in the SAME run that applies a
+    // human-approved classification. Without this the edit lands, gate-2 goes
+    // red on the stale pin, and the whole run reports gate-failed.
+    expect(isAllowedSyncFile("src/__tests__/drift/logic-pin.test.ts")).toBe(true);
   });
 
   it("allows a drift-proposals note file at any depth", () => {
