@@ -80,7 +80,14 @@ describe("openai transcription line is classified as EXCLUDED (PR #343)", () => 
     expect(unclassifiedFamilies(["gpt-live-transcribe-mini"], "openai")).toEqual([
       "gpt-live-transcribe-mini",
     ]);
-    expect(unclassifiedFamilies(["gpt-live-1"], "openai")).toEqual(["gpt-live-1"]);
+    // Single-digit trailing suffix is NOT a build tag, so a family carrying one
+    // is normalized to itself and stays unknown. `gpt-live-1` itself is now an
+    // EXCLUDE key (2026-09-10, /v1/live/sessions — see model-registry.ts), so the
+    // unknown-side exemplar is an unclassified sibling; `gpt-live-1-mini` also
+    // proves the new exclude key does not swallow families that EXTEND it.
+    expect(unclassifiedFamilies(["gpt-live-9"], "openai")).toEqual(["gpt-live-9"]);
+    expect(unclassifiedFamilies(["gpt-live-1-mini"], "openai")).toEqual(["gpt-live-1-mini"]);
+    expect(unclassifiedFamilies(["gpt-live-1"], "openai")).toEqual([]);
   });
 
   it("every enumerated openai exclude family survives normalization from a dated id", () => {
