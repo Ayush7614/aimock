@@ -321,6 +321,32 @@ export function matchFixtureDiagnostic(
     const reqEndpoint = effective._endpointType as string | undefined;
     if (match.endpoint !== undefined) {
       if (match.endpoint !== reqEndpoint) continue;
+      // A declared endpoint used to END the shape discussion — the router
+      // matched on the name and never looked at the response. That was safe
+      // only while one endpoint name meant one response shape. `video` no
+      // longer does: it is a SHARED namespace holding both VideoResponse
+      // fixtures (Sora / Grok / Veo / OpenRouter) and RawJSONResponse Ark task
+      // envelopes (BytePlus), and EVERY BytePlus fixture is required to declare
+      // `endpoint: "video"`. One such fixture therefore became a first-class
+      // candidate for all four other handlers, each of which then failed its
+      // own isVideoResponse guard and returned 500 — a single BytePlus fixture
+      // broke every other video provider in the same suite.
+      //
+      // Deliberately narrow: it filters ONLY the raw-JSON half of the shared
+      // video namespace out of the non-BytePlus handlers. Every other
+      // wrong-shape fixture still reaches its handler, which names the problem
+      // itself ("Fixture response is not a video type", BytePlus's "NOT a
+      // VideoResponse" warn) — a clearer diagnostic than a silent no-match.
+      // `_videoProvider` is a routing fact of the INBOUND request, so it is
+      // read off `req`, not off the post-`requestTransform` copy.
+      if (
+        reqEndpoint === "video" &&
+        req._videoProvider !== "byteplus" &&
+        typeof fixture.response !== "function" &&
+        isJSONResponse(fixture.response)
+      ) {
+        continue;
+      }
     } else if (
       reqEndpoint &&
       reqEndpoint !== "chat" &&

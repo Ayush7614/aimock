@@ -106,6 +106,15 @@
           bare 404. Recorded fixtures always carry it.
         </p>
 
+        <p>
+          <code>endpoint: "video"</code> is a namespace shared with Sora, Grok, Veo and OpenRouter,
+          which consume aimock's <code>video</code> response type rather than a raw envelope. The
+          router keeps the two halves apart for you: a <code>json</code> fixture is never offered to
+          those handlers, so a BytePlus fixture in a mixed suite cannot make their submits fail. You
+          do not need <code>match.model</code> to get that isolation — though recording always
+          writes it, and it is still what separates two BytePlus models sharing a prompt.
+        </p>
+
         <pre><code>{
   "match": {
     "userMessage": "a guitar being played in a store\n[media: first_frame:9f2a1c4b7e03]",
@@ -147,12 +156,19 @@
 [media: first_frame:9f2a1c4b7e03]</code></pre>
 
         <p>
+          The <code>[media: …]</code> line is <strong>always present</strong>, even for a text-only
+          job, where it reads <code>[media: ]</code>. That is what keeps a text-to-video recording
+          from shadowing an image-to-video request that shares its prompt: aimock matches
+          <code>userMessage</code> as a substring by default, and a bare prompt is a prefix of the
+          same prompt with a media line under it. Every input part contributes an entry, including
+          one whose shape aimock does not recognise — no content array produces an empty key.
+        </p>
+
+        <p>
           The digest is taken over the input URL — including a
           <code>data:</code> URI, so a multi-megabyte inline image never reaches the fixture.
-          Hand-authoring a fixture for a media job means copying that line from a recorded one. Note
-          that aimock matches <code>userMessage</code> as a substring by default, so a hand-authored
-          key of just the bare prompt still matches every media variant of it; set
-          <code>useExactMatch</code> if you need one specific variant.
+          Hand-authoring a fixture means copying the whole key, both lines, from a recorded one; a
+          key of just the bare prompt matches nothing.
         </p>
 
         <h2>Multi-tenant tests use a header, not a query string</h2>

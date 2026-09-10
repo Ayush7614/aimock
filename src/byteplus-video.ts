@@ -218,9 +218,9 @@ function mediaUrlOf(part: BytePlusContentPart): string | undefined {
 /**
  * The synthetic user message a submit is matched on.
  *
- * Concatenated text of every `type: "text"` part, plus — when any non-text part
- * is present — a newline and `[media: <role>:<sha256(url) first 12 hex>, …]`,
- * one entry per non-text part in array order.
+ * Concatenated text of every `type: "text"` part, then ALWAYS a newline and
+ * `[media: <role>:<sha256 first 12 hex>, …]` — one entry per non-text part in
+ * array order, `[media: ]` when there are none.
  *
  * WHY the digest: a Seedance image-to-video job carries NO text part, so a
  * text-only key would record `{ endpoint, model }` — a wildcard matching every
@@ -230,6 +230,24 @@ function mediaUrlOf(part: BytePlusContentPart): string | undefined {
  * reference-media are first-class Seedance modes, so two recordings with the
  * same prompt and different first frames must stay distinguishable.
  *
+ * WHY the marker is UNCONDITIONAL: this key lands in `match.userMessage`, which
+ * the router SUBSTRING-matches by default (`useExactMatch = !!requestTransform`).
+ * A conditional suffix makes the text-only key `"a guitar"` a prefix of the
+ * image-to-video key `"a guitar\n[media: …]"`, so a t2v recording silently
+ * serves its own video_url to an i2v request that shares the prompt — a 200
+ * with the wrong bytes. Emitting `[media: ]` for the text-only case makes
+ * neither key a substring of the other. Prefixing would NOT fix it: the plain
+ * text is still contained in the prefixed form.
+ *
+ * WHY every unrecognised part still contributes: `mediaUrlOf` resolves exactly
+ * `image_url` / `video_url` / `audio_url` with a `{ url: string }` wrapper, and
+ * the whole wire contract here is unverified against BytePlus. Dropping the
+ * parts it cannot resolve reopened both failures above — an all-unrecognised
+ * content array returned `""` and minted the very wildcard this key exists to
+ * prevent, and two different unrecognised parts collapsed onto one key. They
+ * are digested over their own JSON instead, so they stay distinguishable
+ * without the key ever carrying the part's payload.
+ *
  * The digest is taken over the url string whether that is a public URL or a
  * multi-megabyte `data:` URI, and only 12 hex are kept — the match key stays
  * short and the fixture never grows a data URI.
@@ -238,30 +256,48 @@ function mediaUrlOf(part: BytePlusContentPart): string | undefined {
  * documented default), else the part's `type` token — which is read off the
  * request rather than drawn from the vendor's role vocabulary.
  */
+function digest12(value: string): string {
+  return crypto.createHash("sha256").update(value).digest("hex").slice(0, 12);
+}
+
+/** Stable-enough serialisation of a part the media table could not resolve. */
+function unresolvedPartToken(raw: unknown): string {
+  if (raw === null || typeof raw !== "object") return `part:${digest12(String(raw))}`;
+  const part = raw as BytePlusContentPart;
+  const role = typeof part.type === "string" && part.type ? part.type : "part";
+  let serialised: string;
+  try {
+    serialised = JSON.stringify(raw) ?? String(raw);
+  } catch {
+    serialised = String(raw);
+  }
+  return `${role}:${digest12(serialised)}`;
+}
+
 export function buildBytePlusMatchText(content: readonly unknown[]): string {
   const texts: string[] = [];
   const media: string[] = [];
   for (const raw of content) {
-    if (raw === null || typeof raw !== "object") continue;
-    const part = raw as BytePlusContentPart;
-    if (part.type === "text") {
+    const part = raw !== null && typeof raw === "object" ? (raw as BytePlusContentPart) : undefined;
+    if (part?.type === "text") {
       if (typeof part.text === "string" && part.text) texts.push(part.text);
       continue;
     }
-    const url = mediaUrlOf(part);
-    if (url === undefined) continue;
+    const url = part === undefined ? undefined : mediaUrlOf(part);
+    if (part === undefined || url === undefined) {
+      media.push(unresolvedPartToken(raw));
+      continue;
+    }
     const role =
       typeof part.role === "string" && part.role
         ? part.role
         : part.type === "image_url"
           ? "first_frame"
           : String(part.type);
-    const digest = crypto.createHash("sha256").update(url).digest("hex").slice(0, 12);
-    media.push(`${role}:${digest}`);
+    media.push(`${role}:${digest12(url)}`);
   }
-  const text = texts.join("\n");
-  if (media.length === 0) return text;
   const suffix = `[media: ${media.join(", ")}]`;
+  const text = texts.join("\n");
   return text ? `${text}\n${suffix}` : suffix;
 }
 
