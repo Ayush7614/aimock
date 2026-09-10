@@ -15,7 +15,11 @@
  *
  * A SECOND, authenticated canary (`ARK_API_KEY`) probes the RESOURCE layer — an
  * unknown task id — and stays `skipIf`-gated until a key is mirrored to repo
- * secrets. It is an upgrade, not the coverage.
+ * secrets. It is an upgrade, not the coverage. Its 404 expectation is NOT a
+ * verified vendor fact: it is inferred from the error shape in
+ * `@tanstack/ai-byteplus@0.3.4` and has never been checked against live Ark (no
+ * ARK_API_KEY exists in this repo). If it ever reports 400 or
+ * 200-with-an-error-body, the expectation is what is wrong.
  *
  * WHAT WAS DELETED AND WHY. This file previously ran three
  * `triangulate(sdkShape, sdkShape, mockShape)` checks whose "vendor truth" side

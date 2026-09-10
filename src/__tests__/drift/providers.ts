@@ -985,6 +985,11 @@ export async function probeBytePlusArkAuthEnvelope(
  * — if Ark answers a bad task id with 400, or 200-with-an-error-body, this
  * canary must be rewritten or dropped rather than "fixed" by loosening it. The
  * KEYLESS probe above is the one that carries this surface today.
+ *
+ * READ A 401/403 HERE AS A REGION MISMATCH FIRST, not as drift. An ARK_API_KEY
+ * minted outside {@link BYTEPLUS_ARK_DEFAULT_BASE_URL}'s region does not
+ * authenticate against that host; point `ARK_BASE_URL` at the region the key
+ * was minted in rather than loosening this canary.
  */
 export async function probeBytePlusArkUnknownTask(
   apiKey: string,

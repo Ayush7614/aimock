@@ -226,7 +226,7 @@ describe("POST /api/v3/contents/generations/tasks (submit)", () => {
     mock = undefined;
   });
 
-  test("fixture match returns { id } with a live-Ark-shaped cgt- prefix, HTTP 200", async () => {
+  test("fixture match returns { id } with a cgt- prefixed id, HTTP 200", async () => {
     mock = new LLMock({ port: 0 });
     mock.addFixture(videoFixture("a guitar being played", envelope()));
     await mock.start();
@@ -238,7 +238,15 @@ describe("POST /api/v3/contents/generations/tasks (submit)", () => {
     expect(res.status).toBe(200);
     expect(typeof res.json.id).toBe("string");
     expect(res.json.id.startsWith("cgt-")).toBe(true);
-    // The submit body is `{ id }` and nothing else, per the live-verified shape.
+    // The submit body is `{ id }` and nothing else. PROVENANCE: the create-response
+    // type in `@tanstack/ai-byteplus@0.3.4` (`src/video/wire-types.ts`), the client
+    // the requester uses — NOT a call aimock made. That package is a SECONDARY
+    // source: its types are hand-written from harvested Ark OpenAPI documents plus
+    // live calls its own author documents making on 2026-07-31. Nothing on this
+    // surface was verified against live Ark by this repo (see the same caveat on
+    // `probeBytePlusArkUnknownTask` in src/__tests__/drift/providers.ts). If Ark is
+    // ever observed returning e.g. `{ id, status: "queued" }`, this assertion is
+    // the thing to CHANGE, not the thing to defend.
     expect(Object.keys(res.json)).toEqual(["id"]);
   });
 
@@ -483,7 +491,7 @@ describe("GET /api/v3/contents/generations/tasks/{id} (poll)", () => {
     warnSpy.mockRestore();
   });
 
-  test("a status outside the vendor's six warns once, naming the client's throw, and serves", async () => {
+  test("a status outside the client library's six warns once, naming the client's throw, and serves", async () => {
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
     const id = await start(envelope({ status: "rejected" }), { logLevel: "warn" });
     expect((await poll(mock!, id)).json.status).toBe("rejected");

@@ -68,6 +68,17 @@
         <pre><code>npx aimock --record --provider-byteplus https://ark.ap-southeast.bytepluses.com</code></pre>
 
         <p>
+          This is the easy mistake to make, because
+          <code>https://ark.&lt;region&gt;.bytepluses.com/api/v3</code> is the value BytePlus
+          publishes as the OpenAI-SDK <code>base_url</code> — and pasting it here would send every
+          BytePlus request (video, chat and images alike) to <code>/api/v3/api/v3/&hellip;</code>,
+          which fails upstream as a 404 that does not name its cause. aimock therefore
+          <strong>refuses to start</strong> when <code>--provider-byteplus</code> ends in
+          <code>/api/v3</code>, rather than silently rewriting the URL you gave it. Drop the suffix;
+          keep the region.
+        </p>
+
+        <p>
           <strong
             >2. Point your client's <code>baseURL</code> at
             <code>&lt;aimock&gt;/api/v3</code>.</strong

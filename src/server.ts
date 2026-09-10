@@ -1465,6 +1465,46 @@ export async function createServerWithResolvedAuth(
     }
   }
 
+  // Reject a BytePlus upstream base that already carries Ark's `/api/v3`
+  // prefix. `record.providers.byteplus` is an ORIGIN: the video handlers pass
+  // the full `/api/v3/contents/generations/tasks[...]` constant to
+  // resolveUpstreamUrl, and the chat/images proxies relay the client's raw
+  // `req.url` (which is itself `/api/v3/...`). BytePlus publishes
+  // `https://ark.<region>.bytepluses.com/api/v3` as the OpenAI-SDK `base_url`,
+  // so pasting that into --provider-byteplus is the expected mistake, and it
+  // composes `/api/v3/api/v3/...` on every BytePlus path.
+  //
+  // This THROWS rather than silently stripping the suffix, for two reasons.
+  // (1) Nothing is being taken away: the doubled form cannot serve any
+  // BytePlus request, so there is no working configuration to preserve —
+  // whereas a silent strip would make aimock rewrite an operator-supplied URL
+  // and would be flatly wrong for the one case where a path-suffixed base is
+  // deliberate (a reverse proxy mounted under a path: stripping sends the
+  // request to the origin, bypassing the mount). (2) A warn is easy to miss in
+  // a mock server's log stream, and the symptom it leaves behind — a relayed
+  // upstream 404 — does not name its cause. Fail at startup, where the message
+  // can.
+  {
+    const bytePlusBase = options?.record?.providers?.byteplus;
+    if (bytePlusBase !== undefined) {
+      let basePath: string | undefined;
+      try {
+        basePath = new URL(bytePlusBase).pathname;
+      } catch {
+        // Not parseable as an absolute URL — leave it to the request path to
+        // report; this guard only speaks to the prefix-doubling mistake.
+      }
+      if (basePath !== undefined && /(^|\/)api\/v3\/?$/.test(basePath)) {
+        throw new Error(
+          `record.providers.byteplus (${bytePlusBase}) ends in /api/v3, but aimock ` +
+            `appends the /api/v3 prefix itself — every BytePlus request would go to ` +
+            `/api/v3/api/v3/... and fail upstream. Configure the ORIGIN only ` +
+            `(e.g. https://ark.ap-southeast.bytepluses.com).`,
+        );
+      }
+    }
+  }
+
   // Programmatic default: finite caps so long-running embedders don't inherit
   // an unbounded journal / fixture-count map. Callers that need unbounded
   // retention (e.g. short-lived test harnesses) can opt in by passing 0.
@@ -1896,10 +1936,6 @@ export async function createServerWithResolvedAuth(
       return;
     }
 
-    // OpenRouter discovery endpoints. Dispatched BEFORE normalizeCompatPath
-    // (which does not rewrite these — /models etc. are excluded from
-    // COMPAT_SUFFIXES — so they would otherwise 404), mirroring the
-    // /api/v1/videos ordering above. Read-only metadata; no body.
     // ── BytePlus Ark (Seedance) async video task lifecycle ──────────────────
     // Registered in the PRE-REWRITE band, alongside the OpenRouter video routes
     // above: normalizeCompatPath does not currently claim these paths, but the
@@ -1998,6 +2034,10 @@ export async function createServerWithResolvedAuth(
       return;
     }
 
+    // OpenRouter discovery endpoints. Dispatched BEFORE normalizeCompatPath
+    // (which does not rewrite these — /models etc. are excluded from
+    // COMPAT_SUFFIXES — so they would otherwise 404), mirroring the
+    // /api/v1/videos ordering above. Read-only metadata; no body.
     if (pathname === "/api/v1/models" && req.method === "GET") {
       handleOpenRouterModels(req, res, fixtures, journal, defaults, setCorsHeaders);
       return;
