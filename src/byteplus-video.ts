@@ -266,6 +266,24 @@ function mediaUrlOf(part: BytePlusContentPart): string | undefined {
   return typeof url === "string" ? url : undefined;
 }
 
+function digest12(value: string): string {
+  return crypto.createHash("sha256").update(value).digest("hex").slice(0, 12);
+}
+
+/** Stable-enough serialisation of a part the media table could not resolve. */
+function unresolvedPartToken(raw: unknown): string {
+  if (raw === null || typeof raw !== "object") return `part:${digest12(String(raw))}`;
+  const part = raw as BytePlusContentPart;
+  const role = typeof part.type === "string" && part.type ? part.type : "part";
+  let serialised: string;
+  try {
+    serialised = JSON.stringify(raw) ?? String(raw);
+  } catch {
+    serialised = String(raw);
+  }
+  return `${role}:${digest12(serialised)}`;
+}
+
 /**
  * The synthetic user message a submit is matched on.
  *
@@ -309,24 +327,6 @@ function mediaUrlOf(part: BytePlusContentPart): string | undefined {
  * part's `type` token, which is read off the request rather than drawn from any
  * role vocabulary.
  */
-function digest12(value: string): string {
-  return crypto.createHash("sha256").update(value).digest("hex").slice(0, 12);
-}
-
-/** Stable-enough serialisation of a part the media table could not resolve. */
-function unresolvedPartToken(raw: unknown): string {
-  if (raw === null || typeof raw !== "object") return `part:${digest12(String(raw))}`;
-  const part = raw as BytePlusContentPart;
-  const role = typeof part.type === "string" && part.type ? part.type : "part";
-  let serialised: string;
-  try {
-    serialised = JSON.stringify(raw) ?? String(raw);
-  } catch {
-    serialised = String(raw);
-  }
-  return `${role}:${digest12(serialised)}`;
-}
-
 export function buildBytePlusMatchText(content: readonly unknown[]): string {
   const texts: string[] = [];
   const media: string[] = [];
