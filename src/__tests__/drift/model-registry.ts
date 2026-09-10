@@ -219,6 +219,13 @@ export const excludeFamilies: Record<Provider, Set<string>> = {
     "gpt-image-1-mini",
     "gpt-image-1.5",
     "gpt-image-2",
+    // 2026-09-10 image line. `gpt-image-2.5-flare` / `gpt-image-2.5-sunburst`
+    // are image-generation models on the same lineage as the already-excluded
+    // `gpt-image-2` — they serve /v1/images/generations, not
+    // /v1/chat/completions, so they are wrong-modality here and are NOT
+    // text-generation drift. Same treatment as every other gpt-image-* family.
+    "gpt-image-2.5-flare",
+    "gpt-image-2.5-sunburst",
     "chatgpt-image-latest",
     // Bare chat alias — a moving alias (not a stable mocked family); matches the
     // *-latest exclude policy (chatgpt-image-latest, omni-moderation-latest, etc.)

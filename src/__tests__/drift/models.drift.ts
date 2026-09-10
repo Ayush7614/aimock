@@ -332,6 +332,8 @@ describe("full live /models wave is fully classified (2026-07-16 drift)", () => 
       "gpt-image-1-mini",
       "gpt-image-1.5",
       "gpt-image-2",
+      "gpt-image-2.5-flare",
+      "gpt-image-2.5-sunburst",
       "sora-2",
       "sora-2-pro",
       "omni-moderation",
