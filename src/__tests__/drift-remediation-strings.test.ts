@@ -25,10 +25,12 @@
  * `drift-proposals/*.md` are the OPPOSITE: drift-sync WRITES them mechanically,
  * a human may hand-annotate them, and `fb9d9c5`-style cleanups legitimately
  * DELETE them once resolved — the directory is routinely empty and is not even
- * tracked when it holds no notes. A freshly generated note cites no symbol at
- * all (see `renderProposalNote`), so requiring one to yield a pair turns the very
- * next needs-human PR red with a false "prose was removed" message, and pinning
- * the pair-count floor to note-borne pairs makes deleting a resolved note fail.
+ * tracked when it holds no notes. Some generated notes cite a symbol (the
+ * new-family template names `knownVoiceModelFamilies in voice-models.ts`, the
+ * second surface a voice/audio classification needs by hand) and some cite
+ * nothing at all, so requiring one to yield a pair turns the very next
+ * needs-human PR red with a false "prose was removed" message, and pinning the
+ * pair-count floor to note-borne pairs makes deleting a resolved note fail.
  * They are therefore scanned OPPORTUNISTICALLY: whatever citation a note does
  * carry must resolve, and no note may name a retired symbol, but a note is never
  * required to carry a citation and an absent/empty directory is not an error.
@@ -352,14 +354,22 @@ describe("the guard accepts the input it is supposed to accept", () => {
     try {
       const note = freshGeneratedNote(dir);
 
-      // A generated note cites no symbol — that is CORRECT, not a removed
-      // citation, so it must not be required to yield a pair.
-      expect(
-        collectPairs([note]),
-        `drift-sync's generated note template now yields a "<symbol> in <file>" ` +
-          `pair. That is fine, but it means the template changed — re-read the ` +
-          `module docstring before assuming notes are still citation-free.`,
-      ).toEqual([]);
+      // A generated note is not REQUIRED to cite anything (see `requiresPair`
+      // below) — but the new-family template now does cite one deliberately: the
+      // voice/audio carve-out has to name the second, disjoint surface a human
+      // must edit by hand, or the note describes a decision the sync will refuse
+      // to apply without saying where the other half lives. Opportunistic
+      // scanning is exactly the contract for that: whatever a note DOES cite
+      // must resolve.
+      for (const pair of collectPairs([note])) {
+        const file = resolveCitedFile(pair.file);
+        expect(file, `generated note cites ${pair.file}, which resolves nowhere`).not.toBeNull();
+        expect(
+          declaresSymbol(file!, pair.symbol),
+          `generated note cites "${pair.symbol} in ${pair.file}", but that file does ` +
+            `not declare it — the note sends its reader after a ghost.`,
+        ).toBe(true);
+      }
       expect(
         requiresPair(note),
         `A drift-proposals note is being REQUIRED to carry a citation. Generated ` +

@@ -32,7 +32,13 @@ import { fileURLToPath } from "node:url";
 
 import ts from "typescript";
 
-import { evaluateSyncCheck, runPinCheck, recollect } from "./drift-sync-check.js";
+import {
+  evaluateSyncCheck,
+  runPinCheck,
+  recollect,
+  readCommittedFile,
+} from "./drift-sync-check.js";
+import { LOGIC_PIN_REL_PATH, updateDataFrozenPin, verifyPinFileEdit } from "./drift-pin-file.js";
 import type { DriftReport, DriftSeverity } from "./drift-types.js";
 
 import { normalizeModelFamily } from "../src/__tests__/drift/model-family.js";
@@ -48,6 +54,11 @@ import {
   isFamilyStillReferenced,
   isForwardLookingFamily,
 } from "../src/__tests__/drift/deprecation-detector.js";
+import {
+  isVoiceModelId,
+  knownVoiceModelFamilies,
+  normalizeVoiceModelFamily,
+} from "../src/__tests__/drift/voice-models.js";
 import {
   InfraError,
   isInfraSkip,
@@ -480,7 +491,25 @@ export const DRIFT_PROPOSALS_DIR = "drift-proposals";
  * records mechanically (see `deprecatedFamilies` in model-registry.ts), so it
  * never produces a note and never pages anyone.
  */
-export type ProposalKind = "new-family" | "registry-structural-mismatch";
+export type ProposalKind =
+  | "new-family"
+  | "registry-structural-mismatch"
+  /**
+   * A human's `Decision:` on a VOICE/AUDIO family. `excludeFamilies` and
+   * `knownVoiceModelFamilies` are deliberately disjoint surfaces (see
+   * `voice-models.ts`), and the sync writes only the first — so applying a
+   * voice family's classification alone leaves the realtime canary red, the
+   * gate refuses the run, both files revert, and the identical note re-fires
+   * the same apply/fail/revert every night forever. Routed to a human instead.
+   */
+  | "voice-seed-set"
+  /**
+   * A classification a human decided that drift-sync could NOT safely re-pin.
+   * The registry edit was refused wholesale, so this run wrote nothing but this
+   * note — which exists so the refusal has a deduped, human-facing artifact
+   * instead of only a red job.
+   */
+  | "pin-repin-failure";
 export type ProposalDecision = "pending" | "include" | "exclude";
 
 /** Family-keyed dedup path — re-firing the same alert always resolves to the SAME path. */
@@ -490,7 +519,12 @@ export function proposalNoteRelPath(
   kind: ProposalKind,
 ): string {
   const slug = family.replace(/[^a-z0-9.-]+/gi, "-");
-  const kindSlug = kind === "new-family" ? "new-family" : "structural-mismatch";
+  const kindSlug =
+    kind === "new-family"
+      ? "new-family"
+      : kind === "registry-structural-mismatch"
+        ? "structural-mismatch"
+        : kind;
   return `${DRIFT_PROPOSALS_DIR}/${provider}-${slug}-${kindSlug}.md`;
 }
 
@@ -516,7 +550,11 @@ export function renderProposalNote(
   const title =
     kind === "new-family"
       ? "New / unclassified model family"
-      : "Registry structural mismatch — mechanical edit could not be applied";
+      : kind === "registry-structural-mismatch"
+        ? "Registry structural mismatch — mechanical edit could not be applied"
+        : kind === "voice-seed-set"
+          ? "Voice/audio family — classification needs a second, hand-written edit"
+          : "Membership re-pin refused — classification not applied";
   const lines = [
     `# ${title}: ${family}`,
     "",
@@ -539,7 +577,17 @@ export function renderProposalNote(
       "     The NEXT drift-sync run then applies the mechanical registry edit to",
       "     includeFamilies or excludeFamilies respectively, and re-pins that",
       "     set's membership checksum in the same commit (still zero-LLM: this",
-      "     is a human-authored decision, not generated code). -->",
+      "     is a human-authored decision, not generated code).",
+      "",
+      "     ONE EXCEPTION, and it is the common one for `exclude`: a VOICE/AUDIO",
+      "     family (realtime / audio / live / transcribe / whisper / voice / tts)",
+      "     is watched by a SECOND canary whose seed set — knownVoiceModelFamilies",
+      "     in src/__tests__/drift/voice-models.ts — is a deliberately disjoint",
+      "     surface drift-sync does not write. Classifying such a family in the",
+      "     registry alone leaves that canary red, so the run would gate-fail and",
+      "     revert, nightly, forever. drift-sync therefore does NOT auto-apply it:",
+      "     it drops a `-voice-seed-set.md` note and a human makes both edits in",
+      "     one reviewed commit. -->",
       "Decision: pending",
       "",
     );
@@ -574,16 +622,35 @@ export const MODEL_REGISTRY_REL_PATH = "src/__tests__/drift/model-registry.ts";
 // the human-authored `Decision:` line in the drift-proposals/ note. Once that
 // verdict exists, moving the pin is bookkeeping, not judgement.
 //
-// Two things keep this narrow:
-//   1. `updateDataFrozenPin` rewrites the pin of exactly ONE named key, and
-//      refuses (locatorMiss) if that key is absent or appears more than once.
-//   2. `onlyPinsChanged` re-reads the result and refuses the write unless every
-//      byte outside a `pin:` string literal is identical. The frozen LOGIC in
-//      that file is therefore unreachable by the sync even though the path sits
-//      on drift-sync-check's allowlist.
+// Three things keep this narrow, and only the first two are this module's:
+//   1. `updateDataFrozenPin` rewrites the pin of exactly ONE named key, located
+//      through the TypeScript AST and replaced span-exactly INSIDE that entry's
+//      own string literal, and refuses (locatorMiss) if the key is absent,
+//      duplicated, or carries no recognisable digest.
+//   2. `verifyPinFileEdit` re-reads the result and refuses the write unless
+//      re-applying THIS RUN'S re-pins to the pre-edit file reproduces it byte
+//      for byte. "Only `pin:` literals moved" is not that check: every `pin:`
+//      literal — the FROZEN LOGIC checksums included — masks to the same token,
+//      so both a wrong-key write and a re-pasted logic checksum read as
+//      pin-only.
+//   3. The EXTERNAL gate. `drift-sync-check` evaluates the same predicate over
+//      the git diff, keyed to `SYNC_REPINNABLE_KEYS`. That one is what actually
+//      constrains the file, because it does not trust this writer at all.
 // ---------------------------------------------------------------------------
 
-export const LOGIC_PIN_REL_PATH = "src/__tests__/drift/logic-pin.test.ts";
+// The pin-file locator, rewriter and verifier live in `drift-pin-file.ts` — see
+// that module's header for why they are not in here: the CHECKER has to evaluate
+// the same predicate over the git diff, and a constraint on the pin file that
+// only the writer enforces is not a constraint on the pin file.
+export {
+  LOGIC_PIN_REL_PATH,
+  updateDataFrozenPin,
+  onlyPinsChanged,
+  diffPinKeys,
+  parseDataFrozenPins,
+  verifyPinFileEdit,
+  SYNC_REPINNABLE_KEYS,
+} from "./drift-pin-file.js";
 
 /** The DATA_FROZEN key a `<listName>[<provider>]` membership set is pinned under. */
 export function dataFrozenKey(listName: RegistrySetName, provider: Provider): string {
@@ -594,64 +661,16 @@ export function dataFrozenKey(listName: RegistrySetName, provider: Provider): st
  * The pin value logic-pin.test.ts computes for a membership set:
  * `sha256(JSON.stringify(sortedMembers))`. Mirrors that file's own `sha256`
  * helper and its `members()` accessor, which sorts before hashing.
+ *
+ * DEDUPED, because the real sets are `Set`s built through `familySet`: if an
+ * applied family ever normalises onto an existing member, hashing the plain
+ * concatenation would pin a duplicated array the pin file can never reproduce —
+ * a wrong pin that reds gate-2 and reads like a spurious membership change.
  */
 export function computeMembershipPin(members: readonly string[]): string {
   return createHash("sha256")
-    .update(JSON.stringify([...members].sort()))
+    .update(JSON.stringify([...new Set(members)].sort()))
     .digest("hex");
-}
-
-/** Every `pin: "<hex>"` literal, normalised away — used to prove a diff is pin-only. */
-function maskPins(source: string): string {
-  return source.replace(/pin:\s*"[0-9a-f]{64}"/g, 'pin: "<PIN>"');
-}
-
-/**
- * True when `after` differs from `before` ONLY inside `pin:` string literals.
- * This is the guard that makes admitting logic-pin.test.ts to the sync's
- * allowlist safe: a rewrite that touched a frozen source-hash, a member
- * accessor, or any surrounding logic fails here and is never written.
- */
-export function onlyPinsChanged(before: string, after: string): boolean {
-  return maskPins(before) === maskPins(after);
-}
-
-/**
- * Replace the `pin:` literal belonging to ONE DATA_FROZEN key. Returns
- * `locatorMiss` when the key is missing, duplicated, or carries no recognisable
- * pin — the caller routes that to a human rather than guessing, exactly as it
- * does for a registry structural mismatch.
- */
-export function updateDataFrozenPin(
-  source: string,
-  key: string,
-  newPin: string,
-): { text: string; changed: boolean; locatorMiss: boolean } {
-  const keyLiteral = `"${key}":`;
-  const occurrences = source.split(keyLiteral).length - 1;
-  if (occurrences !== 1) return { text: source, changed: false, locatorMiss: true };
-
-  const keyStart = source.indexOf(keyLiteral);
-  // Scope the search to this entry only: from the key to the first `pin:` that
-  // follows it, refusing if another entry's key intervenes.
-  const pinMatch = /pin:\s*"([0-9a-f]{64})"/.exec(source.slice(keyStart));
-  if (!pinMatch || pinMatch.index === undefined) {
-    return { text: source, changed: false, locatorMiss: true };
-  }
-  const absoluteIndex = keyStart + pinMatch.index;
-  const between = source.slice(keyStart + keyLiteral.length, absoluteIndex);
-  if (/"[A-Za-z0-9_.-]+":\s*\{/.test(between)) {
-    // A different DATA_FROZEN entry starts before this key's pin — the file's
-    // shape is not what we assume. Refuse.
-    return { text: source, changed: false, locatorMiss: true };
-  }
-  if (pinMatch[1] === newPin) return { text: source, changed: false, locatorMiss: false };
-
-  const text =
-    source.slice(0, absoluteIndex) +
-    pinMatch[0].replace(pinMatch[1], newPin) +
-    source.slice(absoluteIndex + pinMatch[0].length);
-  return { text, changed: true, locatorMiss: false };
 }
 
 export type RegistrySetName = "includeFamilies" | "excludeFamilies" | "deprecatedFamilies";
@@ -836,12 +855,39 @@ export interface SyncCoreDeps {
   now?: () => Date;
 }
 
+/**
+ * Would classifying `family` in the registry alone leave the REALTIME CANARY
+ * red?
+ *
+ * `ws-realtime.drift.ts` asserts `detectVoiceModelDrift(liveIds).unknown === []`
+ * at CRITICAL severity, and that computation reads `knownVoiceModelFamilies` in
+ * `voice-models.ts` — a set that is deliberately DISJOINT from
+ * `includeFamilies`/`excludeFamilies` and that drift-sync does not write. So for
+ * a family this returns true for, an auto-applied classification is a guaranteed
+ * gate-3 failure: apply, revert, alert — with the note still saying `Decision:
+ * exclude`, so the identical run repeats every night forever. The precedent the
+ * exclude affordance was modelled on (936b59c, gpt-transcribe /
+ * gpt-live-transcribe) needed BOTH edits by hand and says so.
+ *
+ * Both verdicts are covered, not just `exclude`: the canary reads the voice seed
+ * set, not the classification, so `include` of an unknown voice family leaves it
+ * just as red.
+ *
+ * A voice-shaped family ALREADY in the seed set is not affected — the canary is
+ * quiet for it, so the registry edit is the only one outstanding.
+ */
+export function needsVoiceSeedSetEdit(family: string): boolean {
+  return isVoiceModelId(family) && !knownVoiceModelFamilies.has(normalizeVoiceModelFamily(family));
+}
+
 export type FamilyAction =
   | "deprecation-recorded"
   | "added"
   | "excluded"
   | "needs-human-new-family"
   | "needs-human-structural-mismatch"
+  | "needs-human-voice-seed-set"
+  | "needs-human-repin"
   | "no-op";
 
 export interface FamilyOutcome {
@@ -905,6 +951,11 @@ export function gate3SkipReason(outcomes: readonly FamilyOutcome[]): string | nu
     return "this run only RECORDED deprecations, and no live drift surface reads deprecatedFamilies — a re-collect cannot observe this edit";
   }
   return null;
+}
+
+/** The registry set a human `Decision:` word writes into. */
+function listNameFor(decision: "include" | "exclude"): RegistrySetName {
+  return decision === "include" ? "includeFamilies" : "excludeFamilies";
 }
 
 /** Read-or-create a dedup note (write only on first sighting — re-fire never spams a duplicate). */
@@ -1073,13 +1124,51 @@ export function runDriftSyncCore(
         touchedFiles,
       );
       const decision = existing !== null ? parseProposalDecision(existing) : "pending";
-      if (decision === "include" || decision === "exclude") {
+      if ((decision === "include" || decision === "exclude") && needsVoiceSeedSetEdit(family)) {
+        // A DECIDED voice/audio family still needs a second, hand-written edit
+        // to the disjoint voice seed set. Applying half of it is worse than
+        // applying none: the run gate-fails on the still-red realtime canary and
+        // reverts, so the tree ends up identical either way — but the half-apply
+        // spends a nightly alert saying the mechanical edit was wrong. Route it.
+        const vsPath = proposalNoteRelPath(input.provider, family, "voice-seed-set");
+        ensureProposalNote(
+          deps,
+          vsPath,
+          () =>
+            renderProposalNote(
+              input.provider,
+              family,
+              "voice-seed-set",
+              `A human decided "${family}" (Decision: ${decision}, in ${notePath}), but this is a ` +
+                `VOICE/AUDIO family and its normalized family key is not in ` +
+                `knownVoiceModelFamilies. Two disjoint surfaces need the entry, and drift-sync ` +
+                `writes only one of them:\n\n` +
+                `  1. ${listNameFor(decision)}.${input.provider} in ${MODEL_REGISTRY_REL_PATH}\n` +
+                `  2. knownVoiceModelFamilies in src/__tests__/drift/voice-models.ts (plus its ` +
+                `DATA_FROZEN membership pin in ${LOGIC_PIN_REL_PATH})\n\n` +
+                `Applying (1) alone leaves ws-realtime.drift.ts reporting ` +
+                `UNKNOWN_REALTIME_MODELS=${family} at critical severity, so drift-sync-check ` +
+                `refuses the run and reverts it — nightly, forever. A human must make both ` +
+                `edits in one reviewed commit (precedent: 936b59c).`,
+              stamp,
+            ),
+          touchedFiles,
+        );
+        outcomes.push({
+          provider: input.provider,
+          family,
+          action: "needs-human-voice-seed-set",
+          detail:
+            `"${family}" was decided (${decision}) but is a voice/audio family absent from ` +
+            `knownVoiceModelFamilies — the registry edit alone would leave the realtime canary ` +
+            `red and be reverted; routed to human (${vsPath})`,
+        });
+      } else if (decision === "include" || decision === "exclude") {
         // Both verdicts are the SAME mechanical edit against a different set.
         // `include` = aimock mocks this family on the chat surface; `exclude` =
         // wrong modality / retired / preview. Neither is ever inferred: the word
         // came from a human's hand in the note.
-        const listName: RegistrySetName =
-          decision === "include" ? "includeFamilies" : "excludeFamilies";
+        const listName = listNameFor(decision);
         const verb = decision === "include" ? "ADDED" : "EXCLUDED";
         const edit = addFamilyLiteralInSource(
           registrySource,
@@ -1205,22 +1294,59 @@ export function runDriftSyncCore(
   // half-applied classification (registry edited, pin stale) is precisely the
   // gate-failed state this whole change exists to eliminate.
   let logicPinSource: string | null = null;
-  if (repins.size > 0) {
-    const readPin = deps.readLogicPinSource;
-    const writePin = deps.writeLogicPinSource;
-    if (!readPin || !writePin) {
-      return {
-        ok: false,
-        reason: SyncCoreReason.NEEDS_HUMAN,
-        detail:
-          `a classification was approved but this caller cannot re-pin ` +
-          `${LOGIC_PIN_REL_PATH} — refusing to leave the registry edited with a stale pin`,
-        outcomes,
-        skipped,
-      };
+  // EVERY refusal below reports the classification as NOT APPLIED, because it
+  // is not: the refusals raised before the write never reach
+  // `deps.writeRegistrySource`, and the one raised after it reverts both files
+  // first, so no path leaves an edit behind. The refusals used
+  // to return with the outcomes still reading `action: "added"`, so the run log
+  // printed `[added] openai/x`, `buildSyncCommitMessage` wrote `- added
+  // openai/x` into a commit containing no registry edit, and
+  // `computeChangesetKey` — the workflow's PR de-dup key — was keyed on the
+  // same claim. `refuseRepin` re-labels them and leaves a deduped note, so the
+  // refusal has a human-facing artifact rather than only a red job.
+  const refuseRepin = (detail: string): SyncCoreOutcome => {
+    for (const o of outcomes) {
+      if (o.action !== "added" && o.action !== "excluded" && o.action !== "deprecation-recorded")
+        continue;
+      const notePath = proposalNoteRelPath(o.provider, o.family, "pin-repin-failure");
+      ensureProposalNote(
+        deps,
+        notePath,
+        () =>
+          renderProposalNote(
+            o.provider,
+            o.family,
+            "pin-repin-failure",
+            `drift-sync prepared a mechanical registry edit for "${o.family}" and then ` +
+              `refused to keep this run at all: ${detail}\n\n` +
+              `NOTHING survives in ${MODEL_REGISTRY_REL_PATH} or ${LOGIC_PIN_REL_PATH} — a ` +
+              `registry edit with a stale or wrongly-placed membership pin is the exact ` +
+              `half-applied state this path exists to prevent. A human must apply the edit ` +
+              `and re-pin by hand, or repair the pin file's structure.`,
+            stamp,
+          ),
+        touchedFiles,
+      );
+      o.action = "needs-human-repin";
+      o.detail = `${o.detail} — NOT APPLIED: ${detail} (${notePath})`;
     }
-    const before = readPin();
-    let next = before;
+    return { ok: false, reason: SyncCoreReason.NEEDS_HUMAN, detail, outcomes, skipped };
+  };
+
+  let readPin: (() => string) | undefined;
+  let writePin: ((text: string) => void) | undefined;
+  let pinBefore: string | null = null;
+  if (repins.size > 0) {
+    readPin = deps.readLogicPinSource;
+    writePin = deps.writeLogicPinSource;
+    if (!readPin || !writePin) {
+      return refuseRepin(
+        `a classification was approved but this caller cannot re-pin ` +
+          `${LOGIC_PIN_REL_PATH} — refusing to leave the registry edited with a stale pin`,
+      );
+    }
+    pinBefore = readPin();
+    let next = pinBefore;
     for (const [key, { listName, provider, families }] of repins) {
       const base =
         listName === "includeFamilies" ? includeFamilies[provider] : excludeFamilies[provider];
@@ -1231,36 +1357,38 @@ export function runDriftSyncCore(
       const members = [...base, ...families];
       const edit = updateDataFrozenPin(next, key, computeMembershipPin(members));
       if (edit.locatorMiss) {
-        return {
-          ok: false,
-          reason: SyncCoreReason.NEEDS_HUMAN,
-          detail:
-            `could not locate the DATA_FROZEN pin for "${key}" in ${LOGIC_PIN_REL_PATH} — ` +
+        return refuseRepin(
+          `could not locate the DATA_FROZEN pin for "${key}" in ${LOGIC_PIN_REL_PATH} — ` +
             `the pin file's structure changed; a human must re-pin by hand`,
-          outcomes,
-          skipped,
-        };
+        );
       }
       next = edit.text;
-    }
-    if (!onlyPinsChanged(before, next)) {
-      return {
-        ok: false,
-        reason: SyncCoreReason.NEEDS_HUMAN,
-        detail:
-          `re-pin of ${LOGIC_PIN_REL_PATH} would have changed something other than a ` +
-          `pin literal — refusing the write`,
-        outcomes,
-        skipped,
-      };
     }
     logicPinSource = next;
   }
 
   deps.writeRegistrySource(registrySource);
   if (logicPinSource !== null) {
-    deps.writeLogicPinSource!(logicPinSource);
+    writePin!(logicPinSource);
     touchedFiles.add(LOGIC_PIN_REL_PATH);
+    // THE WRITER'S HALF OF THE PIN-FILE CONTRACT, checked against WHAT LANDED,
+    // by reading the file back — not against the text we meant to write. An
+    // in-memory check of our own rewrite can only ever agree with itself (the
+    // version this replaces could not return false from its one production call
+    // site, and mutating that call site to `if (false)` left the suite green);
+    // re-reading makes the guard answer a question it could actually fail.
+    // `drift-sync-check` gate-1b re-derives the same predicate from the git diff,
+    // keyed to SYNC_REPINNABLE_KEYS, so the constraint does not depend on this
+    // check being here.
+    const landed = readPin!();
+    const pinEdit = verifyPinFileEdit(pinBefore!, landed, new Set(repins.keys()));
+    if (!pinEdit.ok) {
+      deps.revertFiles([...touchedFiles]);
+      return refuseRepin(
+        `${LOGIC_PIN_REL_PATH} as WRITTEN is not a clean membership re-pin ` +
+          `(${pinEdit.detail}) — reverted`,
+      );
+    }
   }
   const skipReason = gate3SkipReason(outcomes);
   const verdict = deps.runSyncCheck(
@@ -1500,6 +1628,8 @@ const REAL_SYNC_CORE_DEPS: SyncCoreDeps = {
     const verdict = evaluateSyncCheck(
       {
         getChangedFiles,
+        readCommittedPinFile: () => readCommittedFile(LOGIC_PIN_REL_PATH),
+        readWorkingPinFile: () => readFileSync(LOGIC_PIN_ABS_PATH, "utf-8"),
         runPinCheck: () => runPinCheck(),
         recollect: () => recollect(),
       },

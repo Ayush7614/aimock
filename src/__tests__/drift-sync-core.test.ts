@@ -24,6 +24,7 @@ import { join } from "node:path";
 import ts from "typescript";
 
 import { includeFamilies, excludeFamilies, deprecatedFamilies } from "./drift/model-registry.js";
+import { isVoiceModelId, knownVoiceModelFamilies } from "./drift/voice-models.js";
 import { MIN_LISTING_SIZE, FORWARD_LOOKING_FAMILIES } from "./drift/deprecation-detector.js";
 import {
   detectDeprecatedFamiliesForSync,
@@ -33,6 +34,10 @@ import {
   parseProposalDecision,
   updateDataFrozenPin,
   onlyPinsChanged,
+  verifyPinFileEdit,
+  diffPinKeys,
+  needsVoiceSeedSetEdit,
+  SYNC_REPINNABLE_KEYS,
   computeMembershipPin,
   dataFrozenKey,
   renderProposalNote,
@@ -56,7 +61,7 @@ import {
 // Test fixture: a minimal, synthetic "model-registry.ts"-shaped source text —
 // same array-literal-inside-a-2-arg-call-expression shape the real file uses,
 // seeded with the REAL openai includeFamilies set (so a removal target like
-// "gpt-4o" is guaranteed present, and an addition target like "gpt-live" is
+// "gpt-4o" is guaranteed present, and an addition target like "gpt-zeta" is
 // guaranteed absent — mirrors C4's own test fixtures in models.drift.ts).
 // ---------------------------------------------------------------------------
 
@@ -473,7 +478,7 @@ describe("the deprecation floor is a plausibility check on the LISTING, not on o
 
 describe("unclassifiedFamiliesForSync (mirrors C4's unclassifiedFamilies)", () => {
   it("a genuinely new family is flagged", () => {
-    expect(unclassifiedFamiliesForSync(["gpt-live"], "openai")).toEqual(["gpt-live"]);
+    expect(unclassifiedFamiliesForSync(["gpt-zeta"], "openai")).toEqual(["gpt-zeta"]);
   });
 
   it("a dated snapshot of a known family produces zero drift", () => {
@@ -496,11 +501,11 @@ describe("addFamilyLiteralInSource", () => {
       src,
       "includeFamilies",
       "openai",
-      "gpt-live",
+      "gpt-zeta",
       "TEST-ADD",
     );
     expect(result.changed).toBe(true);
-    expect(result.text).toContain('"gpt-live", // TEST-ADD');
+    expect(result.text).toContain('"gpt-zeta", // TEST-ADD');
     // Every seeded family is untouched.
     for (const f of includeFamilies.openai) {
       expect(result.text).toContain(`"${f}"`);
@@ -543,18 +548,18 @@ describe("addFamilyLiteralInSource", () => {
 
   it("the edited text is still syntactically valid TypeScript (parser round-trip)", () => {
     const src = fixtureRegistrySource();
-    const added = addFamilyLiteralInSource(src, "includeFamilies", "openai", "gpt-live", "a");
+    const added = addFamilyLiteralInSource(src, "includeFamilies", "openai", "gpt-zeta", "a");
     // A further edit against the already-edited text must still locate the
     // array correctly — proves the AST-based locator survives a prior edit.
     const secondAdd = addFamilyLiteralInSource(
       added.text,
       "includeFamilies",
       "openai",
-      "gpt-live-2",
+      "gpt-zeta-2",
       "b",
     );
     expect(secondAdd.changed).toBe(true);
-    expect(secondAdd.text).toContain('"gpt-live-2"');
+    expect(secondAdd.text).toContain('"gpt-zeta-2"');
     // Two successive appends into the SAME empty array must both land, and the
     // second must not be fooled by the first's trailing comment.
     const one = addFamilyLiteralInSource(src, "deprecatedFamilies", "openai", "gpt-4o", "d1");
@@ -573,11 +578,11 @@ describe("addFamilyLiteralInSource", () => {
 
 describe("proposal notes", () => {
   it("proposalNoteRelPath is family-keyed and stable (dedup key)", () => {
-    expect(proposalNoteRelPath("openai", "gpt-live", "new-family")).toBe(
-      `${DRIFT_PROPOSALS_DIR}/openai-gpt-live-new-family.md`,
+    expect(proposalNoteRelPath("openai", "gpt-zeta", "new-family")).toBe(
+      `${DRIFT_PROPOSALS_DIR}/openai-gpt-zeta-new-family.md`,
     );
-    expect(proposalNoteRelPath("openai", "gpt-live", "new-family")).toBe(
-      proposalNoteRelPath("openai", "gpt-live", "new-family"),
+    expect(proposalNoteRelPath("openai", "gpt-zeta", "new-family")).toBe(
+      proposalNoteRelPath("openai", "gpt-zeta", "new-family"),
     );
   });
 
@@ -776,7 +781,7 @@ describe("runDriftSyncCore", () => {
 
   it("RED->GREEN (genuinely new family, no prior decision): RED alert + single deduped note, no auto-classify", () => {
     const { deps, registry, writeProposalNote, notes } = makeFakeDeps();
-    const inputs: ProviderChurnInput[] = [{ provider: "openai", liveModelIds: ["gpt-live"] }];
+    const inputs: ProviderChurnInput[] = [{ provider: "openai", liveModelIds: ["gpt-zeta"] }];
     // NOTE: a single unclassified live id also fails the deprecation floor
     // check (too short) — that is an independent, correctly-skipped signal;
     // this test only asserts the ADDITION half's behavior.
@@ -786,17 +791,17 @@ describe("runDriftSyncCore", () => {
     expect(outcome.outcomes).toContainEqual(
       expect.objectContaining({
         provider: "openai",
-        family: "gpt-live",
+        family: "gpt-zeta",
         action: "needs-human-new-family",
       }),
     );
     expect(outcome.ok).toBe(false);
     expect(outcome.reason).toBe(SyncCoreReason.NEEDS_HUMAN);
     // NEVER auto-classified: no registry edit occurred.
-    expect(registry.text).not.toContain("gpt-live");
+    expect(registry.text).not.toContain("gpt-zeta");
     expect(writeProposalNote).toHaveBeenCalledTimes(1);
     const [path, noteText] = writeProposalNote.mock.calls[0] as [string, string];
-    expect(path).toBe(`${DRIFT_PROPOSALS_DIR}/openai-gpt-live-new-family.md`);
+    expect(path).toBe(`${DRIFT_PROPOSALS_DIR}/openai-gpt-zeta-new-family.md`);
     expect(noteText).toContain("Decision: pending");
     expect(notes.size).toBe(1);
 
@@ -813,49 +818,49 @@ describe("runDriftSyncCore", () => {
     // Simulate a human having already reviewed the RED alert and flipped the
     // note's Decision line to `include` (the only path that can ever add a
     // genuinely-new family — never automatic, never LLM-authored).
-    const notePath = proposalNoteRelPath("openai", "gpt-live", "new-family");
+    const notePath = proposalNoteRelPath("openai", "gpt-zeta", "new-family");
     notes.set(
       notePath,
-      renderProposalNote("openai", "gpt-live", "new-family", "detail", "2026-07-20").replace(
+      renderProposalNote("openai", "gpt-zeta", "new-family", "detail", "2026-07-20").replace(
         "Decision: pending",
         "Decision: include",
       ),
     );
 
-    const inputs: ProviderChurnInput[] = [{ provider: "openai", liveModelIds: ["gpt-live"] }];
+    const inputs: ProviderChurnInput[] = [{ provider: "openai", liveModelIds: ["gpt-zeta"] }];
     const outcome = runDriftSyncCore(inputs, deps);
 
     expect(outcome.outcomes).toContainEqual(
-      expect.objectContaining({ provider: "openai", family: "gpt-live", action: "added" }),
+      expect.objectContaining({ provider: "openai", family: "gpt-zeta", action: "added" }),
     );
     expect(outcome.ok).toBe(true);
     expect(outcome.reason).toBe(SyncCoreReason.OK_APPLIED);
-    expect(registry.text).toContain('"gpt-live"');
+    expect(registry.text).toContain('"gpt-zeta"');
     expect(registry.text).toContain(`decided via ${notePath}`);
     expect(runSyncCheck).toHaveBeenCalledTimes(1);
   });
 
   it("REJECTION (human-authored Decision: exclude): writes excludeFamilies, not includeFamilies", () => {
     const { deps, registry, logicPin } = makeFakeDeps();
-    const notePath = proposalNoteRelPath("openai", "gpt-live", "new-family");
+    const notePath = proposalNoteRelPath("openai", "gpt-zeta", "new-family");
     notes_set(deps, notePath, "exclude");
 
-    const inputs: ProviderChurnInput[] = [{ provider: "openai", liveModelIds: ["gpt-live"] }];
+    const inputs: ProviderChurnInput[] = [{ provider: "openai", liveModelIds: ["gpt-zeta"] }];
     const before = logicPin.text;
     const outcome = runDriftSyncCore(inputs, deps);
 
     expect(outcome.outcomes).toContainEqual(
-      expect.objectContaining({ provider: "openai", family: "gpt-live", action: "excluded" }),
+      expect.objectContaining({ provider: "openai", family: "gpt-zeta", action: "excluded" }),
     );
     expect(outcome.ok).toBe(true);
     expect(outcome.reason).toBe(SyncCoreReason.OK_APPLIED);
     // The family landed in excludeFamilies. Asserting the SECTION, not just the
-    // string: a bare `toContain('"gpt-live"')` would also pass if the edit had
+    // string: a bare `toContain('"gpt-zeta"')` would also pass if the edit had
     // gone into includeFamilies, which is the exact bug this path prevents.
     const excludeSection = registry.text.slice(registry.text.indexOf("excludeFamilies"));
-    expect(excludeSection).toContain('"gpt-live"');
+    expect(excludeSection).toContain('"gpt-zeta"');
     expect(registry.text.slice(0, registry.text.indexOf("excludeFamilies"))).not.toContain(
-      '"gpt-live"',
+      '"gpt-zeta"',
     );
     // ...and the EXCLUDE pin moved, while the include pin did not.
     expect(logicPin.text).not.toBe(before);
@@ -869,10 +874,10 @@ describe("runDriftSyncCore", () => {
 
   it("an APPROVED classification re-pins in the SAME run (the edit is never left with a stale pin)", () => {
     const { deps, logicPin } = makeFakeDeps();
-    notes_set(deps, proposalNoteRelPath("openai", "gpt-live", "new-family"), "include");
+    notes_set(deps, proposalNoteRelPath("openai", "gpt-zeta", "new-family"), "include");
     const before = logicPin.text;
 
-    const outcome = runDriftSyncCore([{ provider: "openai", liveModelIds: ["gpt-live"] }], deps);
+    const outcome = runDriftSyncCore([{ provider: "openai", liveModelIds: ["gpt-zeta"] }], deps);
 
     expect(outcome.reason).toBe(SyncCoreReason.OK_APPLIED);
     expect(pinFor(logicPin.text, "includeFamilies.openai")).not.toBe(
@@ -887,10 +892,10 @@ describe("runDriftSyncCore", () => {
       readLogicPinSource: undefined,
       writeLogicPinSource: undefined,
     });
-    notes_set(deps, proposalNoteRelPath("openai", "gpt-live", "new-family"), "include");
+    notes_set(deps, proposalNoteRelPath("openai", "gpt-zeta", "new-family"), "include");
     const registryBefore = registry.text;
 
-    const outcome = runDriftSyncCore([{ provider: "openai", liveModelIds: ["gpt-live"] }], deps);
+    const outcome = runDriftSyncCore([{ provider: "openai", liveModelIds: ["gpt-zeta"] }], deps);
 
     expect(outcome.ok).toBe(false);
     expect(outcome.reason).toBe(SyncCoreReason.NEEDS_HUMAN);
@@ -899,6 +904,117 @@ describe("runDriftSyncCore", () => {
     // this whole path exists to remove, so it must not be reachable.
     expect(writeRegistrySource).not.toHaveBeenCalled();
     expect(registry.text).toBe(registryBefore);
+  });
+
+  // HONEST REPORTING ON A REFUSAL. Before this, the three re-pin refusals
+  // returned with the outcomes still reading `action: "added"` for an edit that
+  // was never written: the run log printed `[added] openai/gpt-zeta`,
+  // `buildSyncCommitMessage` wrote `- added openai/gpt-zeta` into a commit
+  // containing no registry edit at all, and `computeChangesetKey` — the
+  // workflow's PR de-dup key — was keyed on the same claim.
+  it("a re-pin refusal reports the classification as NOT APPLIED, and leaves a deduped note", () => {
+    const { deps, notes } = makeFakeDeps({
+      readLogicPinSource: undefined,
+      writeLogicPinSource: undefined,
+    });
+    notes_set(deps, proposalNoteRelPath("openai", "gpt-zeta", "new-family"), "include");
+
+    const outcome = runDriftSyncCore([{ provider: "openai", liveModelIds: ["gpt-zeta"] }], deps);
+
+    expect(outcome.outcomes).toEqual([
+      expect.objectContaining({ family: "gpt-zeta", action: "needs-human-repin" }),
+    ]);
+    expect(outcome.outcomes.some((o) => o.action === "added")).toBe(false);
+    // The commit message may not claim an edit that is not in the commit.
+    expect(buildSyncCommitMessage(outcome).body).toBe("");
+    expect(buildSyncCommitMessage(outcome).subject).toContain("needs-human note file(s)");
+    // ...and the refusal has a human-facing artifact, not just a red job.
+    const notePath = proposalNoteRelPath("openai", "gpt-zeta", "pin-repin-failure");
+    expect(notes.get(notePath)).toContain("Membership re-pin refused");
+    expect(outcome.outcomes[0].detail).toContain("NOT APPLIED");
+  });
+
+  // The writer's own pin-file guard, checked against WHAT LANDED. The version
+  // this replaces verified its own in-memory rewrite, so it could not return
+  // false from its only production call site — mutating that call site to
+  // `if (false)` left the whole suite green. Re-reading the written file makes
+  // the guard answer a question it can actually fail: here a writer that mangles
+  // the file on the way to disk.
+  it("REFUSES and REVERTS when the pin file as WRITTEN is not a clean membership re-pin", () => {
+    const { deps, logicPin, revertFiles, notes } = makeFakeDeps({
+      writeLogicPinSource: vi.fn((text: string) => {
+        // A writer that also re-pastes a neighbouring (non-repinnable) pin.
+        logicPin.text = text.replace(`pin: "${"0".repeat(64)}"`, `pin: "${"f".repeat(64)}"`);
+      }),
+    });
+    notes_set(deps, proposalNoteRelPath("openai", "gpt-zeta", "new-family"), "exclude");
+
+    const outcome = runDriftSyncCore([{ provider: "openai", liveModelIds: ["gpt-zeta"] }], deps);
+
+    expect(outcome.ok).toBe(false);
+    expect(outcome.reason).toBe(SyncCoreReason.NEEDS_HUMAN);
+    expect(outcome.detail).toContain("not a clean membership re-pin");
+    expect(revertFiles).toHaveBeenCalledWith([MODEL_REGISTRY_REL_PATH, LOGIC_PIN_REL_PATH]);
+    expect(outcome.outcomes).toEqual([
+      expect.objectContaining({ family: "gpt-zeta", action: "needs-human-repin" }),
+    ]);
+    expect(notes.get(proposalNoteRelPath("openai", "gpt-zeta", "pin-repin-failure"))).toContain(
+      "Membership re-pin refused",
+    );
+  });
+
+  // THE VOICE HALF-CLASSIFICATION. `excludeFamilies` and
+  // `knownVoiceModelFamilies` are deliberately disjoint surfaces and the sync
+  // writes only the first, so auto-applying a voice family's decision leaves
+  // ws-realtime.drift.ts reporting UNKNOWN_REALTIME_MODELS at critical severity:
+  // gate-3 refuses, both files revert, the note still says `Decision: exclude`,
+  // and the identical apply/fail/revert/alert repeats every night forever.
+  it("a DECIDED voice family is routed to a human instead of being half-applied", () => {
+    for (const verdict of ["include", "exclude"] as const) {
+      const { deps, registry, writeRegistrySource, runSyncCheck, notes } = makeFakeDeps();
+      const registryBefore = registry.text;
+      notes_set(deps, proposalNoteRelPath("openai", "gpt-live", "new-family"), verdict);
+
+      const outcome = runDriftSyncCore([{ provider: "openai", liveModelIds: ["gpt-live"] }], deps);
+
+      expect(needsVoiceSeedSetEdit("gpt-live")).toBe(true);
+      expect(outcome.outcomes).toEqual([
+        expect.objectContaining({ family: "gpt-live", action: "needs-human-voice-seed-set" }),
+      ]);
+      // Nothing was applied, so nothing gate-fails and nothing reverts: the
+      // half-apply/revert loop cannot start.
+      expect(writeRegistrySource).not.toHaveBeenCalled();
+      expect(registry.text).toBe(registryBefore);
+      expect(runSyncCheck).not.toHaveBeenCalled();
+      const notePath = proposalNoteRelPath("openai", "gpt-live", "voice-seed-set");
+      expect(notes.get(notePath)).toContain("knownVoiceModelFamilies");
+      expect(notes.get(notePath)).toContain("voice-models.ts");
+    }
+  });
+
+  it("a decided family the realtime canary already knows about IS applied (the guard is not a blanket refusal)", () => {
+    // The predicate keys on the voice SEED SET, not on the id's shape. Every
+    // seeded family is already classified in the registry, so the case is
+    // constructed the way it arises in life: the human made the voice-models.ts
+    // half of the two-edit commit, and the registry half is what is left.
+    knownVoiceModelFamilies.add("gpt-live");
+    try {
+      expect(isVoiceModelId("gpt-live")).toBe(true);
+      expect(needsVoiceSeedSetEdit("gpt-live")).toBe(false);
+
+      const { deps, registry } = makeFakeDeps();
+      notes_set(deps, proposalNoteRelPath("openai", "gpt-live", "new-family"), "exclude");
+      const outcome = runDriftSyncCore([{ provider: "openai", liveModelIds: ["gpt-live"] }], deps);
+
+      expect(outcome.reason).toBe(SyncCoreReason.OK_APPLIED);
+      expect(outcome.outcomes).toEqual([
+        expect.objectContaining({ family: "gpt-live", action: "excluded" }),
+      ]);
+      const excludeSection = registry.text.slice(registry.text.indexOf("excludeFamilies"));
+      expect(excludeSection).toContain('"gpt-live"');
+    } finally {
+      knownVoiceModelFamilies.delete("gpt-live");
+    }
   });
 
   it("a FAILING drift-sync-check gate reverts every touched file and reports GATE_FAILED", () => {
@@ -914,13 +1030,13 @@ describe("runDriftSyncCore", () => {
     // The one remaining path that mutates the registry: an addition a human
     // already approved on a prior run by setting the note's `Decision: include`.
     notes.set(
-      proposalNoteRelPath("openai", "gpt-live", "new-family"),
-      renderProposalNote("openai", "gpt-live", "new-family", "detail", "2026-07-20").replace(
+      proposalNoteRelPath("openai", "gpt-zeta", "new-family"),
+      renderProposalNote("openai", "gpt-zeta", "new-family", "detail", "2026-07-20").replace(
         "Decision: pending",
         "Decision: include",
       ),
     );
-    const liveIds = [...includeFamilies.openai, "gpt-live"];
+    const liveIds = [...includeFamilies.openai, "gpt-zeta"];
     const inputs: ProviderChurnInput[] = [{ provider: "openai", liveModelIds: liveIds }];
 
     const outcome = runDriftSyncCore(inputs, deps);
@@ -1020,7 +1136,7 @@ describe("D-M1: recollect gate vs route-to-human invariant", () => {
   it("RED->GREEN (note-only new family): faithful gate does NOT revert the note; NEEDS_HUMAN", () => {
     const runSyncCheck = faithfulRecollectGate();
     const { deps, revertFiles } = makeFakeDeps({ runSyncCheck });
-    const inputs: ProviderChurnInput[] = [{ provider: "openai", liveModelIds: ["gpt-live"] }];
+    const inputs: ProviderChurnInput[] = [{ provider: "openai", liveModelIds: ["gpt-zeta"] }];
 
     const outcome = runDriftSyncCore(inputs, deps);
 
@@ -1038,17 +1154,17 @@ describe("D-M1: recollect gate vs route-to-human invariant", () => {
   it("RED->GREEN (mixed: approved addition + new-family note): addition kept, gate-3 skipped, NEEDS_HUMAN", () => {
     const runSyncCheck = faithfulRecollectGate();
     const { deps, registry, notes, revertFiles } = makeFakeDeps({ runSyncCheck });
-    // A human approved `gpt-live` on a prior run; `gpt-other` is a fresh
+    // A human approved `gpt-zeta` on a prior run; `gpt-other` is a fresh
     // unclassified family this run defers. The addition is the registry edit;
     // the deferral is what a re-collect would still (correctly) see as drift.
     notes.set(
-      proposalNoteRelPath("openai", "gpt-live", "new-family"),
-      renderProposalNote("openai", "gpt-live", "new-family", "detail", "2026-07-20").replace(
+      proposalNoteRelPath("openai", "gpt-zeta", "new-family"),
+      renderProposalNote("openai", "gpt-zeta", "new-family", "detail", "2026-07-20").replace(
         "Decision: pending",
         "Decision: include",
       ),
     );
-    const liveIds = [...includeFamilies.openai, "gpt-live", "gpt-other"];
+    const liveIds = [...includeFamilies.openai, "gpt-zeta", "gpt-other"];
     const inputs: ProviderChurnInput[] = [{ provider: "openai", liveModelIds: liveIds }];
 
     const outcome = runDriftSyncCore(inputs, deps);
@@ -1059,7 +1175,7 @@ describe("D-M1: recollect gate vs route-to-human invariant", () => {
     expect(outcome.reason).toBe(SyncCoreReason.NEEDS_HUMAN);
     expect(outcome.ok).toBe(false);
     expect(outcome.outcomes).toContainEqual(
-      expect.objectContaining({ family: "gpt-live", action: "added" }),
+      expect.objectContaining({ family: "gpt-zeta", action: "added" }),
     );
     expect(outcome.outcomes).toContainEqual(
       expect.objectContaining({ family: "gpt-other", action: "needs-human-new-family" }),
@@ -1074,7 +1190,7 @@ describe("D-M1: recollect gate vs route-to-human invariant", () => {
       skipRecollectReason: expect.stringContaining("deferred a family to a human"),
     });
     // The registry edit was persisted (writeRegistrySource ran with the addition).
-    expect(registry.text).toContain('"gpt-live"');
+    expect(registry.text).toContain('"gpt-zeta"');
   });
 });
 
@@ -1141,7 +1257,7 @@ describe("revertSyncFiles (D-M2: revert must not throw on untracked notes)", () 
     writeFileSync(join(repo, trackedRel), "MODIFIED BY SYNC\n");
 
     // An UNTRACKED note git has never seen (the D-M2 trigger).
-    const noteRel = "drift-proposals/openai-gpt-live-new-family.md";
+    const noteRel = "drift-proposals/openai-gpt-zeta-new-family.md";
     mkdirSync(join(repo, "drift-proposals"), { recursive: true });
     writeFileSync(join(repo, noteRel), "note body\n");
 
@@ -1196,14 +1312,14 @@ describe("the sync core never invokes an LLM", () => {
 // ---------------------------------------------------------------------------
 
 describe("computeChangesetKey (G#3: stable, date-independent PR-dedup key)", () => {
-  // The D-M1 mixed run: gpt-live added (registry edit) + gpt-other deferred
+  // The D-M1 mixed run: gpt-zeta added (registry edit) + gpt-other deferred
   // (needs-human) — the exact shape whose committed diff has a registry edit
   // but no NEW note file, where a note-path-only dedup key is empty. Both notes
   // are pre-seeded (already on `main` from prior runs), so this run writes none.
   function seedMixedRunNotes(notes: Map<string, string>): void {
     notes.set(
-      proposalNoteRelPath("openai", "gpt-live", "new-family"),
-      renderProposalNote("openai", "gpt-live", "new-family", "detail", "2026-07-20").replace(
+      proposalNoteRelPath("openai", "gpt-zeta", "new-family"),
+      renderProposalNote("openai", "gpt-zeta", "new-family", "detail", "2026-07-20").replace(
         "Decision: pending",
         "Decision: include",
       ),
@@ -1216,7 +1332,7 @@ describe("computeChangesetKey (G#3: stable, date-independent PR-dedup key)", () 
 
   function mixedRunInputs(): ProviderChurnInput[] {
     return [
-      { provider: "openai", liveModelIds: [...includeFamilies.openai, "gpt-live", "gpt-other"] },
+      { provider: "openai", liveModelIds: [...includeFamilies.openai, "gpt-zeta", "gpt-other"] },
     ];
   }
 
@@ -1231,7 +1347,7 @@ describe("computeChangesetKey (G#3: stable, date-independent PR-dedup key)", () 
     expect(computeChangesetKey(outcome)).not.toBe("");
     // Carries BOTH the applied addition and the deferred family in its identity.
     expect(outcome.outcomes).toContainEqual(
-      expect.objectContaining({ family: "gpt-live", action: "added" }),
+      expect.objectContaining({ family: "gpt-zeta", action: "added" }),
     );
     expect(outcome.outcomes).toContainEqual(
       expect.objectContaining({ family: "gpt-other", action: "needs-human-new-family" }),
@@ -1258,7 +1374,7 @@ describe("computeChangesetKey (G#3: stable, date-independent PR-dedup key)", () 
   it("DIFFERS for a different changeset (a pure deferral vs a mixed run) — distinct drifts get distinct PRs", () => {
     const pure = makeFakeDeps();
     const pureOutcome = runDriftSyncCore(
-      [{ provider: "openai", liveModelIds: ["gpt-live"] }],
+      [{ provider: "openai", liveModelIds: ["gpt-zeta"] }],
       pure.deps,
     );
     const mixed = makeFakeDeps();
@@ -1367,11 +1483,28 @@ describe("buildSyncCommitMessage", () => {
 function notes_set(deps: SyncCoreDeps, notePath: string, verdict: "include" | "exclude"): void {
   deps.writeProposalNote(
     notePath,
-    renderProposalNote("openai", "gpt-live", "new-family", "detail", "2026-07-20").replace(
+    renderProposalNote("openai", "gpt-zeta", "new-family", "detail", "2026-07-20").replace(
       "Decision: pending",
       `Decision: ${verdict}`,
     ),
   );
+}
+
+/** A parseable DATA_FROZEN table with the given (key literal, pin) entries. */
+function dataFrozenSource(entries: [string, string][]): string {
+  return [
+    "const DATA_FROZEN: Record<string, { members: () => string[]; pin: string }> = {",
+    ...entries.flatMap(([key, pin]) => [`  ${key}: {`, `    pin: "${pin}",`, "  },"]),
+    "};",
+    "",
+  ].join("\n");
+}
+
+/** The pin literal recorded for one UNQUOTED DATA_FROZEN key. */
+function pinForUnquoted(source: string, key: string): string {
+  const at = source.indexOf(`\n  ${key}: {`);
+  const m = /pin:\s*"([0-9a-f]{64})"/.exec(source.slice(at));
+  return m ? m[1] : "";
 }
 
 /** The pin literal currently recorded for one DATA_FROZEN key. */
@@ -1383,14 +1516,10 @@ function pinFor(source: string, key: string): string {
 
 describe("membership re-pinning primitives", () => {
   it("updateDataFrozenPin rewrites ONLY the named key's pin", () => {
-    const src = [
-      '  "includeFamilies.openai": {',
-      '    pin: "' + "a".repeat(64) + '",',
-      "  },",
-      '  "excludeFamilies.openai": {',
-      '    pin: "' + "b".repeat(64) + '",',
-      "  },",
-    ].join("\n");
+    const src = dataFrozenSource([
+      ['"includeFamilies.openai"', "a".repeat(64)],
+      ['"excludeFamilies.openai"', "b".repeat(64)],
+    ]);
     const out = updateDataFrozenPin(src, "excludeFamilies.openai", "c".repeat(64));
     expect(out.changed).toBe(true);
     expect(out.locatorMiss).toBe(false);
@@ -1399,15 +1528,96 @@ describe("membership re-pinning primitives", () => {
   });
 
   it("updateDataFrozenPin REFUSES an absent or duplicated key rather than guessing", () => {
-    const src = '  "includeFamilies.openai": {\n    pin: "' + "a".repeat(64) + '",\n  },';
+    const src = dataFrozenSource([['"includeFamilies.openai"', "a".repeat(64)]]);
     expect(updateDataFrozenPin(src, "excludeFamilies.gemini", "c".repeat(64))).toMatchObject({
       changed: false,
       locatorMiss: true,
     });
-    expect(updateDataFrozenPin(src + src, "includeFamilies.openai", "c".repeat(64))).toMatchObject({
+    const dup = dataFrozenSource([
+      ['"includeFamilies.openai"', "a".repeat(64)],
+      ['"includeFamilies.openai"', "b".repeat(64)],
+    ]);
+    expect(updateDataFrozenPin(dup, "includeFamilies.openai", "c".repeat(64))).toMatchObject({
       changed: false,
       locatorMiss: true,
     });
+  });
+
+  // THE WRONG-KEY REWRITE. Reproduced against the REAL pin file before the fix:
+  // `"excludeFamilies.gemini"` is followed by the UNQUOTED `knownVoiceModelFamilies`
+  // entry, and the old forward scan only refused when a QUOTED key intervened —
+  // so a target entry whose own pin was not a recognisable digest landed the
+  // write on the realtime canary's seed-set pin, reported `locatorMiss: false`,
+  // and passed the pin-only guard. The entry-scoped AST locator cannot express
+  // that failure; this test is what says so.
+  it("updateDataFrozenPin REFUSES an unrecognisable pin instead of walking into the next (UNQUOTED) entry", () => {
+    const real = readFileSync(LOGIC_PIN_REL_PATH, "utf-8");
+    const voicePinBefore = pinForUnquoted(real, "knownVoiceModelFamilies");
+    expect(voicePinBefore).toMatch(/^[0-9a-f]{64}$/);
+    // The precondition: the target entry's own pin is not a recognisable digest
+    // (a mid-edit or hand-repaired state).
+    const corrupted = real.replace(
+      /("excludeFamilies\.gemini": \{\n {4}members: \(\) => \[\.\.\.excludeFamilies\.gemini\]\.sort\(\),\n {4}pin: )"[0-9a-f]{64}"/,
+      '$1"TBD"',
+    );
+    expect(corrupted).not.toBe(real);
+
+    const out = updateDataFrozenPin(corrupted, "excludeFamilies.gemini", "e".repeat(64));
+
+    expect(out).toMatchObject({ changed: false, locatorMiss: true });
+    expect(out.text).toBe(corrupted);
+    expect(pinForUnquoted(out.text, "knownVoiceModelFamilies")).toBe(voicePinBefore);
+  });
+
+  it("updateDataFrozenPin locates UNQUOTED DATA_FROZEN keys too, and rewrites only that entry", () => {
+    const real = readFileSync(LOGIC_PIN_REL_PATH, "utf-8");
+    const out = updateDataFrozenPin(real, "knownVoiceModelFamilies", "d".repeat(64));
+    expect(out).toMatchObject({ changed: true, locatorMiss: false });
+    expect(pinForUnquoted(out.text, "knownVoiceModelFamilies")).toBe("d".repeat(64));
+    expect(pinFor(out.text, "excludeFamilies.gemini")).toBe(pinFor(real, "excludeFamilies.gemini"));
+    const diff = diffPinKeys(real, out.text);
+    expect(diff.ok && diff.changedKeys).toEqual(["knownVoiceModelFamilies"]);
+  });
+
+  // THE BOUNDARY THE CHECKER ENFORCES. Reproduced end to end before the fix:
+  // widening `isClassifiedFamily` in model-registry.ts and re-pasting that
+  // surface's FROZEN checksum here passed gate-1 (both files allowlisted) and
+  // gate-2 (the pin test, whose oracle IS this file) — the exact "bot told to
+  // make the drift job pass" the pin file's own header names.
+  it("verifyPinFileEdit REFUSES a re-pasted FROZEN logic checksum, and ACCEPTS a membership re-pin", () => {
+    const real = readFileSync(LOGIC_PIN_REL_PATH, "utf-8");
+
+    const at = real.indexOf("  isClassifiedFamily: {");
+    expect(at).toBeGreaterThan(-1);
+    const m = /pin: "([0-9a-f]{64})"/.exec(real.slice(at))!;
+    const silenced =
+      real.slice(0, at + m.index) +
+      `pin: "${"9".repeat(64)}"` +
+      real.slice(at + m.index + m[0].length);
+    // It looks pin-only — which is precisely why "only pin literals moved" is
+    // not the boundary.
+    expect(onlyPinsChanged(real, silenced)).toBe(true);
+    const refused = verifyPinFileEdit(real, silenced, SYNC_REPINNABLE_KEYS);
+    expect(refused.ok).toBe(false);
+    expect(refused.detail).toContain("FROZEN logic checksum");
+    // ...and an edit that is not even pin-shaped says so instead.
+    const gutted = real.replace(
+      "members: () => [...excludeFamilies.openai].sort(),",
+      "members: () => [],",
+    );
+    expect(gutted).not.toBe(real);
+    expect(verifyPinFileEdit(real, gutted, SYNC_REPINNABLE_KEYS)).toMatchObject({
+      ok: false,
+      detail: expect.stringContaining("outside a `pin:` string literal"),
+    });
+
+    const repinned = updateDataFrozenPin(real, "excludeFamilies.openai", "7".repeat(64));
+    expect(repinned.changed).toBe(true);
+    expect(verifyPinFileEdit(real, repinned.text, SYNC_REPINNABLE_KEYS).ok).toBe(true);
+    // ...and a re-pin of a key the sync may NOT move is refused just as hard.
+    const voice = updateDataFrozenPin(real, "gaRealtimeModels", "7".repeat(64));
+    expect(voice.changed).toBe(true);
+    expect(verifyPinFileEdit(real, voice.text, SYNC_REPINNABLE_KEYS)).toMatchObject({ ok: false });
   });
 
   it("onlyPinsChanged is the guard that keeps the sync off everything but pins", () => {

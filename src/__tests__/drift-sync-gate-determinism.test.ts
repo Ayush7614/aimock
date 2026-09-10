@@ -84,6 +84,14 @@ function driftSuiteFilesReferencing(symbol: string): string[] {
     .filter((f) => readFileSync(join(DRIFT_SUITE_DIR, f), "utf-8").includes(symbol));
 }
 
+/**
+ * The pin file as gate-1b sees it on these runs. Every changeset here edits the
+ * REGISTRY only, so HEAD and the working tree agree and gate-1b is a no-op —
+ * which is itself the property being modelled: gate-1b must not have an opinion
+ * about a run that did not touch the pin file.
+ */
+const PIN_FILE_AT_HEAD = readFileSync(LOGIC_PIN_REL_PATH, "utf-8");
+
 describe("premise: the live drift suite cannot observe a recorded deprecation", () => {
   it("no *.drift.ts in the collector's glob reads deprecatedFamilies", () => {
     expect(driftSuiteFilesReferencing("deprecatedFamilies")).toEqual([]);
@@ -265,6 +273,8 @@ function runSync(recollect: () => DriftReport, inputs = churnInputs()): RunResul
     runSyncCheck: (opts) =>
       evaluateSyncCheck(
         {
+          readCommittedPinFile: () => PIN_FILE_AT_HEAD,
+          readWorkingPinFile: () => PIN_FILE_AT_HEAD,
           getChangedFiles: () => [MODEL_REGISTRY_REL_PATH],
           runPinCheck: () => ({ ok: true, output: "logic-pin.test.ts passed" }),
           recollect: () => {
@@ -388,6 +398,8 @@ function approvedNewFamilyRun(recollect: () => DriftReport): RunResult {
     runSyncCheck: (opts) =>
       evaluateSyncCheck(
         {
+          readCommittedPinFile: () => PIN_FILE_AT_HEAD,
+          readWorkingPinFile: () => PIN_FILE_AT_HEAD,
           getChangedFiles: () => [MODEL_REGISTRY_REL_PATH],
           runPinCheck: () => ({ ok: true, output: "logic-pin.test.ts passed" }),
           recollect: () => {
@@ -477,6 +489,8 @@ describe("negative controls — the gate still refuses a wrong edit", () => {
 
   it("WRONG EDIT: an off-allowlist file -> reverted, gate-1 never reaches the re-collect", () => {
     const verdict = evaluateSyncCheck({
+      readCommittedPinFile: () => PIN_FILE_AT_HEAD,
+      readWorkingPinFile: () => PIN_FILE_AT_HEAD,
       getChangedFiles: () => [MODEL_REGISTRY_REL_PATH, "src/__tests__/drift/sdk-shapes.ts"],
       runPinCheck: () => ({ ok: true, output: "" }),
       recollect: () => {
@@ -490,6 +504,8 @@ describe("negative controls — the gate still refuses a wrong edit", () => {
   it("WRONG EDIT: a moved classification pin -> refused even on the deprecation lane", () => {
     const verdict = evaluateSyncCheck(
       {
+        readCommittedPinFile: () => PIN_FILE_AT_HEAD,
+        readWorkingPinFile: () => PIN_FILE_AT_HEAD,
         getChangedFiles: () => [MODEL_REGISTRY_REL_PATH],
         runPinCheck: () => ({
           ok: false,
