@@ -43,14 +43,19 @@ import { readEnvelopeText, upstreamTimeoutSignal } from "./video-proxy-shared.js
  * field the vendor adds later survive because they were recorded rather than
  * enumerated.
  *
- * PROVENANCE OF EVERY WIRE FACT IN THIS FILE. One source: the client library
- * `@tanstack/ai-byteplus@0.3.4` — its `wire-types.ts`, its request builders,
- * and its author's note of live calls made on 2026-07-31. That is a SECONDARY
- * source. BytePlus's own documentation is a client-rendered SPA and was never
- * read; aimock has never called Ark, and no response from Ark has ever been
- * observed here. So "the client library's six status tokens" is a claim this
- * repo can back, and "the vendor's documented six" is not — comments below say
- * the former. Where a fact is not even secondhand, it is named as unverified
+ * PROVENANCE OF EVERY WIRE FACT IN THIS FILE. One source for the TASK shapes —
+ * create, poll, the `succeeded`/`failed` envelopes, the status tokens, the
+ * unknown-task 404: the client library `@tanstack/ai-byteplus@0.3.4` — its
+ * `wire-types.ts`, its request builders, and its author's note of live calls
+ * made on 2026-07-31. That is a SECONDARY source. BytePlus's own documentation
+ * is a client-rendered SPA and was never read. Exactly one layer is firsthand:
+ * the keyless canary in `src/__tests__/drift/byteplus-video.drift.ts` does call
+ * live Ark, and observed its AUTH-layer 401 error envelope on 2026-09-10 (see
+ * the `OBSERVED_*` constants there). No SUCCESS or resource-layer response from
+ * Ark has ever been observed here — the authenticated unknown-task canary is
+ * still `skipIf`-gated for want of an `ARK_API_KEY` in repo secrets. So "the
+ * client library's six status tokens" is a claim this repo can back, and "the
+ * vendor's documented six" is not — comments below say the former. Where a fact is not even secondhand, it is named as unverified
  * rather than softened. A verification nobody performed is worse than an
  * admitted gap: it stops the next person from looking.
  *
