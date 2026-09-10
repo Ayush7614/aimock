@@ -92,7 +92,7 @@ export interface ChatCompletionRequest {
    * model string is the provider disambiguator (veo-* / grok-imagine-* /
    * openrouter ids do not overlap).
    */
-  _videoProvider?: "openrouter" | "veo" | "grok";
+  _videoProvider?: "openrouter" | "veo" | "grok" | "byteplus";
   [key: string]: unknown;
 }
 
@@ -917,7 +917,8 @@ export type RecordProviderKey =
   | "fal"
   | "openrouter"
   | "veo"
-  | "grok";
+  | "grok"
+  | "byteplus";
 
 export interface RecordConfig {
   providers: Partial<Record<RecordProviderKey, string>>;
@@ -926,7 +927,7 @@ export interface RecordConfig {
    * backward-compatible: when set for a provider, aimock injects the key on a
    * fixture-miss passthrough IF the caller sent no credential or a dummy
    * placeholder (see `applyProviderAuth`); a real caller key always overrides.
-   * Only static-key providers are eligible: OpenAI/OpenRouter/Cohere/Grok/Ollama
+   * Only static-key providers are eligible: OpenAI/OpenRouter/Cohere/Grok/BytePlus/Ollama
    * (bearer), Anthropic (x-api-key), Gemini/Gemini-Interactions/Veo
    * (x-goog-api-key), Azure OpenAI (api-key), ElevenLabs (xi-api-key), and fal
    * (Authorization: Key). Signed/OAuth providers (Bedrock SigV4, Vertex AI
@@ -1119,6 +1120,14 @@ export interface MockServerOptions {
    * poll count.
    */
   grokVideo?: FalQueueConfig;
+  /**
+   * Configure BytePlus Ark (Seedance) async video task polling progression
+   * (`queued → running → <recorded terminal status>` on
+   * `GET /api/v3/contents/generations/tasks/{id}`). Same threshold semantics as
+   * `grokVideo`; unlike the others the TERMINAL status is not synthesized — it
+   * is whatever the recorded/authored envelope carries.
+   */
+  bytePlusVideo?: FalQueueConfig;
 }
 
 export interface ApiKeyAuthConfig {
@@ -1173,4 +1182,12 @@ export interface HandlerDefaults {
   openRouterVideo?: FalQueueConfig;
   veoVideo?: FalQueueConfig;
   grokVideo?: FalQueueConfig;
+  /**
+   * Configure BytePlus Ark (Seedance) async video task polling progression
+   * (`queued → running → <recorded terminal status>` on
+   * `GET /api/v3/contents/generations/tasks/{id}`). Same threshold semantics as
+   * `grokVideo`; unlike the others the TERMINAL status is not synthesized — it
+   * is whatever the recorded/authored envelope carries.
+   */
+  bytePlusVideo?: FalQueueConfig;
 }

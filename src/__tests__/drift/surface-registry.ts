@@ -255,6 +255,17 @@ export const SURFACE_REGISTRY: Record<string, SurfaceMapping> = {
     ],
     typesFile: null,
   },
+  "byteplus-video": {
+    provider: "BytePlus Video",
+    builderFile: "src/byteplus-video.ts",
+    builderFunctions: [
+      "handleBytePlusVideoCreate",
+      "handleBytePlusVideoStatus",
+      "proxyBytePlusVideoSubmit",
+      "serializeBytePlusVideoTask",
+    ],
+    typesFile: null,
+  },
   "openrouter-video": {
     provider: "OpenRouter Video",
     builderFile: "src/openrouter-video.ts",

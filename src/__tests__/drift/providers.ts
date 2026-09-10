@@ -909,6 +909,38 @@ export async function listGeminiModels(apiKey: string): Promise<string[]> {
  * OpenRouter video proxy surface — it authenticates and reads metadata only,
  * never submitting a paid generation job.
  */
+/**
+ * BytePlus Ark's cheapest authenticated video-surface probe: GET a task id that
+ * cannot exist. Ark has NO free video-model listing endpoint (which is what
+ * makes the OpenRouter canary free), and a real generation costs money, so this
+ * probes the error envelope instead of the success shape.
+ *
+ * Returns the status and parsed body rather than asserting, so the drift leg
+ * owns the expectation. NOTE: the 404 assumption is UNVERIFIED against live Ark
+ * — if Ark answers a bad task id with 400, or 200-with-an-error-body, this
+ * canary must be rewritten or dropped rather than "fixed" by loosening it.
+ */
+export async function probeBytePlusArkUnknownTask(
+  apiKey: string,
+): Promise<{ status: number; body: unknown }> {
+  return withInfraErrorTag("BytePlus Ark Task Probe", async () => {
+    const url =
+      "https://ark.ap-southeast.bytepluses.com/api/v3/contents/generations/tasks/cgt-aimock-drift-probe-does-not-exist";
+    const res = await fetchWithRetry(url, {
+      method: "GET",
+      headers: { Authorization: `Bearer ${apiKey}` },
+    });
+    const raw = await res.text();
+    let body: unknown;
+    try {
+      body = JSON.parse(raw);
+    } catch {
+      body = raw;
+    }
+    return { status: res.status, body };
+  });
+}
+
 export async function listOpenRouterVideoModels(apiKey: string): Promise<string[]> {
   return withInfraErrorTag("OpenRouter Video Models", async () => {
     const url = "https://openrouter.ai/api/v1/videos/models";

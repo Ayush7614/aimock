@@ -40,6 +40,7 @@
         { label: "OpenRouter Video", href: "/openrouter-video" },
         { label: "Google Veo Video", href: "/veo-video" },
         { label: "Grok Imagine Video", href: "/grok-video" },
+        { label: "BytePlus Ark Video", href: "/byteplus-video" },
         { label: "fal.ai", href: "/fal-ai" },
       ],
     },

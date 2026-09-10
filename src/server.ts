@@ -85,6 +85,11 @@ import {
 } from "./openrouter-video.js";
 import { handleVeoVideoCreate, handleVeoVideoStatus, VeoVideoJobMap } from "./veo-video.js";
 import { handleGrokVideoCreate, handleGrokVideoStatus, GrokVideoJobMap } from "./grok-video.js";
+import {
+  handleBytePlusVideoCreate,
+  handleBytePlusVideoStatus,
+  BytePlusVideoJobMap,
+} from "./byteplus-video.js";
 import { handleElevenLabsAudio, handleElevenLabsTTS } from "./elevenlabs-audio.js";
 import { handleFalQueue, falJobs } from "./fal-audio.js";
 import { handleFal, falQueueStates } from "./fal.js";
@@ -102,6 +107,8 @@ import { applyChaosAction, evaluateChaos } from "./chaos.js";
 import {
   createMetricsRegistry,
   normalizePathLabel,
+  BYTEPLUS_VIDEO_STATUS_RE,
+  BYTEPLUS_VIDEO_SUBMIT_RE,
   OPENROUTER_VIDEO_CONTENT_RE,
   OPENROUTER_VIDEO_STATUS_RE,
   VEO_PREDICT_LRO_RE,
@@ -128,6 +135,7 @@ export interface ServerInstance {
   openRouterVideoJobs: OpenRouterVideoJobMap;
   veoVideoJobs: VeoVideoJobMap;
   grokVideoJobs: GrokVideoJobMap;
+  bytePlusVideoJobs: BytePlusVideoJobMap;
 }
 
 const COMPLETIONS_PATH = "/v1/chat/completions";
@@ -282,6 +290,7 @@ export interface FullResetTargets {
   openRouterVideoJobs: OpenRouterVideoJobMap;
   veoVideoJobs: VeoVideoJobMap;
   grokVideoJobs: GrokVideoJobMap;
+  bytePlusVideoJobs: BytePlusVideoJobMap;
   defaults: HandlerDefaults;
 }
 
@@ -310,6 +319,7 @@ export function performFullReset(fixtures: Fixture[], targets: FullResetTargets 
   targets.openRouterVideoJobs.clear();
   targets.veoVideoJobs.clear();
   targets.grokVideoJobs.clear();
+  targets.bytePlusVideoJobs.clear();
   if (targets.defaults.registry) {
     targets.defaults.registry.setGauge("aimock_fixtures_loaded", {}, fixtures.length);
   }
@@ -329,6 +339,7 @@ async function handleControlAPI(
   openRouterVideoJobs: OpenRouterVideoJobMap,
   veoVideoJobs: VeoVideoJobMap,
   grokVideoJobs: GrokVideoJobMap,
+  bytePlusVideoJobs: BytePlusVideoJobMap,
   defaults: HandlerDefaults,
 ): Promise<boolean> {
   if (!pathname.startsWith(CONTROL_PREFIX)) return false;
@@ -422,6 +433,7 @@ async function handleControlAPI(
     openRouterVideoJobs,
     veoVideoJobs,
     grokVideoJobs,
+    bytePlusVideoJobs,
     defaults,
   });
 
@@ -1399,6 +1411,9 @@ export async function createServerWithResolvedAuth(
     get grokVideo() {
       return serverOptions.grokVideo;
     },
+    get bytePlusVideo() {
+      return serverOptions.bytePlusVideo;
+    },
   };
 
   // Validate chaos config rates
@@ -1422,6 +1437,7 @@ export async function createServerWithResolvedAuth(
     { name: "openRouterVideo", config: options?.openRouterVideo },
     { name: "veoVideo", config: options?.veoVideo },
     { name: "grokVideo", config: options?.grokVideo },
+    { name: "bytePlusVideo", config: options?.bytePlusVideo },
   ]) {
     if (!config) continue;
     for (const field of ["pollsBeforeInProgress", "pollsBeforeCompleted"] as const) {
@@ -1460,6 +1476,7 @@ export async function createServerWithResolvedAuth(
   const openRouterVideoJobs = new OpenRouterVideoJobMap();
   const veoVideoJobs = new VeoVideoJobMap();
   const grokVideoJobs = new GrokVideoJobMap();
+  const bytePlusVideoJobs = new BytePlusVideoJobMap();
 
   // Share journal and metrics registry with mounted services
   if (mounts) {
@@ -1506,6 +1523,16 @@ export async function createServerWithResolvedAuth(
     // erased (`/api/v1/chat/completions` → `/v1/chat/completions`).
     const originalPathname = pathname;
     const isOpenRouter = isOpenRouterPath(originalPathname);
+    // BytePlus Ark attribution, GATED ON CONFIGURATION. A path prefix is not
+    // evidence of a vendor — the COMPAT_SUFFIXES comment above exists precisely
+    // because arbitrary vendors ride arbitrary prefixes (BigModel uses /v4/).
+    // Ungated, anyone serving an OpenAI-compatible vendor under /api/v3 with
+    // `record.providers.openai` configured would suddenly look up a byteplus
+    // upstream, find none, and lose record mode entirely. Requiring a
+    // configured byteplus upstream makes the new behavior reachable only for
+    // the user who asked for it.
+    const isBytePlusArk =
+      defaults.record?.providers.byteplus !== undefined && originalPathname.startsWith("/api/v3/");
 
     // Instrument response completion for metrics. The finish callback reads
     // pathname via closure after normalizeCompatPath has rewritten it, so
@@ -1568,6 +1595,7 @@ export async function createServerWithResolvedAuth(
         openRouterVideoJobs,
         veoVideoJobs,
         grokVideoJobs,
+        bytePlusVideoJobs,
         defaults,
       );
       return;
@@ -1872,6 +1900,104 @@ export async function createServerWithResolvedAuth(
     // (which does not rewrite these — /models etc. are excluded from
     // COMPAT_SUFFIXES — so they would otherwise 404), mirroring the
     // /api/v1/videos ordering above. Read-only metadata; no body.
+    // ── BytePlus Ark (Seedance) async video task lifecycle ──────────────────
+    // Registered in the PRE-REWRITE band, alongside the OpenRouter video routes
+    // above: normalizeCompatPath does not currently claim these paths, but the
+    // Ollama block documents that hazard and the mount dispatch also runs
+    // pre-rewrite, so keeping every raw-path route in one band keeps one rule.
+    //
+    // The REs anchor an ENUMERATED optional `/api/v3` prefix (see metrics.ts).
+    // That matters here specifically because this band runs ~1,100 lines ahead
+    // of every fal branch, so a wildcard prefix would take
+    // `/fal/contents/generations/tasks` away from the fal proxy.
+    //
+    // Status is tested BEFORE submit and each is method-guarded, so a future
+    // DELETE .../tasks/{id} falls through to 404 rather than being mis-served.
+    const bytePlusVideoStatusMatch = pathname.match(BYTEPLUS_VIDEO_STATUS_RE);
+    if (bytePlusVideoStatusMatch && req.method === "GET") {
+      try {
+        await handleBytePlusVideoStatus(
+          req,
+          res,
+          bytePlusVideoStatusMatch[1],
+          fixtures,
+          journal,
+          defaults,
+          setCorsHeaders,
+          bytePlusVideoJobs,
+        );
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : "Internal error";
+        defaults.logger.error(`byteplus-video status: ${msg}`);
+        if (!res.headersSent) {
+          try {
+            journal.add({
+              method: req.method ?? "GET",
+              path: req.url ?? pathname,
+              headers: flattenHeaders(req.headers),
+              body: null,
+              response: { status: 500, fixture: null },
+            });
+          } catch (jErr) {
+            defaults.logger.warn(
+              `byteplus-video status: journal write failed after handler error: ${jErr instanceof Error ? jErr.message : String(jErr)}`,
+            );
+          }
+          writeErrorResponse(
+            res,
+            500,
+            JSON.stringify({ error: { message: msg, type: "server_error" } }),
+          );
+        } else if (!res.writableEnded) {
+          res.destroy();
+        }
+      }
+      return;
+    }
+
+    if (BYTEPLUS_VIDEO_SUBMIT_RE.test(pathname) && req.method === "POST") {
+      setCorsHeaders(res);
+      try {
+        const raw = await readBody(req);
+        await handleBytePlusVideoCreate(
+          req,
+          res,
+          raw,
+          fixtures,
+          journal,
+          defaults,
+          setCorsHeaders,
+          bytePlusVideoJobs,
+        );
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : "Internal error";
+        defaults.logger.error(`byteplus-video submit: ${msg}`);
+        if (!res.headersSent) {
+          try {
+            journal.add({
+              method: req.method ?? "POST",
+              path: req.url ?? pathname,
+              headers: flattenHeaders(req.headers),
+              body: null,
+              response: { status: 500, fixture: null },
+            });
+          } catch (jErr) {
+            defaults.logger.warn(
+              `byteplus-video submit: journal write failed after handler error: ${jErr instanceof Error ? jErr.message : String(jErr)}`,
+            );
+          }
+          writeErrorResponse(
+            res,
+            500,
+            JSON.stringify({ error: { message: msg, type: "server_error" } }),
+          );
+        } else if (!res.writableEnded) {
+          res.destroy();
+        }
+      }
+      return;
+    }
+
     if (pathname === "/api/v1/models" && req.method === "GET") {
       handleOpenRouterModels(req, res, fixtures, journal, defaults, setCorsHeaders);
       return;
@@ -2151,7 +2277,18 @@ export async function createServerWithResolvedAuth(
     if (pathname === IMAGES_PATH && req.method === "POST") {
       try {
         const raw = await readBody(req);
-        await handleImages(req, res, raw, fixtures, journal, defaults, setCorsHeaders);
+        await handleImages(
+          req,
+          res,
+          raw,
+          fixtures,
+          journal,
+          defaults,
+          setCorsHeaders,
+          "openai",
+          undefined,
+          isBytePlusArk ? "byteplus" : undefined,
+        );
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : "Internal error";
         if (!res.headersSent) {
@@ -3087,7 +3224,9 @@ export async function createServerWithResolvedAuth(
       ? "azure"
       : isOpenRouter
         ? "openrouter"
-        : "openai";
+        : isBytePlusArk
+          ? "byteplus"
+          : "openai";
     try {
       await handleCompletions(
         req,
@@ -3321,6 +3460,7 @@ export async function createServerWithResolvedAuth(
     openRouterVideoJobs.clear();
     veoVideoJobs.clear();
     grokVideoJobs.clear();
+    bytePlusVideoJobs.clear();
     originalClose(callback);
     return this;
   } as typeof server.close;
@@ -3351,6 +3491,7 @@ export async function createServerWithResolvedAuth(
         openRouterVideoJobs,
         veoVideoJobs,
         grokVideoJobs,
+        bytePlusVideoJobs,
       });
     });
   });

@@ -239,6 +239,23 @@ export const GROK_VIDEO_SUBMIT_PATH = "/v1/videos/generations";
 export const GROK_VIDEO_STATUS_RE = /^\/v1\/videos\/([^/]+)$/;
 
 /**
+ * BytePlus Ark (Seedance) async video task routes. The `/api/v3` prefix is
+ * ENUMERATED rather than wildcarded: Ark's data-plane base carries it, but a
+ * client may point `baseURL` at a bare aimock root instead, so both forms must
+ * route. A tolerant `(?:\/[^?]*)?` prefix would additionally claim
+ * `/fal/contents/generations/tasks` — and these routes dispatch in the
+ * pre-rewrite band, ~1,100 lines ahead of every fal branch, so it would take
+ * that path away from the fal proxy. Enumerating the one real prefix also
+ * blocks a doubled suffix from matching the status RE.
+ *
+ * Declared here (not in server.ts) because normalizePathLabel below consumes
+ * them, matching the existing OpenRouter/Veo/Grok route-regex edge where
+ * server.ts imports its route regexes from this module.
+ */
+export const BYTEPLUS_VIDEO_SUBMIT_RE = /^(?:\/api\/v3)?\/contents\/generations\/tasks$/;
+export const BYTEPLUS_VIDEO_STATUS_RE = /^(?:\/api\/v3)?\/contents\/generations\/tasks\/([^/]+)$/;
+
+/**
  * Normalize parametric API paths to route patterns for use as metric labels.
  * Replaces dynamic segments (model IDs, deployment names, etc.) with placeholders.
  */
@@ -302,6 +319,19 @@ export function normalizePathLabel(pathname: string): string {
   // OpenAI/Grok video status: /v1/videos/{id}
   if (OPENAI_VIDEO_STATUS_RE.test(pathname)) {
     return "/v1/videos/{id}";
+  }
+
+  // BytePlus Ark video: /[api/v3/]contents/generations/tasks[/{id}] — task ids
+  // (`cgt-…`) are unbounded cardinality. Status before submit: the status RE is
+  // the more specific of the two and the submit RE cannot match a trailing id
+  // segment, so the order is belt-and-braces. Appended at the end of the
+  // cascade because the anchored REs above cannot match any path an earlier
+  // entry claims.
+  if (BYTEPLUS_VIDEO_STATUS_RE.test(pathname)) {
+    return "/contents/generations/tasks/{id}";
+  }
+  if (BYTEPLUS_VIDEO_SUBMIT_RE.test(pathname)) {
+    return "/contents/generations/tasks";
   }
 
   // Static path — return as-is
