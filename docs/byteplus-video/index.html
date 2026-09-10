@@ -47,7 +47,7 @@
     <div class="docs-layout">
       <aside class="sidebar" id="sidebar"></aside>
 
-      <main class="content">
+      <main class="docs-content">
         <h1>BytePlus Ark (Seedance) Video</h1>
 
         <p>
@@ -225,9 +225,10 @@
         <p>
           Ark's <code>content.video_url</code> dies 24 hours after the task produced it, and the
           task record itself is gone in 7 days. aimock serves the recorded URL as-is and warns once
-          per job when it is past its expiry — it does not substitute a placeholder, because a URL
-          aimock invented is harder to debug than a named warning. If your suite starts failing on a
-          download, re-record.
+          per fixture envelope when it is past its expiry — every job replaying that same envelope
+          shares the one warning, and a new envelope object can warn again. It does not substitute a
+          placeholder, because a URL aimock invented is harder to debug than a named warning. If
+          your suite starts failing on a download, re-record.
         </p>
 
         <h2>Known limits</h2>
