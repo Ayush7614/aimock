@@ -25,8 +25,11 @@ jobs:
   # THE AUTOMATION BOUNDARY. The only thing this job does autonomously is the
   # DETERMINISTIC, zero-agent model-family sync below (`drift-sync.ts` /
   # `drift-sync-check.ts`), which only ever performs a mechanical, data-only
-  # edit to `model-registry.ts` or drops a needs-human dedup note file — never
-  # arbitrary code generation, so there is no adversarial diff to police.
+  # edit to `model-registry.ts`, the matching membership re-pin of that set in
+  # `logic-pin.test.ts` (gate-1b proves the diff is a pin-only edit of a
+  # `(include|exclude)Families.<provider>` key and nothing else), or drops a
+  # needs-human dedup note file — never arbitrary code generation, so there is
+  # no adversarial diff to police.
   #
   # General (non-model-churn) drift is not auto-fixed here at all: it is caught
   # by the daily `Drift Tests` workflow, which alerts on its own, and fixed by a

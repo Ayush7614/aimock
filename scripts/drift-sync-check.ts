@@ -58,6 +58,7 @@ import { fileURLToPath } from "node:url";
 import { resolve } from "node:path";
 
 import { getChangedFiles } from "./drift-sync.js";
+import { LOGIC_PIN_REL_PATH, SYNC_REPINNABLE_KEYS, verifyPinFileEdit } from "./drift-pin-file.js";
 import type { DriftReport } from "./drift-types.js";
 
 // ---------------------------------------------------------------------------
@@ -67,6 +68,7 @@ import type { DriftReport } from "./drift-types.js";
 export enum SyncCheckReason {
   OK = "ok",
   OFF_ALLOWLIST_CHANGE = "off-allowlist-change",
+  PIN_FILE_NOT_A_MEMBERSHIP_REPIN = "pin-file-not-a-membership-repin",
   PIN_CHECK_FAILED = "pin-check-failed",
   RESIDUAL_CRITICAL_DRIFT = "residual-critical-drift",
   CONFIG_ERROR = "config-error",
@@ -75,6 +77,7 @@ export enum SyncCheckReason {
 export const REASON_EXIT_CODE: Record<SyncCheckReason, number> = {
   [SyncCheckReason.OK]: 0,
   [SyncCheckReason.OFF_ALLOWLIST_CHANGE]: 20,
+  [SyncCheckReason.PIN_FILE_NOT_A_MEMBERSHIP_REPIN]: 23,
   [SyncCheckReason.PIN_CHECK_FAILED]: 21,
   [SyncCheckReason.RESIDUAL_CRITICAL_DRIFT]: 22,
   [SyncCheckReason.CONFIG_ERROR]: 2,
@@ -88,21 +91,31 @@ export class SyncCheckConfigError extends Error {}
 // ---------------------------------------------------------------------------
 
 /**
- * The ONLY file a sync may edit directly: the model-registry DATA file
- * (`includeFamilies`/`excludeFamilies` literal entries). It also hosts P0's
- * frozen logic surfaces — see the pin re-assert in gate (2), which still
- * blocks an edit here that touches one of those surfaces.
+ * The files a sync may edit directly: the model-registry DATA file
+ * (`includeFamilies`/`excludeFamilies` literal entries), and the membership
+ * pins that describe it. model-registry.ts also hosts P0's frozen logic
+ * surfaces — see the pin re-assert in gate (2), which blocks an edit there that
+ * touches one of those surfaces. Gate-2 cannot do the same job for
+ * `logic-pin.test.ts`, because that file is gate-2's own oracle: re-pasting a
+ * FROZEN checksum makes gate-2 green BY CONSTRUCTION. `checkPinFileEdit`
+ * (gate-1b) is what constrains that file.
  */
 const ALLOWED_EXACT_FILES: ReadonlySet<string> = new Set([
   "src/__tests__/drift/model-registry.ts",
   // The membership checksums live here, and drift-sync re-pins the ONE affected
-  // key in the same run that applies a human-approved classification. Admitting
-  // the file at the path level is not what keeps this narrow — `onlyPinsChanged`
-  // in drift-sync.ts refuses to write unless the edit is confined to `pin:`
-  // string literals, so the frozen LOGIC in this file remains untouchable by the
-  // sync. Without the entry the approved edit lands and gate-2 immediately reds
-  // on the now-stale pin, so every approval reported gate-failed instead of
-  // ok-applied — the approval affordance the note advertises never worked.
+  // key in the same run that applies a human-approved classification. Without
+  // the entry the approved edit lands and gate-2 immediately reds on the
+  // now-stale pin, so every approval reported gate-failed instead of ok-applied
+  // — the approval affordance the note advertises never worked.
+  //
+  // ADMITTING IT AT THE PATH LEVEL IS NOT THE WHOLE STORY, and it must not be:
+  // `model-registry.ts` is allowlisted too, so a path-level admission alone lets
+  // a run widen `isClassifiedFamily` AND re-paste that surface's FROZEN pin, and
+  // pass gate-1 and gate-2 both — the exact "bot told to make the drift job
+  // pass" this file's own header names (reproduced; see checkPinFileEdit).
+  // `checkPinFileEdit` below is the narrowing, and it runs HERE, over the git
+  // diff, not inside the writer: a constraint on the pin file that only the
+  // writer enforces is not a constraint on the pin file.
   "src/__tests__/drift/logic-pin.test.ts",
 ]);
 
@@ -123,12 +136,27 @@ export function checkChangedFileAllowlist(changedFiles: string[]): string[] {
   return changedFiles.filter((file) => !isAllowedSyncFile(file));
 }
 
+/**
+ * Gate-1b: a `logic-pin.test.ts` diff must be a MEMBERSHIP RE-PIN and nothing
+ * else — no byte outside a `pin:` literal moved, and the only pins that moved
+ * belong to the six `(include|exclude)Families.<provider>` DATA_FROZEN keys.
+ *
+ * This is the constraint that replaces the path-level admission above. It is
+ * evaluated on the DIFF (HEAD vs the working tree), so it holds for whatever
+ * produced the edit — not only for the writer that promises to behave.
+ *
+ * `before` is the file at HEAD; `after` is the working tree.
+ */
+export function checkPinFileEdit(before: string, after: string): { ok: boolean; detail: string } {
+  return verifyPinFileEdit(before, after, SYNC_REPINNABLE_KEYS);
+}
+
 // ---------------------------------------------------------------------------
 // (2) Checksum-pin re-assert.
 // ---------------------------------------------------------------------------
 
 /** The exact test file P0 froze the classification logic in. Single source of truth. */
-const LOGIC_PIN_TEST = "src/__tests__/drift/logic-pin.test.ts";
+const LOGIC_PIN_TEST = LOGIC_PIN_REL_PATH;
 
 export interface CommandResult {
   status: number;
@@ -292,6 +320,13 @@ export function recollect(
 
 export interface SyncCheckDeps {
   getChangedFiles: () => string[];
+  /**
+   * `logic-pin.test.ts` as of HEAD (pre-sync) and in the working tree
+   * (post-sync), for gate-1b. Required, not optional: a gate that silently
+   * turns itself off when a dep is absent is not a gate.
+   */
+  readCommittedPinFile: () => string;
+  readWorkingPinFile: () => string;
   runPinCheck: () => PinCheckResult;
   recollect: () => DriftReport;
 }
@@ -340,6 +375,20 @@ export function evaluateSyncCheck(
       detail: `Sync touched file(s) outside the data-only allowlist: ${offendingFiles.join(", ")}`,
       offendingFiles,
     };
+  }
+
+  if (changedFiles.includes(LOGIC_PIN_TEST)) {
+    const pinEdit = checkPinFileEdit(deps.readCommittedPinFile(), deps.readWorkingPinFile());
+    if (!pinEdit.ok) {
+      return {
+        ok: false,
+        reason: SyncCheckReason.PIN_FILE_NOT_A_MEMBERSHIP_REPIN,
+        detail:
+          `${LOGIC_PIN_TEST} is on the allowlist ONLY for membership re-pins of ` +
+          `${[...SYNC_REPINNABLE_KEYS].sort().join(", ")}, and this diff is not one: ${pinEdit.detail}`,
+        offendingFiles: [LOGIC_PIN_TEST],
+      };
+    }
   }
 
   const pin = deps.runPinCheck();
@@ -418,8 +467,29 @@ export function evaluateSyncCheck(
 // CLI
 // ---------------------------------------------------------------------------
 
+/**
+ * A tracked file's content at HEAD. Fail-closed: if git cannot produce it, the
+ * gate has no baseline to judge the diff against and must refuse, never fall
+ * back to "assume unchanged".
+ */
+export function readCommittedFile(relPath: string): string {
+  try {
+    return execFileSync("git", ["show", `HEAD:${relPath}`], {
+      encoding: "utf-8",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+  } catch (err: unknown) {
+    throw new SyncCheckConfigError(
+      `Could not read ${relPath} at HEAD (${err instanceof Error ? err.message : String(err)}) — ` +
+        `gate-1 cannot verify the pin-file diff without its pre-sync baseline`,
+    );
+  }
+}
+
 const REAL_DEPS: SyncCheckDeps = {
   getChangedFiles,
+  readCommittedPinFile: () => readCommittedFile(LOGIC_PIN_TEST),
+  readWorkingPinFile: () => readFileSync(resolve(LOGIC_PIN_TEST), "utf-8"),
   runPinCheck: () => runPinCheck(),
   recollect: () => recollect(),
 };

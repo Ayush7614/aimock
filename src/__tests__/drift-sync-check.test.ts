@@ -5,11 +5,16 @@
  * Three gates, tested independently and composed:
  *   1. changed-file allowlist (data surfaces only)
  *   2. checksum-pin re-assert (P0's logic-pin.test.ts must still be green)
+ *   1b. logic-pin.test.ts is admitted ONLY for a membership re-pin of a
+ *       `(include|exclude)Families.<provider>` DATA_FROZEN key — see
+ *       `checkPinFileEdit`. Gate-2 cannot police that file: it IS gate-2's
+ *       oracle, so a re-pasted checksum makes gate-2 green by construction.
  *   3. clean re-collect (post-sync report has zero residual critical diffs)
  *
  * No LLM, no model call — every assertion here is a plain data check.
  */
 import { describe, it, expect, vi } from "vitest";
+import { readFileSync } from "node:fs";
 
 import {
   isAllowedSyncFile,
@@ -19,6 +24,7 @@ import {
   formatCriticalDiffs,
   reportTrustNote,
   evaluateSyncCheck,
+  checkPinFileEdit,
   runPinCheck,
   recollect,
   SyncCheckReason,
@@ -28,6 +34,7 @@ import {
   type SyncCheckDeps,
   type CommandResult,
 } from "../../scripts/drift-sync-check.js";
+import { updateDataFrozenPin } from "../../scripts/drift-pin-file.js";
 import type { DriftReport } from "../../scripts/drift-types.js";
 
 function report(criticalCounts: number[]): DriftReport {
@@ -229,14 +236,110 @@ describe("recollect", () => {
 // Composition — evaluateSyncCheck
 // ---------------------------------------------------------------------------
 
+const REAL_PIN_FILE = readFileSync("src/__tests__/drift/logic-pin.test.ts", "utf-8");
+
+/** The real pin file with ONE DATA_FROZEN key's pin rewritten. */
+function repinned(source: string, key: string, pin: string): string {
+  const out = updateDataFrozenPin(source, key, pin);
+  if (!out.changed) throw new Error(`fixture: could not re-pin ${key}`);
+  return out.text;
+}
+
 function deps(overrides: Partial<SyncCheckDeps>): SyncCheckDeps {
   return {
     getChangedFiles: () => ["src/__tests__/drift/model-registry.ts"],
+    readCommittedPinFile: () => REAL_PIN_FILE,
+    readWorkingPinFile: () => REAL_PIN_FILE,
     runPinCheck: () => ({ ok: true, output: "5 passed" }),
     recollect: () => report([0]),
     ...overrides,
   };
 }
+
+// ---------------------------------------------------------------------------
+// Gate-1b — the pin file is allowlisted ONLY for membership re-pins.
+// ---------------------------------------------------------------------------
+
+describe("gate-1b: logic-pin.test.ts is on the allowlist only for a membership re-pin", () => {
+  const PIN_FILE = "src/__tests__/drift/logic-pin.test.ts";
+  const REGISTRY = "src/__tests__/drift/model-registry.ts";
+
+  it("GREEN: a membership re-pin of one (include|exclude)Families.<provider> key PASSES", () => {
+    const after = repinned(REAL_PIN_FILE, "excludeFamilies.openai", "a".repeat(64));
+    expect(checkPinFileEdit(REAL_PIN_FILE, after).ok).toBe(true);
+    const verdict = evaluateSyncCheck(
+      deps({
+        getChangedFiles: () => [REGISTRY, PIN_FILE],
+        readWorkingPinFile: () => after,
+      }),
+    );
+    expect(verdict.ok).toBe(true);
+    expect(verdict.reason).toBe(SyncCheckReason.OK);
+  });
+
+  // THE BOUNDARY THAT MOVED. `model-registry.ts` is allowlisted too, so a
+  // path-level admission of this file is by itself sufficient to silence a
+  // frozen surface: widen `isClassifiedFamily` AND re-paste that surface's
+  // FROZEN checksum, and gate-1 and gate-2 both pass — gate-2's oracle IS this
+  // file. Reproduced end to end against the real tree before this gate existed.
+  it("RED: a re-pasted FROZEN logic checksum FAILS, and never reaches the pin test or the re-collect", () => {
+    const at = REAL_PIN_FILE.indexOf("  isClassifiedFamily: {");
+    const m = /pin: "([0-9a-f]{64})"/.exec(REAL_PIN_FILE.slice(at))!;
+    const silenced =
+      REAL_PIN_FILE.slice(0, at + m.index) +
+      `pin: "${"9".repeat(64)}"` +
+      REAL_PIN_FILE.slice(at + m.index + m[0].length);
+    const runPinCheckFn = vi.fn(() => ({ ok: true, output: "33 passed" }));
+    const recollectFn = vi.fn(() => report([0]));
+
+    const verdict = evaluateSyncCheck(
+      deps({
+        getChangedFiles: () => [REGISTRY, PIN_FILE],
+        readWorkingPinFile: () => silenced,
+        runPinCheck: runPinCheckFn,
+        recollect: recollectFn,
+      }),
+    );
+
+    expect(verdict.ok).toBe(false);
+    expect(verdict.reason).toBe(SyncCheckReason.PIN_FILE_NOT_A_MEMBERSHIP_REPIN);
+    expect(REASON_EXIT_CODE[verdict.reason]).toBe(23);
+    expect(verdict.offendingFiles).toEqual([PIN_FILE]);
+    // Gate-2 would have gone GREEN on this tree — that is the whole point.
+    expect(runPinCheckFn).not.toHaveBeenCalled();
+    expect(recollectFn).not.toHaveBeenCalled();
+  });
+
+  it("RED: re-pinning a DATA_FROZEN key the sync may not move (the voice seed set) FAILS", () => {
+    const after = repinned(REAL_PIN_FILE, "knownVoiceModelFamilies", "b".repeat(64));
+    const verdict = evaluateSyncCheck(
+      deps({ getChangedFiles: () => [PIN_FILE], readWorkingPinFile: () => after }),
+    );
+    expect(verdict.ok).toBe(false);
+    expect(verdict.reason).toBe(SyncCheckReason.PIN_FILE_NOT_A_MEMBERSHIP_REPIN);
+    expect(verdict.detail).toContain("knownVoiceModelFamilies");
+  });
+
+  it("RED: any edit outside a pin literal FAILS", () => {
+    const after = REAL_PIN_FILE.replace(
+      "members: () => [...excludeFamilies.openai].sort(),",
+      "members: () => [],",
+    );
+    expect(after).not.toBe(REAL_PIN_FILE);
+    const verdict = evaluateSyncCheck(
+      deps({ getChangedFiles: () => [PIN_FILE], readWorkingPinFile: () => after }),
+    );
+    expect(verdict.ok).toBe(false);
+    expect(verdict.reason).toBe(SyncCheckReason.PIN_FILE_NOT_A_MEMBERSHIP_REPIN);
+  });
+
+  it("does not consult the pin-file diff at all when the sync did not touch that file", () => {
+    const readWorkingPinFile = vi.fn(() => REAL_PIN_FILE);
+    const verdict = evaluateSyncCheck(deps({ readWorkingPinFile }));
+    expect(verdict.ok).toBe(true);
+    expect(readWorkingPinFile).not.toHaveBeenCalled();
+  });
+});
 
 describe("evaluateSyncCheck — RED/GREEN value-test surface", () => {
   it("GREEN: a data-only excludeFamilies-style change on the allowlist, pins intact, clean re-collect -> PASSES", () => {
