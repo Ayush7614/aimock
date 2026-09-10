@@ -185,7 +185,7 @@ describe("BytePlus Ark auth-layer error-envelope canary (live, keyless)", () => 
   ];
 
   for (const { name, auth, header } of cases) {
-    it(`${name} still yields Ark's documented 401 error envelope`, async (ctx) => {
+    it(`${name} still yields Ark's observed 401 error envelope`, async (ctx) => {
       let probe: BytePlusArkProbeResult;
       try {
         probe = await probeBytePlusArkAuthEnvelope({ auth });

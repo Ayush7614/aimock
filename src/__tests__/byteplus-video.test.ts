@@ -242,8 +242,9 @@ describe("POST /api/v3/contents/generations/tasks (submit)", () => {
     // type in `@tanstack/ai-byteplus@0.3.4` (`src/video/wire-types.ts`), the client
     // the requester uses — NOT a call aimock made. That package is a SECONDARY
     // source: its types are hand-written from harvested Ark OpenAPI documents plus
-    // live calls its own author documents making on 2026-07-31. Nothing on this
-    // surface was verified against live Ark by this repo (see the same caveat on
+    // live calls its own author documents making on 2026-07-31. The create/poll
+    // SHAPES have not been verified against live Ark by this repo — the drift
+    // canary observed only Ark's keyless AUTH envelope (see the same caveat on
     // `probeBytePlusArkUnknownTask` in src/__tests__/drift/providers.ts). If Ark is
     // ever observed returning e.g. `{ id, status: "queued" }`, this assertion is
     // the thing to CHANGE, not the thing to defend.

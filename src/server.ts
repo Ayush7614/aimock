@@ -1469,10 +1469,13 @@ export async function createServerWithResolvedAuth(
   // prefix. `record.providers.byteplus` is an ORIGIN: the video handlers pass
   // the full `/api/v3/contents/generations/tasks[...]` constant to
   // resolveUpstreamUrl, and the chat/images proxies relay the client's raw
-  // `req.url` (which is itself `/api/v3/...`). BytePlus publishes
-  // `https://ark.<region>.bytepluses.com/api/v3` as the OpenAI-SDK `base_url`,
-  // so pasting that into --provider-byteplus is the expected mistake, and it
-  // composes `/api/v3/api/v3/...` on every BytePlus path.
+  // `req.url` (which is itself `/api/v3/...`). `@tanstack/ai-byteplus@0.3.4`
+  // ships `https://ark.ap-southeast.bytepluses.com/api/v3` as its default Ark
+  // `base_url` (`BYTEPLUS_ARK_BASE_URL`, which its own author labels
+  // "Docs-derived" — this repo has not read BytePlus's docs), so pasting that
+  // into --provider-byteplus is the expected mistake, and it composes
+  // `/api/v3/api/v3/...` on every BytePlus path. The origin+prefix itself IS
+  // observed to serve: a keyless GET under it answers 401, not 404.
   //
   // This THROWS rather than silently stripping the suffix, for two reasons.
   // (1) Nothing is being taken away: the doubled form cannot serve any

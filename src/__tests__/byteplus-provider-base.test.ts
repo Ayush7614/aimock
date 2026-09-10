@@ -9,8 +9,12 @@ import { LLMock } from "../llmock.js";
 // `record.providers.byteplus` is an ORIGIN: every BytePlus code path (video
 // submit/poll via resolveUpstreamUrl, plus the chat and images proxies, which
 // relay the client's raw `req.url`) appends the full `/api/v3/...` path itself.
-// BytePlus's own published OpenAI-SDK `base_url` is
-// `https://ark.<region>.bytepluses.com/api/v3`, so pasting that into
+// The Ark `base_url` a caller has to hand is
+// `https://ark.<region>.bytepluses.com/api/v3` — that is the default
+// `BYTEPLUS_ARK_BASE_URL` shipped by `@tanstack/ai-byteplus@0.3.4`, a SECONDARY
+// source its own author labels "Docs-derived"; this repo has not read BytePlus's
+// documentation. (The host+prefix does serve: a keyless GET under it answers
+// 401.) So pasting that into
 // `--provider-byteplus` composes `/api/v3/api/v3/...` — observed, before this
 // guard existed, as
 //   ["/api/v3/api/v3/contents/generations/tasks", "/api/v3/api/v3/chat/completions"]

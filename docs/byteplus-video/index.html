@@ -69,8 +69,9 @@
 
         <p>
           This is the easy mistake to make, because
-          <code>https://ark.&lt;region&gt;.bytepluses.com/api/v3</code> is the value BytePlus
-          publishes as the OpenAI-SDK <code>base_url</code> — and pasting it here would send every
+          <code>https://ark.&lt;region&gt;.bytepluses.com/api/v3</code> is the Ark
+          <code>base_url</code> you already have to hand — it is the default that
+          <code>@tanstack/ai-byteplus@0.3.4</code> ships — and pasting it here would send every
           BytePlus request (video, chat and images alike) to <code>/api/v3/api/v3/&hellip;</code>,
           which fails upstream as a 404 that does not name its cause. aimock therefore
           <strong>refuses to start</strong> when <code>--provider-byteplus</code> ends in

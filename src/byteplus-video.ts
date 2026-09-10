@@ -384,19 +384,27 @@ function advanceJob(job: BytePlusVideoReplayJob): void {
  * authored error (404 unknown task, 404 no fixture, 400 validation, 502 bad
  * envelope, 503 strict) sees `undefined` where live Ark would give it a token.
  *
- * We omit it rather than close the gap because we do not know the value. No
- * live Ark error body has ever been observed here — the canary has never run
- * (there is no `ARK_API_KEY` in repo secrets) and `@tanstack/ai-byteplus` is not
- * installed, so nobody has verified what the client does with a missing `code`
- * either. Minting one would put an aimock-authored token into a consumer's
+ * We omit it rather than close the gap because we do not know the value FOR
+ * THESE CLASSES. The canary is keyless and does run — it observed Ark's
+ * AUTH-layer error body live on 2026-09-10 (`code: "AuthenticationError"`,
+ * `type: "Unauthorized"`, `param: ""`; see the `OBSERVED_*` constants in the
+ * drift file). None of the five error classes above is an auth error, so that
+ * observation does not supply their codes, and `@tanstack/ai-byteplus` is not
+ * installed here, so nobody has verified what the client does with a missing
+ * `code` either. Minting one would put an aimock-authored token into a consumer's
  * assertions and into any fixture recorded past it, which is the failure this
  * module exists to avoid; the governing rule is that the mock never authors a
  * wire value it did not observe, and an honest absence beats a plausible
  * invention. Recorded fixtures are unaffected: a real `error.code` captured
  * from upstream replays verbatim.
  *
- * To close it: run the canary against a real key, then carry the OBSERVED code
- * per error class. Do not guess one.
+ * Also omitted, for the same reason and on the same terms: `type` and `param`.
+ * Both ARE observed on the auth envelope, and neither is known for the five
+ * classes above.
+ *
+ * To close it: observe a real Ark 404/400/5xx for each class (a real key is
+ * needed to reach them), then carry the OBSERVED code per error class. Do not
+ * guess one.
  */
 function arkErrorBody(message: string): string {
   return JSON.stringify({ error: { message } });
@@ -783,8 +791,11 @@ export async function handleBytePlusVideoCreate(
     response: { status: 200, fixture },
   });
 
-  // The `cgt-` prefix is deliberate: it is what live Ark returns, so a consumer
-  // that pattern-matches the id cannot tell replay from live.
+  // The `cgt-` prefix is deliberate: it is the task-id prefix documented in
+  // `@tanstack/ai-byteplus@0.3.4` (`src/video/wire-types.ts`, from that author's
+  // own live calls — a SECONDARY source; this repo has not observed a real Ark
+  // task id), so a consumer that pattern-matches the id cannot tell replay from
+  // live.
   const id = `cgt-${crypto.randomUUID()}`;
   const progression = resolveProgression(defaults.bytePlusVideo);
   const job: BytePlusVideoReplayJob = {
@@ -854,8 +865,9 @@ export async function handleBytePlusVideoStatus(
     // an aged-out task is UNVERIFIED: the client library reads a dotted
     // `error.code` off an open-ended vocabulary and splices it into the
     // consumer-visible error string, and the drift canary asserts a string
-    // `code` — but that canary has never run and aimock has never seen an Ark
-    // error body. Minting a code to fill the gap would put an aimock-authored
+    // `code`. That canary does run, but what it observed live is Ark's AUTH
+    // envelope, not a 404 for an unknown task — so this class's code remains
+    // unobserved. Minting a code to fill the gap would put an aimock-authored
     // token into a consumer's assertion; see `arkErrorBody`.
     journal.add({
       method,
