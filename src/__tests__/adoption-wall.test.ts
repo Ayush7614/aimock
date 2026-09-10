@@ -2996,8 +2996,19 @@ const AW_SCRIPT_SRC = fileURLToPath(new URL("scripts/update-adoption-wall.ts", A
  * ignore it, and a script copied there still resolves the repo's own `prettier`
  * and finds the repo's `.prettierrc` by walking up — so the child formats the
  * page exactly the way a real run does.
+ *
+ * It is mkdtemp'd PER WORKER, and the `afterAll` hooks below delete only this
+ * worker's own directory. A fixed shared path was a cross-process race: two
+ * runs of this file against one checkout — two agents, or a `vitest` run
+ * overlapping a watch — put their sandboxes in the same tree, and whichever
+ * suite finished first `rmSync`'d the whole tree out from under the other,
+ * which surfaced as ENOENT on `docs/index.html` in whichever `main()` cases
+ * happened to be in flight. That failure is load-dependent, so it reads as a
+ * regression in the code under test rather than as harness self-interference.
  */
-const AW_SANDBOX_HOME = fileURLToPath(new URL("node_modules/.aw-main-test/", AW_REPO_ROOT));
+const AW_SANDBOX_ROOT = fileURLToPath(new URL("node_modules/.aw-main-test/", AW_REPO_ROOT));
+mkdirSync(AW_SANDBOX_ROOT, { recursive: true });
+const AW_SANDBOX_HOME = mkdtempSync(join(AW_SANDBOX_ROOT, "worker-"));
 
 /**
  * What the child actually starts. It stubs the run's `fetch` (no network in the
