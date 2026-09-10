@@ -12,8 +12,12 @@
  *      REAL handler + triangulate + collector routing path, not a unit fake.
  *
  *   2. LIVE canary (FREE) — authenticate with `ARK_API_KEY` and probe a
- *      known-bad task id, asserting Ark still answers 404 with its documented
- *      error envelope. Metadata only; no generation. Gated on the key.
+ *      known-bad task id, expecting Ark to answer 404 with an error envelope.
+ *      Metadata only; no generation. Gated on the key. The 404 expectation is
+ *      NOT a verified vendor fact: it is inferred from the error shape in
+ *      `@tanstack/ai-byteplus@0.3.4` and has never been checked against live
+ *      Ark (no ARK_API_KEY exists in this repo). If the canary reports 400 or
+ *      200-with-an-error-body, the expectation is what is wrong.
  *
  * WHAT THIS LEG CANNOT DO: detect a change made on Ark's side to the SUCCESS
  * task shape. Check 1 compares the mock against an in-repo exemplar and check 2

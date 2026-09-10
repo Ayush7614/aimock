@@ -900,16 +900,6 @@ export async function listGeminiModels(apiKey: string): Promise<string[]> {
 }
 
 /**
- * List OpenRouter's video-capable models via the dedicated (FREE, no
- * generation) listing endpoint `GET /api/v1/videos/models`. Video models do
- * NOT appear in the plain `/api/v1/models` listing, hence the dedicated route
- * (see src/openrouter-video.ts handleOpenRouterVideoModels). Returns the raw
- * provider-prefixed slugs (e.g. "openai/sora-2", "bytedance/seedance-2.0",
- * "google/veo-3.1"). This is the cost-safe daily live-reality canary for the
- * OpenRouter video proxy surface — it authenticates and reads metadata only,
- * never submitting a paid generation job.
- */
-/**
  * BytePlus Ark's cheapest authenticated video-surface probe: GET a task id that
  * cannot exist. Ark has NO free video-model listing endpoint (which is what
  * makes the OpenRouter canary free), and a real generation costs money, so this
@@ -919,6 +909,11 @@ export async function listGeminiModels(apiKey: string): Promise<string[]> {
  * owns the expectation. NOTE: the 404 assumption is UNVERIFIED against live Ark
  * — if Ark answers a bad task id with 400, or 200-with-an-error-body, this
  * canary must be rewritten or dropped rather than "fixed" by loosening it.
+ *
+ * The region is hard-coded to `ap-southeast`. An ARK_API_KEY minted in another
+ * Ark region will not authenticate against this host, and the failure surfaces
+ * as a drift finding rather than as the configuration mismatch it is — read a
+ * 401/403 from this probe as "wrong region key" before reading it as drift.
  */
 export async function probeBytePlusArkUnknownTask(
   apiKey: string,
@@ -941,6 +936,16 @@ export async function probeBytePlusArkUnknownTask(
   });
 }
 
+/**
+ * List OpenRouter's video-capable models via the dedicated (FREE, no
+ * generation) listing endpoint `GET /api/v1/videos/models`. Video models do
+ * NOT appear in the plain `/api/v1/models` listing, hence the dedicated route
+ * (see src/openrouter-video.ts handleOpenRouterVideoModels). Returns the raw
+ * provider-prefixed slugs (e.g. "openai/sora-2", "bytedance/seedance-2.0",
+ * "google/veo-3.1"). This is the cost-safe daily live-reality canary for the
+ * OpenRouter video proxy surface — it authenticates and reads metadata only,
+ * never submitting a paid generation job.
+ */
 export async function listOpenRouterVideoModels(apiKey: string): Promise<string[]> {
   return withInfraErrorTag("OpenRouter Video Models", async () => {
     const url = "https://openrouter.ai/api/v1/videos/models";
