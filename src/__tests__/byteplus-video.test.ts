@@ -158,8 +158,13 @@ describe("route regexes are anchored, not wildcarded", () => {
 // ─── Match key (§7.1) ───────────────────────────────────────────────────────
 
 describe("buildBytePlusMatchText", () => {
-  test("text-only content is the concatenated prompt", () => {
-    expect(buildBytePlusMatchText([{ type: "text", text: "a guitar" }])).toBe("a guitar");
+  test("text-only content is the concatenated prompt plus an EMPTY media marker", () => {
+    // The marker is unconditional so that no key can be a substring of another —
+    // router.ts substring-matches userMessage, so a bare "a guitar" would have
+    // shadowed the image-to-video key "a guitar\n[media: first_frame:…]".
+    expect(buildBytePlusMatchText([{ type: "text", text: "a guitar" }])).toBe(
+      "a guitar\n[media: ]",
+    );
   });
 
   test("a text-less image-to-video job still yields a non-empty key", () => {
@@ -188,13 +193,19 @@ describe("buildBytePlusMatchText", () => {
     expect(b.includes(a)).toBe(false);
   });
 
-  test("audio parts are digested too, and an unusable part is skipped", () => {
+  test("audio parts are digested, and a part with no resolvable url still contributes", () => {
+    // A dropped part is how the key degraded back to a model-wide wildcard: a
+    // content array of ONLY unresolvable parts returned "", buildFixtureMatch
+    // then omitted userMessage, and isEmptyMatch cannot catch it because
+    // `endpoint` is set. Unresolvable parts are digested over their own JSON.
     const key = buildBytePlusMatchText([
       { type: "audio_url", audio_url: { url: "https://x/a.mp3" }, role: "reference_audio" },
-      { type: "image_url" }, // no url — nothing to digest
+      { type: "image_url" }, // no url — digested over the part itself
       { type: "unknown_kind", whatever: 1 },
     ]);
-    expect(key).toBe(key.match(/^\[media: reference_audio:[0-9a-f]{12}\]$/)?.[0]);
+    expect(key).toMatch(
+      /^\[media: reference_audio:[0-9a-f]{12}, image_url:[0-9a-f]{12}, unknown_kind:[0-9a-f]{12}\]$/,
+    );
   });
 
   test("an explicit role is used verbatim and a data: URI never reaches the key", () => {
