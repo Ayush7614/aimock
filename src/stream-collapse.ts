@@ -2051,9 +2051,15 @@ export function collapseStreamingResponse(
       // it correctly but logged `unknown SSE provider "openrouter"` on EVERY
       // recorded OpenRouter stream — telling users aimock does not recognize a
       // provider it ships first-class support for.
+      // `byteplus` joins them for the same reason: Ark's /chat/completions is
+      // OpenAI-compatible and is driven through the OpenAI SDK
+      // (@tanstack/ai-byteplus adapters/text.ts), so its SSE IS the OpenAI wire
+      // format. Omitting the case would reintroduce the exact warn described
+      // above for every recorded Ark chat stream.
       case "openai":
       case "azure":
       case "openrouter":
+      case "byteplus":
         return collapseOpenAISSE(str);
       case "anthropic":
         return collapseAnthropicSSE(str);

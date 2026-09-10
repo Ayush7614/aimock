@@ -461,6 +461,29 @@ describe("normalizePathLabel", () => {
   it("normalizes OpenAI video status path", () => {
     expect(normalizePathLabel("/v1/videos/video_abc123")).toBe("/v1/videos/{id}");
   });
+
+  // BytePlus Ark task ids (`cgt-<uuid>`) are unbounded, so an un-normalized
+  // status path mints one Prometheus label per job. The `/api/v3`-prefixed form
+  // is the load-bearing assertion for the submit path: the bare form is already
+  // its own label when the branch is absent, so only the prefixed form proves
+  // the branch runs.
+  it("normalizes BytePlus Ark video status path", () => {
+    expect(
+      normalizePathLabel(
+        "/api/v3/contents/generations/tasks/cgt-2f5f9d1c-0f2a-4f1e-9c7e-1a2b3c4d5e6f",
+      ),
+    ).toBe("/contents/generations/tasks/{id}");
+    expect(
+      normalizePathLabel("/contents/generations/tasks/cgt-2f5f9d1c-0f2a-4f1e-9c7e-1a2b3c4d5e6f"),
+    ).toBe("/contents/generations/tasks/{id}");
+  });
+
+  it("normalizes BytePlus Ark video submit path", () => {
+    expect(normalizePathLabel("/api/v3/contents/generations/tasks")).toBe(
+      "/contents/generations/tasks",
+    );
+    expect(normalizePathLabel("/contents/generations/tasks")).toBe("/contents/generations/tasks");
+  });
 });
 
 describe("MetricsRegistry: all three types serialized together", () => {

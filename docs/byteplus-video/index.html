@@ -1,0 +1,274 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>BytePlus Ark Video — aimock</title>
+    <link rel="icon" type="image/svg+xml" href="../favicon.svg" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,300;0,400;0,500;0,600;0,700;1,400&family=Instrument+Sans:wght@400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="../style.css" />
+    <script src="/pixels.js" defer></script>
+  </head>
+  <body>
+    <nav class="top-nav">
+      <div class="nav-inner">
+        <div style="display: flex; align-items: center; gap: 1rem">
+          <button
+            class="sidebar-toggle"
+            onclick="document.querySelector('.sidebar').classList.toggle('open')"
+            aria-label="Toggle sidebar"
+          >
+            &#9776;
+          </button>
+          <a href="/" class="nav-brand"> <span class="prompt">$</span> aimock </a>
+        </div>
+        <ul class="nav-links">
+          <li><a href="/">Home</a></li>
+          <li><a href="/docs" style="color: var(--accent)">Docs</a></li>
+          <li>
+            <a href="https://github.com/CopilotKit/aimock" class="gh-link" target="_blank">
+              <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
+                <path
+                  d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"
+                />
+              </svg>
+              GitHub
+            </a>
+          </li>
+        </ul>
+      </div>
+    </nav>
+
+    <div class="docs-layout">
+      <aside class="sidebar" id="sidebar"></aside>
+
+      <main class="content">
+        <h1>BytePlus Ark (Seedance) Video</h1>
+
+        <p>
+          Record and replay BytePlus Ark's asynchronous video task lifecycle — the Seedance models
+          on ModelArk. aimock stands in for
+          <code>POST /api/v3/contents/generations/tasks</code> (submit) and
+          <code>GET /api/v3/contents/generations/tasks/{id}</code> (poll).
+        </p>
+
+        <h2>Two configuration values, and both matter</h2>
+
+        <p>
+          <strong>1. The upstream is an ORIGIN, with no path.</strong> aimock's video handler owns
+          the whole path including the <code>/api/v3</code> prefix, so adding it to the upstream
+          would compose it twice.
+        </p>
+
+        <pre><code>npx aimock --record --provider-byteplus https://ark.ap-southeast.bytepluses.com</code></pre>
+
+        <p>
+          This is the easy mistake to make, because
+          <code>https://ark.&lt;region&gt;.bytepluses.com/api/v3</code> is the Ark
+          <code>base_url</code> you already have to hand — it is the default that
+          <code>@tanstack/ai-byteplus@0.3.4</code> ships — and pasting it here would send every
+          BytePlus request (video, chat and images alike) to <code>/api/v3/api/v3/&hellip;</code>,
+          which fails upstream as a 404 that does not name its cause. aimock therefore
+          <strong>refuses to start</strong> when <code>--provider-byteplus</code> ends in
+          <code>/api/v3</code>, rather than silently rewriting the URL you gave it. Drop the suffix;
+          keep the region.
+        </p>
+
+        <p>
+          <strong
+            >2. Point your client's <code>baseURL</code> at
+            <code>&lt;aimock&gt;/api/v3</code>.</strong
+          >
+          Video works either way, but chat and images need the prefix — both to compose a valid
+          upstream URL in record mode and to attribute to the <code>byteplus</code> provider at all.
+        </p>
+
+        <pre><code>const adapter = createBytePlusVideo(
+  "seedance-1-0-pro-fast-251015",
+  process.env.ARK_API_KEY,
+  { baseURL: "http://localhost:4010/api/v3" },
+);</code></pre>
+
+        <p>
+          Point <code>baseURL</code> at a bare aimock root and chat/images keep working exactly as
+          they do today, under the <code>openai</code> provider key. That is a graceful fallback,
+          not a break — but it is not what you want if you are recording Ark traffic.
+        </p>
+
+        <h2>The fixture format is the Ark envelope itself</h2>
+
+        <p>
+          This surface does <strong>not</strong> use aimock's <code>video</code>
+          response type. It stores the Ark task envelope verbatim as a
+          <code>json</code> response. That is what lets <code>cancelled</code> and
+          <code>expired</code> — terminal states aimock's <code>video</code> type cannot express —
+          record and replay natively, and it is why a recorded <code>error</code>,
+          <code>usage</code>, or a field BytePlus adds next year replays correctly without aimock
+          knowing about it.
+        </p>
+
+        <p>
+          <strong><code>match.endpoint: "video"</code> is mandatory here</strong>, not conventional.
+          Without it aimock's router skips the fixture before the handler sees it, and you get a
+          bare 404. Recorded fixtures always carry it.
+        </p>
+
+        <p>
+          <code>endpoint: "video"</code> is a namespace shared with Sora, Grok, Veo and OpenRouter,
+          which consume aimock's <code>video</code> response type rather than a raw envelope. The
+          router keeps the two halves apart for you: a <code>json</code> fixture is never offered to
+          those handlers, so a BytePlus fixture in a mixed suite cannot make their submits fail. You
+          do not need <code>match.model</code> to get that isolation — though recording always
+          writes it, and it is still what separates two BytePlus models sharing a prompt.
+        </p>
+
+        <pre><code>{
+  "match": {
+    "userMessage": "a guitar being played in a store\n[media: first_frame:9f2a1c4b7e03]",
+    "endpoint": "video",
+    "model": "seedance-1-0-pro-fast-251015"
+  },
+  "response": {
+    "json": {
+      "model": "seedance-1-0-pro-fast-251015",
+      "status": "succeeded",
+      "created_at": 1785000000,
+      "updated_at": 1785000131,
+      "content": { "video_url": "https://ark-content-generation-...bytepluses.com/..." },
+      "usage": { "completion_tokens": 129600, "total_tokens": 129600 }
+    }
+  }
+}</code></pre>
+
+        <p>
+          Note the absent <code>id</code>: aimock strips the real Ark task id at capture and stamps
+          its own on every replay, so no live task id ends up in a committed artifact.
+        </p>
+
+        <p>
+          <code>LLMock.onVideo()</code> cannot express this shape — it builds aimock's
+          <code>video</code> type. Use <code>addFixture()</code> directly, exactly as the fal queue
+          surface does.
+        </p>
+
+        <h2>The match key is not just your prompt</h2>
+
+        <p>
+          A Seedance image-to-video job carries no text at all, so a prompt-only key would make
+          every such job in your suite match the same fixture. aimock folds a short digest of each
+          media input into the key:
+        </p>
+
+        <pre><code>a guitar being played in a store
+[media: first_frame:9f2a1c4b7e03]</code></pre>
+
+        <p>
+          The <code>[media: …]</code> line is <strong>always present</strong>, even for a text-only
+          job, where it reads <code>[media: ]</code>. That is what keeps one
+          <em>recorded</em> fixture from shadowing another: aimock matches
+          <code>userMessage</code> as a substring by default, and because the media line always ends
+          in <code>]</code>, neither <code>a guitar\n[media: ]</code> nor
+          <code>a guitar\n[media: first_frame:9f2a…]</code> is a substring of the other. A
+          text-to-video recording therefore cannot serve an image-to-video request that shares its
+          prompt. Every input part contributes an entry, including one whose shape aimock does not
+          recognise — no content array produces an empty key.
+        </p>
+
+        <p>
+          The digest is taken over the input URL — including a
+          <code>data:</code> URI, so a multi-megabyte inline image never reaches the fixture.
+        </p>
+
+        <p>
+          <strong
+            >Hand-authoring means copying the whole key, both lines, verbatim from a recorded
+            fixture.</strong
+          >
+          That protection is a property of recorded keys, not of the router — a partial key still
+          matches, because substring matching is what is doing the work. A
+          <code>userMessage</code> of just the bare prompt is a substring of <em>both</em>
+          <code>a guitar\n[media: ]</code> and <code>a guitar\n[media: first_frame:9f2a…]</code>, so
+          it matches a text-to-video <em>and</em> an image-to-video submit sharing that prompt, and
+          serves whichever fixture the router reaches first: HTTP 200 with the wrong video. The same
+          holds in the other direction — a media-only key such as
+          <code>[media: first_frame:9f2a…]</code> (recorded from a job with no prompt) is a
+          substring of <code>a guitar\n[media: first_frame:9f2a…]</code> and will shadow it. To
+          avoid a collision, copy both lines, or supply a <code>requestTransform</code>, which
+          switches <code>userMessage</code> matching from substring to exact for the whole instance.
+        </p>
+
+        <h2>Multi-tenant tests use a header, not a query string</h2>
+
+        <p>
+          The BytePlus client percent-encodes the job id into the poll path, so aimock cannot
+          smuggle a <code>?testId=</code> into the id it returns. Pass the test id as a header
+          instead — the adapter forwards <code>defaultHeaders</code>:
+        </p>
+
+        <pre><code>createBytePlusVideo(model, key, {
+  baseURL: "http://localhost:4010/api/v3",
+  defaultHeaders: { "x-test-id": "my-test" },
+});</code></pre>
+
+        <p>
+          Snapshot-mode recording keys entirely off a non-default test id, so without this you will
+          record nothing and replay 404s.
+        </p>
+
+        <h2>Recorded URLs expire</h2>
+
+        <p>
+          Ark's <code>content.video_url</code> dies 24 hours after the task produced it, and the
+          task record itself is gone in 7 days. aimock serves the recorded URL as-is and warns once
+          per job when it is past its expiry — it does not substitute a placeholder, because a URL
+          aimock invented is harder to debug than a named warning. If your suite starts failing on a
+          download, re-record.
+        </p>
+
+        <h2>Known limits</h2>
+
+        <ul>
+          <li>
+            <strong>Metrics do not follow attribution.</strong> Ark chat labels as
+            <code>/v1/chat/completions</code>, indistinguishable from OpenAI chat, even when the
+            provider key is correct.
+          </li>
+          <li>
+            <strong>Large inline media can exceed the body cap.</strong> The client base64-inlines
+            any non-URL media source, and aimock caps request bodies at 10 MB. Pass a public URL
+            instead — Ark fetches it server-side.
+          </li>
+          <li>
+            <strong>Jobs expire from aimock after an hour.</strong> Each poll refreshes the timer,
+            but an unpolled job evicts and its next poll 404s, which the client reports as a failed
+            generation rather than retrying.
+          </li>
+          <li>
+            The Ark control plane (Assets / HMAC-signed), task listing and deletion, Seed Speech
+            (TTS/ASR), and <code>callback_url</code> webhooks are all out of scope.
+          </li>
+        </ul>
+      </main>
+      <aside class="page-toc" id="page-toc"></aside>
+    </div>
+
+    <footer class="docs-footer">
+      <div class="footer-inner">
+        <div class="footer-left"><span>$</span> aimock &middot; MIT License</div>
+        <ul class="footer-links">
+          <li><a href="https://github.com/CopilotKit/aimock" target="_blank">GitHub</a></li>
+          <li>
+            <a href="https://www.npmjs.com/package/@copilotkit/aimock" target="_blank">npm</a>
+          </li>
+        </ul>
+      </div>
+    </footer>
+    <script src="../sidebar.js"></script>
+    <script src="../cli-tabs.js"></script>
+  </body>
+</html>

@@ -28,7 +28,7 @@ export function getDummyKeyMarker(): string {
  * credential unchanged.
  *
  * Scheme kinds (all static long-lived keys):
- *   - bearer          `Authorization: Bearer <key>`  (OpenAI, OpenRouter, Cohere, Grok/xAI, Ollama)
+ *   - bearer          `Authorization: Bearer <key>`  (OpenAI, OpenRouter, Cohere, Grok/xAI, BytePlus Ark, Ollama)
  *   - fal-key         `Authorization: Key <key>`     (fal.ai — note the `Key ` prefix, NOT `Bearer`)
  *   - x-api-key       `x-api-key: <key>`             (Anthropic)
  *   - x-goog-api-key  `x-goog-api-key: <key>`        (Gemini, Gemini Interactions, Veo)
@@ -54,6 +54,7 @@ const PROVIDER_AUTH_SCHEMES: Partial<Record<RecordProviderKey, AuthScheme>> = {
   openrouter: { kind: "bearer" },
   cohere: { kind: "bearer" },
   grok: { kind: "bearer" }, // xAI
+  byteplus: { kind: "bearer" }, // BytePlus Ark (ModelArk) — Authorization: Bearer $ARK_API_KEY
   ollama: { kind: "bearer" }, // Ollama Cloud / bearer-gated Ollama servers
   // Anthropic.
   anthropic: { kind: "x-api-key" },
@@ -259,6 +260,7 @@ export function readProviderKeysFromEnv(
   if (env.AIMOCK_PROVIDER_OPENROUTER_KEY) keys.openrouter = env.AIMOCK_PROVIDER_OPENROUTER_KEY;
   if (env.AIMOCK_PROVIDER_COHERE_KEY) keys.cohere = env.AIMOCK_PROVIDER_COHERE_KEY;
   if (env.AIMOCK_PROVIDER_GROK_KEY) keys.grok = env.AIMOCK_PROVIDER_GROK_KEY;
+  if (env.AIMOCK_PROVIDER_BYTEPLUS_KEY) keys.byteplus = env.AIMOCK_PROVIDER_BYTEPLUS_KEY;
   if (env.AIMOCK_PROVIDER_OLLAMA_KEY) keys.ollama = env.AIMOCK_PROVIDER_OLLAMA_KEY;
   if (env.AIMOCK_PROVIDER_VEO_KEY) keys.veo = env.AIMOCK_PROVIDER_VEO_KEY;
   if (env.AIMOCK_PROVIDER_AZURE_KEY) keys.azure = env.AIMOCK_PROVIDER_AZURE_KEY;

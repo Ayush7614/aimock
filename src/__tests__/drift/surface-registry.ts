@@ -255,6 +255,27 @@ export const SURFACE_REGISTRY: Record<string, SurfaceMapping> = {
     ],
     typesFile: null,
   },
+  // Covered by ONE real vendor-facing check: the FREE, KEYLESS auth-layer
+  // error-envelope canary in `byteplus-video.drift.ts`, which runs on every
+  // drift run and reds when Ark restructures `{ error: { code, message, param,
+  // type } }` or its `x-error-code` header. The SUCCESS/poll shapes of this
+  // surface are NOT covered (they need a funded key or a compile-time
+  // assignability check) — see that file's header. `sdkShapesFile` points at
+  // the drift leg rather than the shared `sdk-shapes.ts`, which holds nothing
+  // for this surface: the observed vendor truth lives in its OBSERVED_*
+  // constants, and that is what a fixer must re-observe and edit.
+  "byteplus-video": {
+    provider: "BytePlus Video",
+    builderFile: "src/byteplus-video.ts",
+    builderFunctions: [
+      "handleBytePlusVideoCreate",
+      "handleBytePlusVideoStatus",
+      "proxyBytePlusVideoSubmit",
+      "serializeBytePlusVideoTask",
+    ],
+    typesFile: null,
+    sdkShapesFile: "src/__tests__/drift/byteplus-video.drift.ts",
+  },
   "openrouter-video": {
     provider: "OpenRouter Video",
     builderFile: "src/openrouter-video.ts",

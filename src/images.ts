@@ -1,5 +1,10 @@
 import type * as http from "node:http";
-import type { ChatCompletionRequest, Fixture, HandlerDefaults } from "./types.js";
+import type {
+  ChatCompletionRequest,
+  Fixture,
+  HandlerDefaults,
+  RecordProviderKey,
+} from "./types.js";
 import {
   isImageResponse,
   isErrorResponse,
@@ -58,6 +63,15 @@ export async function handleImages(
   setCorsHeaders: (res: http.ServerResponse) => void,
   format: "openai" | "gemini" = "openai",
   geminiModel?: string,
+  /**
+   * Provider key this request records under. Defaults to `"openai"` — the
+   * value hardcoded here before BytePlus Ark needed images attribution — so the
+   * Gemini `:predict` call site keeps today's behavior by omitting it. Only the
+   * OpenAI-images call site passes it, and only with a non-default value behind
+   * server.ts's configuration gate (a byteplus upstream must be configured AND
+   * the request must carry the /api/v3 prefix).
+   */
+  recordProviderKey?: RecordProviderKey,
 ): Promise<void> {
   setCorsHeaders(res);
   const path = req.url ?? "/v1/images/generations";
@@ -183,7 +197,7 @@ export async function handleImages(
         req,
         res,
         syntheticReq,
-        format === "gemini" ? "gemini" : "openai",
+        format === "gemini" ? "gemini" : (recordProviderKey ?? "openai"),
         req.url ?? "/v1/images/generations",
         fixtures,
         defaults,
