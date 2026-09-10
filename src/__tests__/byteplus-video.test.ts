@@ -72,7 +72,6 @@ describe("BytePlusVideoJobMap", () => {
     pollsBeforeRunning: 0,
     pollsBeforeTerminal: 0,
     envelope: { status: "succeeded" },
-    warned: {},
   });
 
   test("is exported with the bounded-entries constant and a world generation", () => {
@@ -490,6 +489,99 @@ describe("GET /api/v3/contents/generations/tasks/{id} (poll)", () => {
     expect((await poll(mock!, id)).json.status).toBe("rejected");
     expect(warnSpy.mock.calls.some((c) => c.join(" ").includes("mapStatus"))).toBe(true);
     warnSpy.mockRestore();
+  });
+
+  test("a stale NON-succeeded envelope does not claim an expired content.video_url", async () => {
+    // A failed/cancelled/expired envelope carries no `content` at all, so the
+    // 24h OUTPUT-url TTL does not apply to it. Warning that it "has a
+    // content.video_url that expired" states a wire fact that is not true.
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const stale = Math.floor(Date.now() / 1000) - 25 * 60 * 60;
+    const id = await start(
+      envelope({
+        status: "failed",
+        content: undefined,
+        usage: undefined,
+        error: { message: "it broke" },
+        updated_at: stale,
+      }),
+      { logLevel: "warn" },
+    );
+    expect((await poll(mock!, id)).json.status).toBe("failed");
+    expect(warnSpy.mock.calls.filter((c) => c.join(" ").includes("expired at"))).toHaveLength(0);
+    warnSpy.mockRestore();
+  });
+
+  test("a stale SUCCEEDED envelope with no url warns about the MISSING url, not an expired one", async () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const stale = Math.floor(Date.now() / 1000) - 25 * 60 * 60;
+    const id = await start(envelope({ content: undefined, updated_at: stale }), {
+      logLevel: "warn",
+    });
+    expect((await poll(mock!, id)).status).toBe(200);
+    const lines = warnSpy.mock.calls.map((c) => c.join(" "));
+    expect(lines.filter((l) => l.includes("expired at"))).toHaveLength(0);
+    expect(lines.filter((l) => l.includes("Video is not ready for download"))).toHaveLength(1);
+    warnSpy.mockRestore();
+  });
+
+  test("a terminal-phase job whose envelope status is NON-terminal warns once, naming the hang", async () => {
+    // Only expressible because this surface stores the envelope verbatim: a
+    // queued/running envelope replays that status forever and the client polls
+    // to its own timeout. Every other authoring error on this surface is
+    // named; this one must be too.
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const id = await start(envelope({ status: "running", content: undefined, usage: undefined }), {
+      logLevel: "warn",
+    });
+    for (let i = 0; i < 3; i++) expect((await poll(mock!, id)).json.status).toBe("running");
+    const hits = warnSpy.mock.calls.filter((c) => c.join(" ").includes("poll it forever"));
+    expect(hits).toHaveLength(1);
+    warnSpy.mockRestore();
+  });
+
+  test("the queued envelope status is named too, and the unknown-status warn stays silent", async () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const id = await start(envelope({ status: "queued", content: undefined, usage: undefined }), {
+      logLevel: "warn",
+    });
+    expect((await poll(mock!, id)).json.status).toBe("queued");
+    const lines = warnSpy.mock.calls.map((c) => c.join(" "));
+    expect(lines.filter((l) => l.includes("poll it forever"))).toHaveLength(1);
+    expect(lines.filter((l) => l.includes("mapStatus"))).toHaveLength(0);
+    warnSpy.mockRestore();
+  });
+
+  test("the staleness warn latches per FIXTURE, not per job", async () => {
+    // A suite that replays one aged fixture across many tests mints many jobs
+    // off the SAME envelope object; a per-job latch would emit one line each.
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const stale = Math.floor(Date.now() / 1000) - 25 * 60 * 60;
+    const id = await start(envelope({ updated_at: stale }), { logLevel: "warn" });
+    expect((await poll(mock!, id)).status).toBe(200);
+    for (let i = 0; i < 3; i++) {
+      const again = await submit(mock!, { model: MODEL, content: [{ type: "text", text: "go" }] });
+      expect((await poll(mock!, again.json.id)).status).toBe(200);
+    }
+    const hits = warnSpy.mock.calls.filter((c) => c.join(" ").includes("expired at"));
+    expect(hits).toHaveLength(1);
+    warnSpy.mockRestore();
+  });
+
+  test("a NON-terminal poll withholds updated_at (it is the TERMINAL transition's timestamp)", async () => {
+    // created_at is a property of the task and is true at every phase;
+    // updated_at off a terminal envelope is the completion time, so emitting
+    // it on a queued/running body is a field COMBINATION never observed live.
+    const id = await start(envelope({ updated_at: 1785000010 }), {
+      bytePlusVideo: { pollsBeforeInProgress: 1, pollsBeforeCompleted: 2 },
+    });
+    const first = await poll(mock!, id);
+    expect(first.json.status).toBe("running");
+    expect(first.json.created_at).toBe(1785000000);
+    expect(first.json.updated_at).toBeUndefined();
+    const second = await poll(mock!, id);
+    expect(second.json.status).toBe("succeeded");
+    expect(second.json.updated_at).toBe(1785000010);
   });
 
   test("an unknown job id 404s with the Ark envelope SHAPE and no invented code", async () => {
