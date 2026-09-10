@@ -43,6 +43,17 @@ import { readEnvelopeText, upstreamTimeoutSignal } from "./video-proxy-shared.js
  * field the vendor adds later survive because they were recorded rather than
  * enumerated.
  *
+ * PROVENANCE OF EVERY WIRE FACT IN THIS FILE. One source: the client library
+ * `@tanstack/ai-byteplus@0.3.4` — its `wire-types.ts`, its request builders,
+ * and its author's note of live calls made on 2026-07-31. That is a SECONDARY
+ * source. BytePlus's own documentation is a client-rendered SPA and was never
+ * read; aimock has never called Ark, and no response from Ark has ever been
+ * observed here. So "the client library's six status tokens" is a claim this
+ * repo can back, and "the vendor's documented six" is not — comments below say
+ * the former. Where a fact is not even secondhand, it is named as unverified
+ * rather than softened. A verification nobody performed is worse than an
+ * admitted gap: it stops the next person from looking.
+ *
  * The governing rule: THE MOCK NEVER AUTHORS A WIRE VALUE IT DID NOT OBSERVE.
  * On replay exactly three things are synthesized — the `id` rewrite, the
  * `queued`/`running` token on a NON-terminal poll, and withholding
@@ -72,14 +83,19 @@ import { readEnvelopeText, upstreamTimeoutSignal } from "./video-proxy-shared.js
 export const BYTEPLUS_VIDEO_TASKS_PATH = "/api/v3/contents/generations/tasks";
 
 /**
- * The vendor's two NON-terminal task states (`wire-types.ts:38-44`). This is
- * the primitive: "terminal" is derived as everything else, so a vendor-added
- * terminal state records instead of proxying forever (see
- * `isBytePlusTerminalStatus`).
+ * The two NON-terminal task states, per `@tanstack/ai-byteplus@0.3.4`'s
+ * `wire-types.ts:38-44` — the client library's status union, not a BytePlus
+ * document. This is the primitive: "terminal" is derived as everything else,
+ * so a status token the client library does not list (whether BytePlus added
+ * it or the library simply never had it) records instead of proxying forever.
+ * See `isBytePlusTerminalStatus`.
  */
 const BYTEPLUS_NON_TERMINAL_STATUSES = new Set(["queued", "running"]);
 
-/** The vendor's six task states. Anything outside this set is an authoring/vendor surprise. */
+/**
+ * The six task states the client library declares. Anything outside this set is
+ * a surprise — an authoring error, or a token the library does not cover.
+ */
 const BYTEPLUS_TASK_STATUSES = new Set([
   ...BYTEPLUS_NON_TERMINAL_STATUSES,
   "succeeded",
@@ -91,8 +107,8 @@ const BYTEPLUS_TASK_STATUSES = new Set([
 /**
  * Terminal is the COMPLEMENT of the two non-terminal tokens, never a second
  * hardcoded list of the four terminal ones. An unrecognized status is treated
- * as terminal deliberately: a status the mock does not know is far more likely
- * to be a new vendor end state than a new intermediate one, and guessing wrong
+ * as terminal deliberately: a status absent from the client library's union is
+ * far more likely to be an end state than an intermediate one, and guessing wrong
  * in that direction costs a captured fixture the operator can inspect, while
  * guessing wrong the other way costs a record run that polls until the client
  * times out and writes nothing.
@@ -269,9 +285,11 @@ function mediaUrlOf(part: BytePlusContentPart): string | undefined {
  * multi-megabyte `data:` URI, and only 12 hex are kept — the match key stays
  * short and the fixture never grows a data URI.
  *
- * `role` is the declared role, else `first_frame` for an image (the API's own
- * documented default), else the part's `type` token — which is read off the
- * request rather than drawn from the vendor's role vocabulary.
+ * `role` is the declared role, else `first_frame` for an image (the default
+ * `@tanstack/ai-byteplus@0.3.4` applies when a request omits the role — not a
+ * BytePlus-documented default; nothing here was read from BytePlus), else the
+ * part's `type` token, which is read off the request rather than drawn from any
+ * role vocabulary.
  */
 export function buildBytePlusMatchText(content: readonly unknown[]): string {
   const texts: string[] = [];
@@ -304,9 +322,9 @@ export function buildBytePlusMatchText(content: readonly unknown[]): string {
 
 /**
  * Advance a replay job one poll. `queued → running → terminal` on poll-count
- * thresholds; no-op once terminal, which is what makes the post-terminal poll
- * the real client always makes (getVideoStatus then getVideoUrl) byte-identical
- * to the one before it.
+ * thresholds; no-op once terminal, which is what makes the extra post-terminal
+ * poll the client library makes (getVideoStatus then getVideoUrl both hit this
+ * endpoint) byte-identical to the one before it.
  */
 function advanceJob(job: BytePlusVideoReplayJob): void {
   if (job.phase === "terminal") return;
@@ -361,8 +379,9 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
  * ONLY synthesized value, and `content`/`error`/`usage`/`updated_at` are
  * withheld. `created_at` is a property of the task and is true at every phase;
  * `updated_at` on a recorded envelope is the timestamp of the TERMINAL
- * transition, so emitting it mid-flight would assert a field COMBINATION never
- * observed live (and a consumer diffing it across polls would see it constant).
+ * transition, so emitting it mid-flight would assert a field COMBINATION this
+ * design has never seen from Ark and cannot source from the client library
+ * either (and a consumer diffing it across polls would see it constant).
  *
  * Terminal: the stored envelope VERBATIM with `id` rewritten. Its status is
  * whatever was recorded, including `cancelled` / `expired`.
@@ -393,7 +412,7 @@ export function serializeBytePlusVideoTask(
   // not terminal"; storing the envelope verbatim makes it expressible for the
   // first time. The job has reached its terminal poll and will now serve this
   // same body forever, so the client polls to its own timeout with no
-  // diagnostic: the status is one of the vendor's six (unknownStatus stays
+  // diagnostic: the status is one of the client library's six (unknownStatus stays
   // silent) and it is a non-empty string (the 502 authoring-error path stays
   // silent). Name it, the way every other authoring error here is named.
   if (!isBytePlusTerminalStatus(status) && !warned.nonTerminalEnvelope) {
@@ -410,8 +429,9 @@ export function serializeBytePlusVideoTask(
     warned.unknownStatus = true;
     logger.warn(
       `BytePlus video fixture for job ${job.id} carries status "${status}", which is not one of ` +
-        `the vendor's six (queued, running, succeeded, failed, cancelled, expired) — serving it ` +
-        `as authored, but the BytePlus adapter's mapStatus() THROWS on an unrecognized status`,
+        `the six the BytePlus client library declares (queued, running, succeeded, failed, ` +
+        `cancelled, expired) — serving it as authored, but that library's mapStatus() THROWS on ` +
+        `a status it does not recognize`,
     );
   }
 
@@ -525,9 +545,10 @@ export async function handleBytePlusVideoCreate(
 
   const parsedBody = validationJournalBody(videoReq);
 
-  // `model` is REQUIRED, never defaulted: the vendor requires it, and a
+  // `model` is REQUIRED, never defaulted: the client library always sends it
+  // (whether Ark itself rejects a request without it is unverified here), and a
   // defaulted model id would be both a value aimock never observed and a silent
-  // mis-key of the fixture match.
+  // mis-key of the fixture match. Rejecting is the safe side of that gap.
   if (typeof videoReq.model !== "string" || !videoReq.model) {
     fail(
       400,
@@ -793,11 +814,13 @@ export async function handleBytePlusVideoStatus(
 
   const job = jobs.get(key);
   if (!job) {
-    // Ark's error envelope SHAPE, with NO `code`: real Ark 404s an aged-out
-    // record with a dotted code from an open-ended vocabulary this design has
-    // not observed, and the client splices whatever code it finds into the
-    // consumer-visible error string — so minting one would put an aimock token
-    // in a consumer's assertion.
+    // Ark's error envelope SHAPE, with NO `code`. What Ark actually returns for
+    // an aged-out task is UNVERIFIED: the client library reads a dotted
+    // `error.code` off an open-ended vocabulary and splices it into the
+    // consumer-visible error string, and the drift canary asserts a string
+    // `code` — but that canary has never run and aimock has never seen an Ark
+    // error body. Minting a code to fill the gap would put an aimock-authored
+    // token into a consumer's assertion; see `arkErrorBody`.
     journal.add({
       method,
       path,
