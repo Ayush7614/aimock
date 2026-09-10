@@ -2,226 +2,326 @@
  * BytePlus Ark (Seedance) video-proxy drift tests (surface: `byteplus-video`).
  *
  * Cost-safety first: Seedance generation costs real money per job, so NOTHING
- * here submits a paid generation. Two checks, and the scope is deliberately
- * narrow — see the spec's D6 for why there is no third.
+ * here submits a paid generation.
  *
- *   1. Envelope shapes (STATIC, no key) — drive the aimock server over HTTP and
- *      triangulate the three envelopes the handler is CONTRACTED to emit
- *      against hand-authored conformant exemplars, via the documented static
- *      `triangulate(sdkShape, sdkShape, mockShape)` form. This exercises the
- *      REAL handler + triangulate + collector routing path, not a unit fake.
+ * WHAT CARRIES THIS SURFACE — the KEYLESS live canary. An unauthenticated (or
+ * malformed-bearer) GET against the real Ark task endpoint is answered by Ark's
+ * auth layer before any billing or resource lookup: HTTP 401, an `x-error-code`
+ * response header, and the SAME `{ error: { code, message, param, type } }`
+ * envelope this surface's 4xx handling is modelled on. It costs nothing, needs
+ * no account and no repo secret, and it goes RED when Ark restructures that
+ * envelope. That is a real failure mode against a real external source, and it
+ * runs on every drift run.
  *
- *   2. LIVE canary (FREE) — authenticate with `ARK_API_KEY` and probe a
- *      known-bad task id, asserting Ark still answers 404 with its documented
- *      error envelope. Metadata only; no generation. Gated on the key.
+ * A SECOND, authenticated canary (`ARK_API_KEY`) probes the RESOURCE layer — an
+ * unknown task id — and stays `skipIf`-gated until a key is mirrored to repo
+ * secrets. It is an upgrade, not the coverage.
  *
- * WHAT THIS LEG CANNOT DO: detect a change made on Ark's side to the SUCCESS
- * task shape. Check 1 compares the mock against an in-repo exemplar and check 2
- * only exercises the error path. Closing that gap needs a compile-time
- * assignability check against @tanstack/ai-byteplus's exported status type,
- * which is deferred. Stated here so nobody reads this leg as broader than it is.
+ * WHAT WAS DELETED AND WHY. This file previously ran three
+ * `triangulate(sdkShape, sdkShape, mockShape)` checks whose "vendor truth" side
+ * was a hand-copy, in this same file, of the fixture driving the mock — it
+ * could not go red for anything BytePlus does, and its stand-in values
+ * (`QuotaExceeded`, a `completion_tokens` count, an `ark-content.example.com`
+ * URL) were INVENTED, inside the check meant to catch invented values. The
+ * mock-side pass-through property those checks nominally covered is already
+ * pinned by `expect(body).toEqual({ ...stored, id })` in
+ * `src/__tests__/byteplus-video.test.ts`, in the always-on unit lane.
  *
- * WHICH LANE OWNS WHAT: `.drift.ts` files do not run in the always-on unit lane
- * (`vitest.config.ts` includes only `*.test.ts`), and test-drift.yml gates the
- * `drift` job on `github.event_name != 'pull_request'`. So neither check here
- * runs on the PR that would break it. The field-emission pins live in
- * `src/__tests__/byteplus-video.test.ts` instead.
+ * EVERY WIRE VALUE BELOW WAS OBSERVED LIVE (2026-09-10) — see OBSERVED_*.
+ *
+ * WHAT THIS LEG STILL CANNOT DO: detect a change Ark makes to the SUCCESS task
+ * shape, or to the `succeeded`/`failed` poll envelopes. Reaching those needs
+ * either a funded key (a paid generation) or a compile-time assignability check
+ * against `@tanstack/ai-byteplus`'s exported status type. Both are deferred.
+ * The success shape of this surface is UNCOVERED; nothing here pretends
+ * otherwise.
+ *
+ * WHICH LANE RUNS THIS: `.drift.ts` files are outside the always-on unit lane
+ * (`vitest.config.ts` includes only `*.test.ts`). They run in the daily `drift`
+ * job (gated `github.event_name != 'pull_request'`) AND in the `drift-live-pr`
+ * job, which does run on a pull request whose diff touches
+ * `src/__tests__/drift/**` — i.e. on a PR that edits this file.
+ *
+ * NETWORK FAILURE IS NOT DRIFT. An unreachable vendor, a rate limit, or a 5xx
+ * becomes an HONEST SKIP (see `isInfraSkip` / `InfraError`), never a critical
+ * finding. A canary that reds on a flaky network trains people to ignore it.
  */
 
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { createServer, type ServerInstance } from "../../server.js";
-import type { Fixture } from "../../types.js";
-import { extractShape, triangulate, formatDriftReport } from "./schema.js";
-import { httpPost } from "./helpers.js";
-import { probeBytePlusArkUnknownTask } from "./providers.js";
+import { describe, it, expect } from "vitest";
+import { formatDriftReport, type ShapeDiff } from "./schema.js";
+import {
+  InfraError,
+  isInfraSkip,
+  probeBytePlusArkAuthEnvelope,
+  probeBytePlusArkUnknownTask,
+  type BytePlusArkProbeResult,
+} from "./providers.js";
 
 const ARK_API_KEY = process.env.ARK_API_KEY;
 
-const MODEL = "seedance-1-0-pro-fast-251015";
-const TASKS = "/api/v3/contents/generations/tasks";
+const TASK_PATH = "contents/generations/tasks/{unknown}";
 
-async function httpGet(url: string): Promise<{ status: number; body: string }> {
-  const res = await fetch(url);
-  return { status: res.status, body: await res.text() };
+// ---------------------------------------------------------------------------
+// OBSERVED vendor truth. Captured by hand against live Ark on 2026-09-10 with
+// `curl -i` on both ark.ap-southeast.bytepluses.com and ark.cn-beijing.volces.com
+// (identical envelopes). NOTHING here is authored; re-observe before editing.
+//
+//   $ curl -i https://ark.ap-southeast.bytepluses.com/api/v3/contents/generations/tasks/x
+//   HTTP/2 401
+//   x-error-code: AuthN_MissOrInvalidAuthorizationHeader
+//   {"error":{"code":"AuthenticationError","message":"the API key or AK/SK in the
+//    request is missing or invalid. request id: …","param":"","type":"Unauthorized"}}
+//
+//   $ curl -i -H 'Authorization: Bearer garbage' …
+//   HTTP/2 401
+//   x-error-code: AuthN_AuthenticationError
+//   {"error":{"code":"AuthenticationError","message":"The API key format is
+//    incorrect. Request id: …","param":"","type":"Unauthorized"}}
+// ---------------------------------------------------------------------------
+
+const OBSERVED_AUTH_STATUS = 401;
+const OBSERVED_ERROR_CODE = "AuthenticationError";
+const OBSERVED_ERROR_TYPE = "Unauthorized";
+const OBSERVED_ERROR_PARAM = "";
+const OBSERVED_HEADER_MISSING = "AuthN_MissOrInvalidAuthorizationHeader";
+const OBSERVED_HEADER_MALFORMED = "AuthN_AuthenticationError";
+
+/**
+ * Grade one keyless probe result against the observed envelope.
+ *
+ * Pure and exported-for-test so the mutation pin below can drive it through the
+ * REAL probe with a stubbed transport and watch it go red — a guard nobody has
+ * watched fail is a claim.
+ */
+export function gradeArkAuthEnvelope(
+  probe: BytePlusArkProbeResult,
+  expectedHeader: string,
+): string[] {
+  const problems: string[] = [];
+
+  if (probe.status !== OBSERVED_AUTH_STATUS) {
+    problems.push(`expected HTTP ${OBSERVED_AUTH_STATUS}, got ${probe.status}`);
+  }
+  if (probe.errorCodeHeader !== expectedHeader) {
+    problems.push(
+      `expected \`x-error-code: ${expectedHeader}\`, got ${
+        probe.errorCodeHeader === null ? "no such header" : `\`${probe.errorCodeHeader}\``
+      }`,
+    );
+  }
+
+  const err =
+    probe.body !== null && typeof probe.body === "object"
+      ? (probe.body as { error?: unknown }).error
+      : undefined;
+
+  if (err === undefined || err === null || typeof err !== "object") {
+    problems.push("response carried no `error` object");
+    return problems;
+  }
+
+  const e = err as Record<string, unknown>;
+  if (e.code !== OBSERVED_ERROR_CODE) {
+    problems.push(`\`error.code\` is ${JSON.stringify(e.code)}, expected "${OBSERVED_ERROR_CODE}"`);
+  }
+  if (e.type !== OBSERVED_ERROR_TYPE) {
+    problems.push(`\`error.type\` is ${JSON.stringify(e.type)}, expected "${OBSERVED_ERROR_TYPE}"`);
+  }
+  if (e.param !== OBSERVED_ERROR_PARAM) {
+    problems.push(`\`error.param\` is ${JSON.stringify(e.param)}, expected the empty string`);
+  }
+  if (typeof e.message !== "string" || e.message.length === 0) {
+    problems.push("`error.message` is not a non-empty string");
+  }
+
+  return problems;
+}
+
+/** Render `problems` as this surface's drift report. */
+function arkDriftReport(
+  context: string,
+  problems: string[],
+  probe: BytePlusArkProbeResult,
+): string {
+  const diffs: ShapeDiff[] = problems.map((issue) => ({
+    path: TASK_PATH,
+    severity: "critical" as const,
+    issue:
+      `${issue} — aimock's byteplus surface models Ark's error envelope as ` +
+      `{ error: { code, message, param, type } } with an \`x-error-code\` header. ` +
+      `If Ark changed it, revisit the OBSERVED_* constants in ` +
+      `src/__tests__/drift/byteplus-video.drift.ts and the 4xx handling in ` +
+      `src/byteplus-video.ts. Re-observe with curl before editing either.`,
+    expected: `HTTP ${OBSERVED_AUTH_STATUS} + { error: { code, message, param, type } }`,
+    real: `HTTP ${probe.status} [x-error-code: ${probe.errorCodeHeader ?? "absent"}]: ${JSON.stringify(
+      probe.body,
+    ).slice(0, 200)}`,
+    mock: "n/a (live probe)",
+  }));
+  return formatDriftReport(context, diffs, "byteplus-video");
+}
+
+/**
+ * True when the probe outcome is an environmental condition rather than drift.
+ * 401 is this probe's EXPECTED status, so it is excluded from the infra classes
+ * even though `isInfraSkip(401)` is true for every other leg.
+ */
+function isEnvironmentalStatus(status: number): boolean {
+  return status !== OBSERVED_AUTH_STATUS && isInfraSkip(status);
 }
 
 // ---------------------------------------------------------------------------
-// Fixtures — the raw Ark task envelope, which IS this surface's fixture format.
-// Default progression (0/0) seeds the job terminal at submit, so the first poll
-// is already terminal and no paid generation ever happens.
+// ALWAYS-ON live canary — FREE, KEYLESS, error path only. No generation.
 // ---------------------------------------------------------------------------
 
-const SUCCEEDED_FIXTURE: Fixture = {
-  match: { userMessage: "a serene beach at sunset", endpoint: "video", model: MODEL },
-  response: {
-    json: {
-      model: MODEL,
-      status: "succeeded",
-      created_at: 1785000000,
-      updated_at: 1785000131,
-      content: { video_url: "https://ark-content.example.com/out.mp4" },
-      usage: { completion_tokens: 129600, total_tokens: 129600 },
-    },
-  },
-};
+describe("BytePlus Ark auth-layer error-envelope canary (live, keyless)", () => {
+  const cases: { name: string; auth: "missing" | "malformed"; header: string }[] = [
+    { name: "no Authorization header", auth: "missing", header: OBSERVED_HEADER_MISSING },
+    { name: "a malformed bearer", auth: "malformed", header: OBSERVED_HEADER_MALFORMED },
+  ];
 
-const FAILED_FIXTURE: Fixture = {
-  match: { userMessage: "a task that fails", endpoint: "video", model: MODEL },
-  response: {
-    json: {
-      model: MODEL,
-      status: "failed",
-      created_at: 1785000000,
-      updated_at: 1785000031,
-      error: { code: "QuotaExceeded", message: "insufficient quota" },
-    },
-  },
-};
+  for (const { name, auth, header } of cases) {
+    it(`${name} still yields Ark's documented 401 error envelope`, async (ctx) => {
+      let probe: BytePlusArkProbeResult;
+      try {
+        probe = await probeBytePlusArkAuthEnvelope({ auth });
+      } catch (err) {
+        // Unreachable vendor / DNS / TLS — HONEST SKIP, never a drift finding.
+        if (err instanceof InfraError) {
+          ctx.skip(`BytePlus Ark unreachable (${err.message}) — skipping, not drift`);
+          return;
+        }
+        throw err;
+      }
 
-/** POST /api/v3/contents/generations/tasks → `{ id }` and nothing else. */
-function submitEnvelopeShape() {
-  return extractShape({ id: "cgt-00000000-0000-0000-0000-000000000000" });
-}
+      if (isEnvironmentalStatus(probe.status)) {
+        ctx.skip(`Ark answered HTTP ${probe.status} (rate limit / outage) — skipping, not drift`);
+        return;
+      }
 
-function succeededPollShape() {
-  return extractShape({
-    id: "cgt-00000000-0000-0000-0000-000000000000",
-    model: MODEL,
-    status: "succeeded",
-    created_at: 1785000000,
-    updated_at: 1785000131,
-    content: { video_url: "https://ark-content.example.com/out.mp4" },
-    usage: { completion_tokens: 129600, total_tokens: 129600 },
+      const problems = gradeArkAuthEnvelope(probe, header);
+      expect(
+        problems,
+        arkDriftReport(`BytePlus Ark auth envelope (${name})`, problems, probe),
+      ).toEqual([]);
+    });
+  }
+
+  // The guard's own red-green pin: drive the REAL probe through a stubbed
+  // transport that returns a CHANGED envelope, and assert the grader reports it.
+  // Offline, deterministic, always-on — so a future refactor that quietly makes
+  // `gradeArkAuthEnvelope` unable to fail is itself caught.
+  it("reports drift when the wire envelope changes (stubbed transport)", async () => {
+    const stub = (body: unknown, status = 401, header: string | null = OBSERVED_HEADER_MISSING) =>
+      probeBytePlusArkAuthEnvelope({
+        fetchImpl: async () =>
+          new Response(typeof body === "string" ? body : JSON.stringify(body), {
+            status,
+            headers: header === null ? {} : { "x-error-code": header },
+          }),
+      });
+
+    const conformant = {
+      error: {
+        code: OBSERVED_ERROR_CODE,
+        message: "the API key or AK/SK in the request is missing or invalid. request id: x",
+        param: OBSERVED_ERROR_PARAM,
+        type: OBSERVED_ERROR_TYPE,
+      },
+    };
+
+    // Positive control: the observed envelope grades clean.
+    expect(gradeArkAuthEnvelope(await stub(conformant), OBSERVED_HEADER_MISSING)).toEqual([]);
+
+    // Each mutation is a change Ark could plausibly make. All must be caught.
+    const mutations: { what: string; probe: Promise<BytePlusArkProbeResult> }[] = [
+      { what: "error object dropped", probe: stub({ message: "nope" }) },
+      {
+        what: "envelope flattened",
+        probe: stub({ code: OBSERVED_ERROR_CODE, message: "nope", type: OBSERVED_ERROR_TYPE }),
+      },
+      {
+        what: "error.code renamed",
+        probe: stub({ error: { ...conformant.error, code: "invalid_api_key" } }),
+      },
+      {
+        what: "error.type renamed",
+        probe: stub({ error: { ...conformant.error, type: "authentication_error" } }),
+      },
+      {
+        what: "error.param dropped",
+        probe: stub({
+          error: { code: OBSERVED_ERROR_CODE, message: "m", type: OBSERVED_ERROR_TYPE },
+        }),
+      },
+      {
+        what: "error.message dropped",
+        probe: stub({ error: { ...conformant.error, message: "" } }),
+      },
+      { what: "x-error-code header dropped", probe: stub(conformant, 401, null) },
+      { what: "x-error-code header renamed", probe: stub(conformant, 401, "Auth_Missing") },
+      { what: "status moved off 401", probe: stub(conformant, 403) },
+      { what: "body is not JSON", probe: stub("Unauthorized", 401) },
+    ];
+
+    for (const { what, probe } of mutations) {
+      const problems = gradeArkAuthEnvelope(await probe, OBSERVED_HEADER_MISSING);
+      expect(problems, `mutation "${what}" was NOT detected`).not.toEqual([]);
+    }
   });
-}
-
-function failedPollShape() {
-  return extractShape({
-    id: "cgt-00000000-0000-0000-0000-000000000000",
-    model: MODEL,
-    status: "failed",
-    created_at: 1785000000,
-    updated_at: 1785000031,
-    error: { code: "QuotaExceeded", message: "insufficient quota" },
-  });
-}
-
-let instance: ServerInstance;
-
-beforeAll(async () => {
-  instance = await createServer([SUCCEEDED_FIXTURE, FAILED_FIXTURE], { port: 0 });
 });
 
-afterAll(async () => {
-  await new Promise<void>((r) => instance.server.close(() => r()));
-});
-
-describe("BytePlus video-proxy envelope shapes", () => {
-  it("submit returns { id }", async () => {
-    const res = await httpPost(`${instance.url}${TASKS}`, {
-      model: MODEL,
-      content: [{ type: "text", text: "a serene beach at sunset" }],
-    });
-    expect(res.status, res.body).toBe(200);
-    const body = JSON.parse(res.body);
-    expect(typeof body.id).toBe("string");
-
-    const sdkShape = submitEnvelopeShape();
-    const diffs = triangulate(sdkShape, sdkShape, extractShape(body));
-    const report = formatDriftReport("BytePlus video submit", diffs, "byteplus-video");
-    expect(
-      diffs.filter((d) => d.severity === "critical"),
-      report,
-    ).toEqual([]);
-  });
-
-  it("a succeeded poll returns the recorded envelope with the mock id", async () => {
-    const submit = await httpPost(`${instance.url}${TASKS}`, {
-      model: MODEL,
-      content: [{ type: "text", text: "a serene beach at sunset" }],
-    });
-    expect(submit.status, submit.body).toBe(200);
-    const { id } = JSON.parse(submit.body);
-
-    const poll = await httpGet(`${instance.url}${TASKS}/${encodeURIComponent(id)}`);
-    expect(poll.status, poll.body).toBe(200);
-    const body = JSON.parse(poll.body);
-    expect(body.status).toBe("succeeded");
-
-    const sdkShape = succeededPollShape();
-    const diffs = triangulate(sdkShape, sdkShape, extractShape(body));
-    const report = formatDriftReport("BytePlus video succeeded poll", diffs, "byteplus-video");
-    expect(
-      diffs.filter((d) => d.severity === "critical"),
-      report,
-    ).toEqual([]);
-  });
-
-  it("a failed poll returns the recorded error object", async () => {
-    const submit = await httpPost(`${instance.url}${TASKS}`, {
-      model: MODEL,
-      content: [{ type: "text", text: "a task that fails" }],
-    });
-    expect(submit.status, submit.body).toBe(200);
-    const { id } = JSON.parse(submit.body);
-
-    const poll = await httpGet(`${instance.url}${TASKS}/${encodeURIComponent(id)}`);
-    expect(poll.status, poll.body).toBe(200);
-    const body = JSON.parse(poll.body);
-    expect(body.status).toBe("failed");
-
-    const sdkShape = failedPollShape();
-    const diffs = triangulate(sdkShape, sdkShape, extractShape(body));
-    const report = formatDriftReport("BytePlus video failed poll", diffs, "byteplus-video");
-    expect(
-      diffs.filter((d) => d.severity === "critical"),
-      report,
-    ).toEqual([]);
-  });
-});
-
 // ---------------------------------------------------------------------------
-// LIVE canary (FREE — error path only, NO generation). Skips until ARK_API_KEY
-// is mirrored to repo secrets.
+// RESOURCE-layer canary (FREE — error path only, NO generation). An UPGRADE to
+// the keyless canary above, not this surface's coverage. Skips until
+// ARK_API_KEY is mirrored to repo secrets; the 404 assumption below has
+// therefore NEVER been executed against live Ark. Set ARK_BASE_URL alongside
+// the key if it was minted outside the default region — a regional mismatch is
+// configuration, not drift.
 // ---------------------------------------------------------------------------
 
-describe.skipIf(!ARK_API_KEY)("BytePlus Ark error-envelope canary (live)", () => {
-  it("an unknown task id still answers 404 with { error: { code, message } }", async () => {
-    const { status, body } = await probeBytePlusArkUnknownTask(ARK_API_KEY!);
+describe.skipIf(!ARK_API_KEY)("BytePlus Ark unknown-task canary (live, authenticated)", () => {
+  it("an unknown task id still answers 404 with { error: { code, message } }", async (ctx) => {
+    let probe: BytePlusArkProbeResult;
+    try {
+      probe = await probeBytePlusArkUnknownTask(ARK_API_KEY!);
+    } catch (err) {
+      if (err instanceof InfraError) {
+        ctx.skip(`BytePlus Ark unreachable (${err.message}) — skipping, not drift`);
+        return;
+      }
+      throw err;
+    }
+
+    // 401/403 here means the KEY is stale or minted in another region — a
+    // configuration problem. Report it as such rather than as vendor drift.
+    if (probe.status === 401 || probe.status === 403) {
+      ctx.skip(
+        `ARK_API_KEY rejected (HTTP ${probe.status}) — rotate it or set ARK_BASE_URL to its region`,
+      );
+      return;
+    }
+    if (isInfraSkip(probe.status)) {
+      ctx.skip(`Ark answered HTTP ${probe.status} (rate limit / outage) — skipping, not drift`);
+      return;
+    }
 
     const err =
-      body !== null && typeof body === "object"
-        ? ((body as { error?: { code?: unknown; message?: unknown } }).error ?? undefined)
+      probe.body !== null && typeof probe.body === "object"
+        ? ((probe.body as { error?: { code?: unknown; message?: unknown } }).error ?? undefined)
         : undefined;
 
     const problems: string[] = [];
-    if (status !== 404) problems.push(`expected HTTP 404, got ${status}`);
+    if (probe.status !== 404) problems.push(`expected HTTP 404, got ${probe.status}`);
     if (!err) problems.push("response carried no `error` object");
     else {
       if (typeof err.code !== "string") problems.push("`error.code` is not a string");
       if (typeof err.message !== "string") problems.push("`error.message` is not a string");
     }
 
-    const report =
-      problems.length > 0
-        ? formatDriftReport(
-            "BytePlus Ark (live unknown-task 404 canary)",
-            problems.map((issue) => ({
-              path: "contents/generations/tasks/{unknown}",
-              severity: "critical" as const,
-              issue:
-                `${issue} — aimock's byteplus surface assumes Ark answers an unknown task id ` +
-                `with 404 and the OpenAI-shaped error envelope. If Ark changed, revisit the ` +
-                `canary in src/__tests__/drift/byteplus-video.drift.ts and the 404 handling in ` +
-                `src/byteplus-video.ts`,
-              expected: "404 with { error: { code: string, message: string } }",
-              real: `HTTP ${status}: ${JSON.stringify(body).slice(0, 200)}`,
-              mock: "n/a (live probe)",
-            })),
-            "byteplus-video",
-          )
-        : "No drift detected: BytePlus Ark error-envelope canary";
-
-    expect(problems, report).toEqual([]);
+    expect(
+      problems,
+      arkDriftReport("BytePlus Ark (live unknown-task 404 canary)", problems, probe),
+    ).toEqual([]);
   });
 });
