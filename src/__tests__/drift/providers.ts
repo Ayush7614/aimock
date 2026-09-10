@@ -900,6 +900,109 @@ export async function listGeminiModels(apiKey: string): Promise<string[]> {
 }
 
 /**
+ * BytePlus Ark REST base URL. Ark is region-partitioned and a key minted in one
+ * region does not authenticate in another, so the region is overridable via
+ * `ARK_BASE_URL` — a regional mismatch is a CONFIGURATION problem and must not
+ * be reported as vendor drift.
+ *
+ * The unauthenticated error envelope was verified identical on
+ * `ark.ap-southeast.bytepluses.com` and `ark.cn-beijing.volces.com` (2026-09-10).
+ */
+export const BYTEPLUS_ARK_DEFAULT_BASE_URL = "https://ark.ap-southeast.bytepluses.com";
+
+/** Resolve the Ark base URL for a probe (env override wins, no trailing slash). */
+export function bytePlusArkBaseUrl(override?: string): string {
+  const raw = override ?? process.env.ARK_BASE_URL ?? BYTEPLUS_ARK_DEFAULT_BASE_URL;
+  return raw.replace(/\/+$/, "");
+}
+
+/** What an Ark probe hands back to the drift leg: status, error header, body. */
+export interface BytePlusArkProbeResult {
+  status: number;
+  /** Ark's `x-error-code` response header, or null when absent. */
+  errorCodeHeader: string | null;
+  /** Parsed JSON body, or the raw text when the body is not JSON. */
+  body: unknown;
+}
+
+/** Injectable transport, so a drift leg can mutate the wire response it sees. */
+export type ArkFetch = (url: string, init: RequestInit) => Promise<Response>;
+
+async function readArkResponse(res: Response): Promise<BytePlusArkProbeResult> {
+  const raw = await res.text();
+  let body: unknown;
+  try {
+    body = JSON.parse(raw);
+  } catch {
+    body = raw;
+  }
+  return { status: res.status, errorCodeHeader: res.headers.get("x-error-code"), body };
+}
+
+/**
+ * BytePlus Ark's FREE, KEYLESS reality probe: GET a task id on the real video
+ * endpoint with NO (or a deliberately malformed) `Authorization` header. Ark
+ * answers from its auth layer, before any billing or resource lookup, so this
+ * costs nothing, needs no account, and can run on every drift run.
+ *
+ * It is the ONLY check on this surface with a real vendor-side failure mode.
+ * What it watches is the ERROR ENVELOPE aimock's byteplus surface emits: the
+ * `{ error: { code, message, param, type } }` object and the `x-error-code`
+ * header. If Ark restructures that envelope, this goes red.
+ *
+ * `auth: "missing"` sends no header; `auth: "malformed"` sends a bearer that
+ * cannot be a key. Both were observed live (2026-09-10) — see the drift leg for
+ * the exact observed values; NOTHING here authors a wire value.
+ *
+ * Returns rather than asserts, so the drift leg owns the expectation. Network
+ * failure propagates as an {@link InfraError} (status 0) for the leg to convert
+ * into an HONEST SKIP — an unreachable vendor is not drift.
+ */
+export async function probeBytePlusArkAuthEnvelope(
+  options: { auth?: "missing" | "malformed"; baseUrl?: string; fetchImpl?: ArkFetch } = {},
+): Promise<BytePlusArkProbeResult> {
+  const { auth = "missing", baseUrl, fetchImpl } = options;
+  return withInfraErrorTag("BytePlus Ark Auth Envelope Probe", async () => {
+    const url =
+      `${bytePlusArkBaseUrl(baseUrl)}/api/v3/contents/generations/tasks/` +
+      "cgt-aimock-drift-probe-does-not-exist";
+    const headers: Record<string, string> =
+      auth === "malformed" ? { Authorization: "Bearer aimock-drift-probe-not-a-key" } : {};
+    const init: RequestInit = { method: "GET", headers };
+    const res = fetchImpl ? await fetchImpl(url, init) : await fetchWithRetry(url, init);
+    return readArkResponse(res);
+  });
+}
+
+/**
+ * BytePlus Ark's cheapest AUTHENTICATED video-surface probe: GET a task id that
+ * cannot exist. Ark has NO free video-model listing endpoint (which is what
+ * makes the OpenRouter canary free), and a real generation costs money, so this
+ * probes the error envelope instead of the success shape.
+ *
+ * Returns the status and parsed body rather than asserting, so the drift leg
+ * owns the expectation. NOTE: the 404 assumption is UNVERIFIED against live Ark
+ * — if Ark answers a bad task id with 400, or 200-with-an-error-body, this
+ * canary must be rewritten or dropped rather than "fixed" by loosening it. The
+ * KEYLESS probe above is the one that carries this surface today.
+ */
+export async function probeBytePlusArkUnknownTask(
+  apiKey: string,
+  options: { baseUrl?: string; fetchImpl?: ArkFetch } = {},
+): Promise<BytePlusArkProbeResult> {
+  return withInfraErrorTag("BytePlus Ark Task Probe", async () => {
+    const url =
+      `${bytePlusArkBaseUrl(options.baseUrl)}/api/v3/contents/generations/tasks/` +
+      "cgt-aimock-drift-probe-does-not-exist";
+    const init: RequestInit = { method: "GET", headers: { Authorization: `Bearer ${apiKey}` } };
+    const res = options.fetchImpl
+      ? await options.fetchImpl(url, init)
+      : await fetchWithRetry(url, init);
+    return readArkResponse(res);
+  });
+}
+
+/**
  * List OpenRouter's video-capable models via the dedicated (FREE, no
  * generation) listing endpoint `GET /api/v1/videos/models`. Video models do
  * NOT appear in the plain `/api/v1/models` listing, hence the dedicated route
@@ -909,38 +1012,6 @@ export async function listGeminiModels(apiKey: string): Promise<string[]> {
  * OpenRouter video proxy surface — it authenticates and reads metadata only,
  * never submitting a paid generation job.
  */
-/**
- * BytePlus Ark's cheapest authenticated video-surface probe: GET a task id that
- * cannot exist. Ark has NO free video-model listing endpoint (which is what
- * makes the OpenRouter canary free), and a real generation costs money, so this
- * probes the error envelope instead of the success shape.
- *
- * Returns the status and parsed body rather than asserting, so the drift leg
- * owns the expectation. NOTE: the 404 assumption is UNVERIFIED against live Ark
- * — if Ark answers a bad task id with 400, or 200-with-an-error-body, this
- * canary must be rewritten or dropped rather than "fixed" by loosening it.
- */
-export async function probeBytePlusArkUnknownTask(
-  apiKey: string,
-): Promise<{ status: number; body: unknown }> {
-  return withInfraErrorTag("BytePlus Ark Task Probe", async () => {
-    const url =
-      "https://ark.ap-southeast.bytepluses.com/api/v3/contents/generations/tasks/cgt-aimock-drift-probe-does-not-exist";
-    const res = await fetchWithRetry(url, {
-      method: "GET",
-      headers: { Authorization: `Bearer ${apiKey}` },
-    });
-    const raw = await res.text();
-    let body: unknown;
-    try {
-      body = JSON.parse(raw);
-    } catch {
-      body = raw;
-    }
-    return { status: res.status, body };
-  });
-}
-
 export async function listOpenRouterVideoModels(apiKey: string): Promise<string[]> {
   return withInfraErrorTag("OpenRouter Video Models", async () => {
     const url = "https://openrouter.ai/api/v1/videos/models";
