@@ -23,7 +23,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import ts from "typescript";
 
-import { includeFamilies, deprecatedFamilies } from "./drift/model-registry.js";
+import { includeFamilies, excludeFamilies, deprecatedFamilies } from "./drift/model-registry.js";
 import { MIN_LISTING_SIZE, FORWARD_LOOKING_FAMILIES } from "./drift/deprecation-detector.js";
 import {
   detectDeprecatedFamiliesForSync,
@@ -31,6 +31,10 @@ import {
   addFamilyLiteralInSource,
   proposalNoteRelPath,
   parseProposalDecision,
+  updateDataFrozenPin,
+  onlyPinsChanged,
+  computeMembershipPin,
+  dataFrozenKey,
   renderProposalNote,
   runDriftSyncCore,
   computeChangesetKey,
@@ -39,6 +43,7 @@ import {
   COMMIT_LINE_MAX_LENGTH,
   SyncCoreReason,
   MODEL_REGISTRY_REL_PATH,
+  LOGIC_PIN_REL_PATH,
   DRIFT_PROPOSALS_DIR,
   type SyncCoreDeps,
   type ProviderChurnInput,
@@ -67,6 +72,20 @@ function fixtureRegistrySource(): string {
     "  ]),",
     '  gemini: set("gemini", [',
     '    "gemini-2.5-flash",',
+    "  ]),",
+    "};",
+    // excludeFamilies — the set a `Decision: exclude` verdict lands in. Present
+    // in the fixture because the sync can now edit it; without it the exclude
+    // path can only ever report a structural mismatch.
+    "export const excludeFamilies = {",
+    '  openai: set("openai", [',
+    '    "dall-e-3",',
+    "  ]),",
+    '  anthropic: set("anthropic", [',
+    '    "claude-instant",',
+    "  ]),",
+    '  gemini: set("gemini", [',
+    '    "gemini-1.0-pro-vision",',
     "  ]),",
     "};",
     // The recorded-deprecation ledger, in the shape the real file ships it:
@@ -151,17 +170,23 @@ function parsedFamilyArray(sourceText: string, exportName: string, provider: str
 function makeFakeDeps(overrides: Partial<SyncCoreDeps> = {}): {
   deps: SyncCoreDeps;
   registry: { text: string };
+  logicPin: { text: string };
   notes: Map<string, string>;
   writeRegistrySource: ReturnType<typeof vi.fn>;
+  writeLogicPinSource: ReturnType<typeof vi.fn>;
   writeProposalNote: ReturnType<typeof vi.fn>;
   runSyncCheck: ReturnType<typeof vi.fn>;
   revertFiles: ReturnType<typeof vi.fn>;
 } {
   const registry = { text: fixtureRegistrySource() };
+  const logicPin = { text: fixtureLogicPinSource() };
   const notes = new Map<string, string>();
 
   const writeRegistrySource = vi.fn((text: string) => {
     registry.text = text;
+  });
+  const writeLogicPinSource = vi.fn((text: string) => {
+    logicPin.text = text;
   });
   const writeProposalNote = vi.fn((path: string, text: string) => {
     notes.set(path, text);
@@ -174,6 +199,8 @@ function makeFakeDeps(overrides: Partial<SyncCoreDeps> = {}): {
   const deps: SyncCoreDeps = {
     readRegistrySource: () => registry.text,
     writeRegistrySource,
+    readLogicPinSource: () => logicPin.text,
+    writeLogicPinSource,
     readProposalNote: (path: string) => notes.get(path) ?? null,
     writeProposalNote,
     runSyncCheck,
@@ -185,12 +212,36 @@ function makeFakeDeps(overrides: Partial<SyncCoreDeps> = {}): {
   return {
     deps,
     registry,
+    logicPin,
     notes,
     writeRegistrySource,
+    writeLogicPinSource,
     writeProposalNote,
     runSyncCheck,
     revertFiles,
   };
+}
+
+/**
+ * Minimal DATA_FROZEN-shaped stand-in for logic-pin.test.ts. Only the two keys
+ * the sync can move are modelled; the pin values are placeholders, since what
+ * the tests assert is that the RIGHT key moved and that nothing outside a
+ * `pin:` literal was touched — not any particular hash.
+ */
+function fixtureLogicPinSource(): string {
+  return [
+    "const DATA_FROZEN: Record<string, { members: () => string[]; pin: string }> = {",
+    '  "includeFamilies.openai": {',
+    "    members: () => [...includeFamilies.openai].sort(),",
+    '    pin: "' + "0".repeat(64) + '",',
+    "  },",
+    '  "excludeFamilies.openai": {',
+    "    members: () => [...excludeFamilies.openai].sort(),",
+    '    pin: "' + "1".repeat(64) + '",',
+    "  },",
+    "};",
+    "",
+  ].join("\n");
 }
 
 // ---------------------------------------------------------------------------
@@ -536,6 +587,16 @@ describe("proposal notes", () => {
     expect(parseProposalDecision("garbage with no Decision line")).toBe("pending");
   });
 
+  it("parseProposalDecision recognizes an explicit human-authored REJECTION (exclude)", () => {
+    // The exclude path exists because a rejection is just as mechanical as an
+    // approval: it writes excludeFamilies instead of includeFamilies. Before
+    // this existed, `Decision: exclude` silently parsed as `pending` and the
+    // family was re-routed to a human every single run, forever.
+    expect(parseProposalDecision("Decision: exclude")).toBe("exclude");
+    expect(parseProposalDecision("Decision: EXCLUDE")).toBe("exclude");
+    expect(parseProposalDecision("Decision: Exclude\n")).toBe("exclude");
+  });
+
   it("parseProposalDecision recognizes an explicit human-authored approval", () => {
     expect(parseProposalDecision("Decision: include")).toBe("include");
   });
@@ -747,7 +808,7 @@ describe("runDriftSyncCore", () => {
     expect(outcome2.ok).toBe(false);
   });
 
-  it("ADDITION (human-approved via note Decision: include): mechanical registry edit + gate passes", () => {
+  it("ADDITION (human-decided via note Decision: include): mechanical registry edit + gate passes", () => {
     const { deps, registry, notes, runSyncCheck } = makeFakeDeps();
     // Simulate a human having already reviewed the RED alert and flipped the
     // note's Decision line to `include` (the only path that can ever add a
@@ -770,8 +831,74 @@ describe("runDriftSyncCore", () => {
     expect(outcome.ok).toBe(true);
     expect(outcome.reason).toBe(SyncCoreReason.OK_APPLIED);
     expect(registry.text).toContain('"gpt-live"');
-    expect(registry.text).toContain(`approved via ${notePath}`);
+    expect(registry.text).toContain(`decided via ${notePath}`);
     expect(runSyncCheck).toHaveBeenCalledTimes(1);
+  });
+
+  it("REJECTION (human-authored Decision: exclude): writes excludeFamilies, not includeFamilies", () => {
+    const { deps, registry, logicPin } = makeFakeDeps();
+    const notePath = proposalNoteRelPath("openai", "gpt-live", "new-family");
+    notes_set(deps, notePath, "exclude");
+
+    const inputs: ProviderChurnInput[] = [{ provider: "openai", liveModelIds: ["gpt-live"] }];
+    const before = logicPin.text;
+    const outcome = runDriftSyncCore(inputs, deps);
+
+    expect(outcome.outcomes).toContainEqual(
+      expect.objectContaining({ provider: "openai", family: "gpt-live", action: "excluded" }),
+    );
+    expect(outcome.ok).toBe(true);
+    expect(outcome.reason).toBe(SyncCoreReason.OK_APPLIED);
+    // The family landed in excludeFamilies. Asserting the SECTION, not just the
+    // string: a bare `toContain('"gpt-live"')` would also pass if the edit had
+    // gone into includeFamilies, which is the exact bug this path prevents.
+    const excludeSection = registry.text.slice(registry.text.indexOf("excludeFamilies"));
+    expect(excludeSection).toContain('"gpt-live"');
+    expect(registry.text.slice(0, registry.text.indexOf("excludeFamilies"))).not.toContain(
+      '"gpt-live"',
+    );
+    // ...and the EXCLUDE pin moved, while the include pin did not.
+    expect(logicPin.text).not.toBe(before);
+    expect(pinFor(logicPin.text, "excludeFamilies.openai")).not.toBe(
+      pinFor(before, "excludeFamilies.openai"),
+    );
+    expect(pinFor(logicPin.text, "includeFamilies.openai")).toBe(
+      pinFor(before, "includeFamilies.openai"),
+    );
+  });
+
+  it("an APPROVED classification re-pins in the SAME run (the edit is never left with a stale pin)", () => {
+    const { deps, logicPin } = makeFakeDeps();
+    notes_set(deps, proposalNoteRelPath("openai", "gpt-live", "new-family"), "include");
+    const before = logicPin.text;
+
+    const outcome = runDriftSyncCore([{ provider: "openai", liveModelIds: ["gpt-live"] }], deps);
+
+    expect(outcome.reason).toBe(SyncCoreReason.OK_APPLIED);
+    expect(pinFor(logicPin.text, "includeFamilies.openai")).not.toBe(
+      pinFor(before, "includeFamilies.openai"),
+    );
+    // And the rewrite stayed inside pin literals — nothing else in the file moved.
+    expect(onlyPinsChanged(before, logicPin.text)).toBe(true);
+  });
+
+  it("REFUSES to apply a classification it cannot re-pin (no half-applied edit)", () => {
+    const { deps, registry, writeRegistrySource } = makeFakeDeps({
+      readLogicPinSource: undefined,
+      writeLogicPinSource: undefined,
+    });
+    notes_set(deps, proposalNoteRelPath("openai", "gpt-live", "new-family"), "include");
+    const registryBefore = registry.text;
+
+    const outcome = runDriftSyncCore([{ provider: "openai", liveModelIds: ["gpt-live"] }], deps);
+
+    expect(outcome.ok).toBe(false);
+    expect(outcome.reason).toBe(SyncCoreReason.NEEDS_HUMAN);
+    expect(outcome.detail).toContain("cannot re-pin");
+    // The registry was NOT written: a stale-pin half-apply is the failure mode
+    // this whole path exists to remove, so it must not be reachable.
+    expect(writeRegistrySource).not.toHaveBeenCalled();
+    expect(registry.text).toBe(registryBefore);
   });
 
   it("a FAILING drift-sync-check gate reverts every touched file and reports GATE_FAILED", () => {
@@ -801,7 +928,11 @@ describe("runDriftSyncCore", () => {
     expect(outcome.ok).toBe(false);
     expect(outcome.reason).toBe(SyncCoreReason.GATE_FAILED);
     expect(outcome.detail).toContain("pin-check-failed");
-    expect(revertFiles).toHaveBeenCalledWith([MODEL_REGISTRY_REL_PATH]);
+    // BOTH mutated files revert together. A gate failure that reverted the
+    // registry but kept the re-pin would leave the pin describing a membership
+    // that no longer exists — a silently-wrong canary, which is worse than the
+    // failure it was reverting.
+    expect(revertFiles).toHaveBeenCalledWith([MODEL_REGISTRY_REL_PATH, LOGIC_PIN_REL_PATH]);
   });
 
   it("recording a deprecation leaves the includeFamilies checksum pin GREEN", () => {
@@ -1229,5 +1360,83 @@ describe("buildSyncCommitMessage", () => {
     );
     expect(subject.length).toBeLessThanOrEqual(COMMIT_LINE_MAX_LENGTH);
     expect(body).toBe("");
+  });
+});
+
+/** Set a note's Decision line to a human verdict. */
+function notes_set(deps: SyncCoreDeps, notePath: string, verdict: "include" | "exclude"): void {
+  deps.writeProposalNote(
+    notePath,
+    renderProposalNote("openai", "gpt-live", "new-family", "detail", "2026-07-20").replace(
+      "Decision: pending",
+      `Decision: ${verdict}`,
+    ),
+  );
+}
+
+/** The pin literal currently recorded for one DATA_FROZEN key. */
+function pinFor(source: string, key: string): string {
+  const at = source.indexOf(`"${key}":`);
+  const m = /pin:\s*"([0-9a-f]{64})"/.exec(source.slice(at));
+  return m ? m[1] : "";
+}
+
+describe("membership re-pinning primitives", () => {
+  it("updateDataFrozenPin rewrites ONLY the named key's pin", () => {
+    const src = [
+      '  "includeFamilies.openai": {',
+      '    pin: "' + "a".repeat(64) + '",',
+      "  },",
+      '  "excludeFamilies.openai": {',
+      '    pin: "' + "b".repeat(64) + '",',
+      "  },",
+    ].join("\n");
+    const out = updateDataFrozenPin(src, "excludeFamilies.openai", "c".repeat(64));
+    expect(out.changed).toBe(true);
+    expect(out.locatorMiss).toBe(false);
+    expect(pinFor(out.text, "includeFamilies.openai")).toBe("a".repeat(64));
+    expect(pinFor(out.text, "excludeFamilies.openai")).toBe("c".repeat(64));
+  });
+
+  it("updateDataFrozenPin REFUSES an absent or duplicated key rather than guessing", () => {
+    const src = '  "includeFamilies.openai": {\n    pin: "' + "a".repeat(64) + '",\n  },';
+    expect(updateDataFrozenPin(src, "excludeFamilies.gemini", "c".repeat(64))).toMatchObject({
+      changed: false,
+      locatorMiss: true,
+    });
+    expect(updateDataFrozenPin(src + src, "includeFamilies.openai", "c".repeat(64))).toMatchObject({
+      changed: false,
+      locatorMiss: true,
+    });
+  });
+
+  it("onlyPinsChanged is the guard that keeps the sync off everything but pins", () => {
+    const a = 'pin: "' + "a".repeat(64) + '",\nconst FROZEN_LOGIC = 1;';
+    const pinOnly = 'pin: "' + "b".repeat(64) + '",\nconst FROZEN_LOGIC = 1;';
+    const logicToo = 'pin: "' + "b".repeat(64) + '",\nconst FROZEN_LOGIC = 2;';
+    expect(onlyPinsChanged(a, pinOnly)).toBe(true);
+    // Mutation proof: move one byte outside a pin literal and the guard refuses.
+    expect(onlyPinsChanged(a, logicToo)).toBe(false);
+  });
+
+  it("computeMembershipPin reproduces the REAL logic-pin.test.ts pins (no silent divergence)", () => {
+    // drift-sync writes these pins, logic-pin.test.ts verifies them. If the two
+    // ever compute the hash differently, every auto-re-pin would write a value
+    // that immediately reds gate-2 — and the failure would look like a spurious
+    // membership change rather than an algorithm mismatch. Pin the parity here,
+    // against the real file and the real registry, so divergence fails loudly.
+    const real = readFileSync("src/__tests__/drift/logic-pin.test.ts", "utf-8");
+    for (const [key, members] of [
+      ["includeFamilies.openai", [...includeFamilies.openai]],
+      ["excludeFamilies.openai", [...excludeFamilies.openai]],
+    ] as const) {
+      expect(pinFor(real, key), `no pin found for ${key}`).toMatch(/^[0-9a-f]{64}$/);
+      expect(computeMembershipPin(members), key).toBe(pinFor(real, key));
+    }
+  });
+
+  it("dataFrozenKey matches the key format logic-pin.test.ts actually uses", () => {
+    expect(dataFrozenKey("excludeFamilies", "openai")).toBe("excludeFamilies.openai");
+    expect(dataFrozenKey("includeFamilies", "anthropic")).toBe("includeFamilies.anthropic");
   });
 });
