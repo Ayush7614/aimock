@@ -169,18 +169,37 @@
 
         <p>
           The <code>[media: …]</code> line is <strong>always present</strong>, even for a text-only
-          job, where it reads <code>[media: ]</code>. That is what keeps a text-to-video recording
-          from shadowing an image-to-video request that shares its prompt: aimock matches
-          <code>userMessage</code> as a substring by default, and a bare prompt is a prefix of the
-          same prompt with a media line under it. Every input part contributes an entry, including
-          one whose shape aimock does not recognise — no content array produces an empty key.
+          job, where it reads <code>[media: ]</code>. That is what keeps one
+          <em>recorded</em> fixture from shadowing another: aimock matches
+          <code>userMessage</code> as a substring by default, and because the media line always ends
+          in <code>]</code>, neither <code>a guitar\n[media: ]</code> nor
+          <code>a guitar\n[media: first_frame:9f2a…]</code> is a substring of the other. A
+          text-to-video recording therefore cannot serve an image-to-video request that shares its
+          prompt. Every input part contributes an entry, including one whose shape aimock does not
+          recognise — no content array produces an empty key.
         </p>
 
         <p>
           The digest is taken over the input URL — including a
           <code>data:</code> URI, so a multi-megabyte inline image never reaches the fixture.
-          Hand-authoring a fixture means copying the whole key, both lines, from a recorded one; a
-          key of just the bare prompt matches nothing.
+        </p>
+
+        <p>
+          <strong
+            >Hand-authoring means copying the whole key, both lines, verbatim from a recorded
+            fixture.</strong
+          >
+          That protection is a property of recorded keys, not of the router — a partial key still
+          matches, because substring matching is what is doing the work. A
+          <code>userMessage</code> of just the bare prompt is a substring of <em>both</em>
+          <code>a guitar\n[media: ]</code> and <code>a guitar\n[media: first_frame:9f2a…]</code>, so
+          it matches a text-to-video <em>and</em> an image-to-video submit sharing that prompt, and
+          serves whichever fixture the router reaches first: HTTP 200 with the wrong video. The same
+          holds in the other direction — a media-only key such as
+          <code>[media: first_frame:9f2a…]</code> (recorded from a job with no prompt) is a
+          substring of <code>a guitar\n[media: first_frame:9f2a…]</code> and will shadow it. To
+          avoid a collision, copy both lines, or supply a <code>requestTransform</code>, which
+          switches <code>userMessage</code> matching from substring to exact for the whole instance.
         </p>
 
         <h2>Multi-tenant tests use a header, not a query string</h2>
