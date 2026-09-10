@@ -26,16 +26,53 @@ jobs:
             exit 0
           fi
 
-          # Count source-file commits since the last release tag
-          UNRELEASED=$(git log "${TAG}..HEAD" --oneline -- 'src/' | wc -l | tr -d ' ')
+          # Build the git pathspec for "things that end up in the published
+          # tarball", derived from package.json "files" so it cannot drift:
+          #   - "dist" is a build artifact and is not in git, so it is replaced
+          #     by its git preimage: tsconfig's include roots minus its excludes
+          #     (which is what drops src/__tests__/).
+          #   - every other "files" entry is a real tracked path, used as-is.
+          # Everything outside that set (scripts/, .github/, docs/, examples/,
+          # drift-proposals/, src/__tests__/) cannot change the published
+          # package, so it must not count as an unreleased change.
+          PATHSPEC=()
+          while IFS= read -r line; do
+            [ -n "${line}" ] || continue
+            PATHSPEC+=("${line}")
+          done < <(node -e '
+            const path = require("path");
+            const pkg = require(path.resolve("package.json"));
+            const ts = require(path.resolve("tsconfig.json"));
+            const out = [];
+            for (const entry of pkg.files) {
+              if (entry !== "dist") { out.push(entry); continue; }
+              for (const p of ts.include ?? []) out.push(p.replace(/\/?$/, "/"));
+              for (const p of ts.exclude ?? []) out.push(":(exclude)" + p.replace(/\/?$/, "/"));
+            }
+            process.stdout.write(out.map((p) => p + "\n").join(""));
+          ')
+
+          # A git log with an empty pathspec matches EVERY path, which would
+          # turn this check into pure noise. Fail loudly instead.
+          if [ "${#PATHSPEC[@]}" -eq 0 ]; then
+            echo "::error::Could not derive a published-file pathspec from package.json/tsconfig.json."
+            exit 1
+          fi
+
+          echo "Published-file pathspec:"
+          printf '  %s\n' "${PATHSPEC[@]}"
+          echo ""
+
+          # Count commits since the last release tag that touch published files
+          UNRELEASED=$(git log "${TAG}..HEAD" --oneline -- "${PATHSPEC[@]}" | wc -l | tr -d ' ')
 
           if [ "$UNRELEASED" -gt 0 ]; then
-            echo "::warning::${UNRELEASED} source commits on main since ${TAG} — version has not been bumped."
+            echo "::warning::${UNRELEASED} published-file commits on main since ${TAG} — version has not been bumped."
             echo ""
             echo "Unreleased commits:"
-            git log "${TAG}..HEAD" --oneline -- 'src/'
+            git log "${TAG}..HEAD" --oneline -- "${PATHSPEC[@]}"
             echo ""
             echo "Run: bump package.json version, update CHANGELOG.md, push to trigger publish."
           else
-            echo "No unreleased source changes since ${TAG}."
+            echo "No unreleased published-file changes since ${TAG}."
           fi
