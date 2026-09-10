@@ -211,7 +211,12 @@ describe("model-family pipeline (injected /models)", () => {
     // Guard the other side: the canary must still fire for a real new family.
     expect(unclassifiedFamilies(["gpt-live"], "openai")).toEqual(["gpt-live"]);
     // Single-digit trailing suffix is NOT a build tag, so it stays unknown.
-    expect(unclassifiedFamilies(["gpt-live-1"], "openai")).toEqual(["gpt-live-1"]);
+    // (`gpt-live-1` itself is an EXCLUDE key as of 2026-09-10 — the full-duplex
+    // /v1/live/sessions voice family — so the exemplar here is an unclassified
+    // sibling, and `gpt-live-1-mini` guards against the new key swallowing
+    // families that merely EXTEND it.)
+    expect(unclassifiedFamilies(["gpt-live-9"], "openai")).toEqual(["gpt-live-9"]);
+    expect(unclassifiedFamilies(["gpt-live-1-mini"], "openai")).toEqual(["gpt-live-1-mini"]);
   });
 });
 
@@ -336,6 +341,8 @@ describe("full live /models wave is fully classified (2026-07-16 drift)", () => 
       "gpt-image-2.5-sunburst",
       "sora-2",
       "sora-2-pro",
+      // voice / full-duplex live (realtime-canary domain, excluded here)
+      "gpt-live-1",
       "omni-moderation",
       "omni-moderation-latest",
       // bare chat alias (fixture-vs-live gap: present in live /models, was absent

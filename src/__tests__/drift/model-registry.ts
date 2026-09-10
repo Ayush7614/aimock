@@ -277,6 +277,27 @@ export const excludeFamilies: Record<Provider, Set<string>> = {
     "gpt-realtime-1.5",
     "gpt-realtime-translate",
     "gpt-realtime-whisper",
+    // 2026-09-10 full-duplex voice line. `gpt-live-1` is OpenAI's GPT-Live-1,
+    // a voice model on the NEW `/v1/live/sessions` endpoint — a SIBLING of the
+    // Realtime API, not a successor (its model page marks Realtime "Not
+    // supported"). It never answers on /v1/chat/completions, so it can never be
+    // text-generation drift, and aimock implements no `/v1/live` surface at all.
+    // Membership here is a CLASSIFICATION for the `/models` listing check only —
+    // it says the family is accounted for, NOT that aimock mocks it (same
+    // reading as the gpt-transcribe / gpt-live-transcribe block above).
+    //
+    // PAIRED ENTRY: `gpt-live-1` is ALSO in `knownVoiceModelFamilies`
+    // (voice-models.ts). The two sets are deliberately DISJOINT surfaces — this
+    // one silences the `/models` classification check in models.drift.ts, that
+    // one silences the realtime canary in ws-realtime.drift.ts — so a VOICE
+    // family needs the entry in BOTH or the half it is missing from stays red.
+    // Same pairing as the gpt-transcribe / gpt-live-transcribe block above
+    // (936b59c: "the two sets are deliberately disjoint surfaces, so both need
+    // the entry").
+    //
+    // Decision: EXCLUDE, recorded in
+    // drift-proposals/openai-gpt-live-1-new-family.md.
+    "gpt-live-1",
     // NOTE: `-preview` families (gpt-4o-realtime-preview,
     // gpt-4o-mini-realtime-preview, gpt-4o-search-preview,
     // gpt-4o-mini-search-preview, computer-use-preview, …) are auto-excluded by

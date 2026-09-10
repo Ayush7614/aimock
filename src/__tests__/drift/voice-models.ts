@@ -36,14 +36,15 @@ export const gaRealtimeModels = [
  * `gpt-audio-2025-08-28`, `gpt-4o-mini-tts-2025-12-15`, …); appending every one
  * to a known-ID set never converges and turns the daily drift job permanently
  * red on false positives. Comparing the NORMALIZED family instead means only a
- * genuinely new family (e.g. `gpt-live`) is ever flagged.
+ * genuinely new family (e.g. `gpt-live-1-mini`) is ever flagged.
  *
  * This is a thin OpenAI-provider wrapper over the shared `normalizeModelFamily`
  * primitive (see `model-family.ts`), which owns the dated-snapshot/build-tag
  * strip loop. Behavior is byte-identical to the historical inline implementation
  * — a short numeric suffix like `gpt-live-1`'s trailing `-1` is a SINGLE digit
- * and is deliberately NOT stripped, so `gpt-live-1` normalizes to `gpt-live-1`
- * — an unknown family — and stays flagged (the whole point of the canary).
+ * and is deliberately NOT stripped, so `gpt-live-1-mini` normalizes to
+ * `gpt-live-1-mini` — an unknown family — and stays flagged, rather than being
+ * over-stripped onto the now-known `gpt-live-1` (the whole point of the canary).
  */
 export function normalizeVoiceModelFamily(id: string): string {
   return normalizeModelFamily(id, "openai");
@@ -83,6 +84,19 @@ export const knownVoiceModelFamilies = new Set(
     "gpt-4o-transcribe-diarize",
     "gpt-transcribe",
     "gpt-live-transcribe",
+    // 2026-09-10 full-duplex voice line. `gpt-live-1` (GPT-Live-1, the
+    // `/v1/live/sessions` endpoint) is ALSO in `excludeFamilies.openai`. The two
+    // sets are deliberately DISJOINT surfaces — this one silences the realtime
+    // canary in ws-realtime.drift.ts, that one silences the `/models`
+    // classification check in models.drift.ts — so a voice family needs the
+    // entry in BOTH or the half it is missing from stays red. Same treatment as
+    // the gpt-transcribe / gpt-live-transcribe pair above (936b59c).
+    // Decision: EXCLUDE, recorded in
+    // drift-proposals/openai-gpt-live-1-new-family.md.
+    // NOTE: `gpt-live-1-mini` is deliberately NOT here — it has not been
+    // observed and is not classified, so it remains this canary's live
+    // negative control.
+    "gpt-live-1",
     "whisper-1",
     // Legacy preview models (may still appear)
     "gpt-4o-realtime-preview",
@@ -98,8 +112,8 @@ export const knownVoiceModelFamilies = new Set(
  * Match a model id that belongs to the voice/audio family the realtime canary
  * is responsible for. This is DELIBERATELY broader than the old
  * `id.includes("realtime")` filter: a new full-duplex voice family whose id
- * lacks the "realtime" substring (e.g. OpenAI's `gpt-live-1` / `gpt-live-1-mini`)
- * would previously never enter the unknown-model computation and so slip past
+ * lacks the "realtime" substring (e.g. OpenAI's `gpt-live-1` line) would
+ * previously never enter the unknown-model computation and so slip past
  * the canary silently. Matching on the broader voice/audio vocabulary closes
  * that blind spot generally — the point is "a new audio/voice model family the
  * account hasn't seen before gets flagged", not a one-off hardcode of gpt-live.

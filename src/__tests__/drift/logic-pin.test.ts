@@ -325,8 +325,9 @@ describe("classification-logic checksum freeze (Phase-0 anti-silence guard)", ()
     // normalized, so this is the only thing standing in its way.
     expect(normalizeVoiceModelFamily("gpt-audio-2025-08-28")).toBe("gpt-audio");
     expect(normalizeVoiceModelFamily("tts-1-1106")).toBe("tts-1");
-    // A single-digit tail is deliberately NOT stripped: `gpt-live-1` must stay an
-    // UNKNOWN family. Over-stripping here silences the exact case the canary was
+    // A single-digit tail is deliberately NOT stripped: `gpt-live-1-mini` must
+    // stay an UNKNOWN family rather than collapsing onto the now-classified
+    // `gpt-live-1`. Over-stripping here silences the exact case the canary was
     // broadened for.
     expect(normalizeVoiceModelFamily("gpt-live-1")).toBe("gpt-live-1");
     expect(normalizeVoiceModelFamily("gpt-live-1-mini")).toBe("gpt-live-1-mini");
@@ -338,11 +339,12 @@ describe("classification-logic checksum freeze (Phase-0 anti-silence guard)", ()
     const { candidateModels, unknown } = detectVoiceModelDrift([
       "gpt-4o", // not voice — must not be a candidate at all
       "gpt-realtime-2025-08-28", // known family via a dated snapshot
-      "gpt-live-1", // NEW family — the whole point of the canary
+      "gpt-live-1", // classified voice family (2026-09-10) — must NOT be unknown
+      "gpt-live-1-mini", // NEW family — the whole point of the canary
     ]);
-    expect(candidateModels).toEqual(["gpt-realtime-2025-08-28", "gpt-live-1"]);
+    expect(candidateModels).toEqual(["gpt-realtime-2025-08-28", "gpt-live-1", "gpt-live-1-mini"]);
     // `unknown = []` is the one-line way to silence the canary. It must fail here.
-    expect(unknown).toEqual(["gpt-live-1"]);
+    expect(unknown).toEqual(["gpt-live-1-mini"]);
   });
 
   it("keeps detectVoiceModelDrift reporting hasGA=false when the GA family is gone", () => {
@@ -433,7 +435,7 @@ const DATA_FROZEN: Record<string, { members: () => string[]; pin: string }> = {
   },
   "excludeFamilies.openai": {
     members: () => [...excludeFamilies.openai].sort(),
-    pin: "f54fe5d9552e4149cb7178fce6316c702fb5f0b00293c2299dfc9f7c64e02baa",
+    pin: "ccf086b3e7f07b6698f0c875088bd59f1250833d4248e0d624e87c6f592e4021",
   },
   "excludeFamilies.anthropic": {
     members: () => [...excludeFamilies.anthropic].sort(),
@@ -452,7 +454,7 @@ const DATA_FROZEN: Record<string, { members: () => string[]; pin: string }> = {
   // to make impossible.
   knownVoiceModelFamilies: {
     members: () => [...knownVoiceModelFamilies].sort(),
-    pin: "3897b6bd6fc370ef14f080f4717dde653f2ae6029501d55c4cbda89523f9f3c6",
+    pin: "221ae974089cb3d6d0f0a200a3d1f31a7bac7f26551f7c317aac0fe2e7b20a5e",
   },
   gaRealtimeModels: {
     members: () => [...gaRealtimeModels].sort(),
