@@ -45,7 +45,7 @@ jobs:
             const lines = fs.readFileSync('README.md','utf-8').split('\n');
             for (const line of lines) {
               const t = line.trim();
-              if (!t || t.startsWith('#') || t.startsWith('[') || t.startsWith('http') || t.startsWith('![')) continue;
+              if (!t || t.startsWith('#') || t.startsWith('[') || t.startsWith('<') || t.startsWith('http') || t.startsWith('![')) continue;
               pkg.description = t.replace(/[*_\`]/g,'').replace(/\s+/g,' ').trim();
               break;
             }

@@ -80,7 +80,7 @@ aimock.reset_fixtures()    # alias for reset() — a full reset, despite the nam
 
 ```
 --aimock-node PATH       Path to node binary
---aimock-version VER     aimock npm version (default: 1.40.0)
+--aimock-version VER     aimock npm version (default: 1.41.0)
 --aimock-api-key KEY     Inbound API key for the aimock child process
 ```
 
