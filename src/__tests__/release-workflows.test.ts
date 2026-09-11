@@ -14,7 +14,10 @@ describe("release workflow sequencing", () => {
     const pytestJob = release.slice(release.indexOf("  publish-pytest:"));
     expect(pytestJob).toContain("needs: [build, publish]");
     expect(pytestJob).toContain("environment: pypi");
-    expect(pytestJob).toContain('npm view "@copilotkit/aimock@${VERSION}" version');
+    // Behaviour of this gate — including that it retries npm rather than
+    // racing it — lives in npm-publish-verify-workflow.test.ts, which executes
+    // the step's own run body. This only pins the sequencing claim.
+    expect(pytestJob).toContain('npm view "${PKG}@${VERSION}" version');
     expect(existsSync(standalonePytestPublish)).toBe(false);
   });
 });

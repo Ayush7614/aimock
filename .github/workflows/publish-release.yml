@@ -178,12 +178,82 @@ jobs:
           package-manager-cache: false
 
       - name: Verify pinned npm release is published
+        # This gate exists to stop aimock-pytest shipping a pin to an npm
+        # version that was never published, so it MUST still fail when the
+        # version is genuinely absent. It used to ask ONCE, and so it raced the
+        # registry: on the v1.41.0 release (run 34546620094) the publish job
+        # landed 1.41.0 at 00:30:31 and this step asked for it at 00:30:49 — 18
+        # seconds later — and npm answered E404. The version existed; re-running
+        # the job unchanged passed. A release gate that cries wolf is one people
+        # stop reading, so poll to a deadline instead of asking once.
+        #
+        # 300s: ~16x the observed 18s lag, past npm's replication tail, and
+        # still small beside this job's own checkout/setup. A pin still missing
+        # after five minutes is a bad pin, not propagation, and must go red.
         run: |
           # Read the pin WITHOUT importing the package: aimock_pytest/__init__.py
           # imports _server, which imports `requests`, and no Python deps are
           # installed at this point in the job. runpy executes _version.py alone.
           VERSION=$(python -c "import runpy; print(runpy.run_path('packages/aimock-pytest/src/aimock_pytest/_version.py')['AIMOCK_VERSION'])")
-          npm view "@copilotkit/aimock@${VERSION}" version
+          PKG="@copilotkit/aimock"
+          DEADLINE=${NPM_VIEW_DEADLINE_SECONDS:-300}
+          DELAY=${NPM_VIEW_INITIAL_DELAY_SECONDS:-5}
+          MAX_DELAY=${NPM_VIEW_MAX_DELAY_SECONDS:-30}
+          START=$(date +%s)
+          ATTEMPT=0
+
+          while :; do
+            ATTEMPT=$((ATTEMPT + 1))
+            if FOUND=$(npm view "${PKG}@${VERSION}" version 2>&1); then
+              echo "attempt ${ATTEMPT}: ${PKG}@${VERSION} is published (${FOUND})"
+              exit 0
+            fi
+            echo "attempt ${ATTEMPT} (t+$(($(date +%s) - START))s): ${PKG}@${VERSION} not visible yet"
+            printf '%s\n' "${FOUND}" | sed 's/^/  | /'
+
+            # Companion query. `npm view <pkg> versions` distinguishes the two
+            # failures the per-version E404 conflates:
+            #   - the package itself is missing  -> a bad pin, never propagation
+            #   - the package lists the version  -> published; the per-version
+            #     404 was a stale packument, so stop waiting on a fact already
+            #     proven by the registry itself
+            # Anything else stays ambiguous (propagating publish vs typo'd
+            # version) and is what the deadline below is for.
+            if VERSIONS=$(npm view "${PKG}" versions --json 2>&1); then
+              if printf '%s' "${VERSIONS}" | node -e '
+                const want = process.argv[1];
+                let raw = "";
+                process.stdin.on("data", (c) => (raw += c));
+                process.stdin.on("end", () => {
+                  let list;
+                  try { list = JSON.parse(raw); } catch { process.exit(2); }
+                  if (typeof list === "string") list = [list];
+                  process.exit(Array.isArray(list) && list.includes(want) ? 0 : 1);
+                });
+              ' "${VERSION}"; then
+                echo "${PKG}@${VERSION} IS in the registry version list; the per-version 404 is propagation lag"
+                exit 0
+              fi
+              echo "  ${PKG} exists but does not list ${VERSION} yet - lag or a bad pin, still waiting"
+            elif printf '%s' "${VERSIONS}" | grep -q "E404"; then
+              echo "::error::npm has no package named ${PKG} at all, so the pin ${VERSION} in packages/aimock-pytest/src/aimock_pytest/_version.py is not a propagation delay. Failing immediately."
+              printf '%s\n' "${VERSIONS}" | sed 's/^/  | /'
+              exit 1
+            else
+              echo "  package-level query failed without a 404 - registry unreachable, treating as transient"
+              printf '%s\n' "${VERSIONS}" | sed 's/^/  | /'
+            fi
+
+            ELAPSED=$(($(date +%s) - START))
+            if [ "${ELAPSED}" -ge "${DEADLINE}" ]; then
+              echo "::error::${PKG}@${VERSION} is still not published after ${ATTEMPT} attempts over ${ELAPSED}s (deadline ${DEADLINE}s). aimock-pytest pins this version in packages/aimock-pytest/src/aimock_pytest/_version.py; refusing to publish a pin to a version npm does not have."
+              exit 1
+            fi
+            echo "  retrying in ${DELAY}s"
+            sleep "${DELAY}"
+            DELAY=$((DELAY * 2))
+            if [ "${DELAY}" -gt "${MAX_DELAY}" ]; then DELAY=${MAX_DELAY}; fi
+          done
 
       - name: Install build tools
         # HASH-PINNED, and hatchling rather than hatch. Both halves were measured
