@@ -227,14 +227,18 @@ describe("publish-release.yml — the race it used to lose", () => {
 
 describe("publish-release.yml — NEGATIVE CONTROLS: the guard still bites", () => {
   it("EXECUTED: a version that never appears FAILS, after waiting out the window", () => {
-    const o = observe("99.99.99", { eventually: false });
+    // 5s, not 1s: `date +%s` is whole-second, so under a loaded full-suite run
+    // a single loop pass can itself cross a 1s deadline and the body exits
+    // after ONE attempt -- which is the assertion below, flaking on machine
+    // load rather than on behaviour.
+    const o = observe("99.99.99", { eventually: false }, { NPM_VIEW_DEADLINE_SECONDS: "5" });
     expect(o.exit).toBe(1);
     // It must have actually waited — a body that failed on the first attempt
     // would be the original bug wearing a retry loop's clothes.
     expect(o.attempts).toBeGreaterThan(1);
-    // `date +%s` truncates, so a 1s deadline can be crossed a little under 1s
+    // `date +%s` truncates, so a 5s deadline can be crossed a little under 5s
     // of wall clock; the point of the bound is that it slept at all.
-    expect(o.elapsedMs).toBeGreaterThanOrEqual(800);
+    expect(o.elapsedMs).toBeGreaterThanOrEqual(4000);
     expect(o.stdout).toContain("::error::");
     expect(o.stdout).toContain("still not published after");
     expect(o.stdout).toContain("refusing to publish a pin to a version npm does not have");
@@ -262,7 +266,11 @@ describe("publish-release.yml — NEGATIVE CONTROLS: the guard still bites", () 
   });
 
   it("EXECUTED: an unreachable registry is transient, NOT a missing-package verdict", () => {
-    const o = observe("1.41.0", { eventually: false, registryUnreachable: true });
+    const o = observe(
+      "1.41.0",
+      { eventually: false, registryUnreachable: true },
+      { NPM_VIEW_DEADLINE_SECONDS: "5" },
+    );
     expect(o.exit).toBe(1);
     expect(o.attempts).toBeGreaterThan(1);
     expect(o.stdout).toContain("registry unreachable, treating as transient");
