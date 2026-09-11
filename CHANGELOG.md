@@ -2,6 +2,22 @@
 
 ## [Unreleased]
 
+## [1.41.0] - 2026-09-10
+
+### Added
+
+- **BytePlus Ark (Seedance) video record/replay** — submit, poll, retrieve raw Ark tasks (#424)
+- New `--provider-byteplus` flag to proxy BytePlus Ark to an upstream base (#424)
+
+### Changed
+
+- `/api/v3` chat and image requests are attributed to the `byteplus` provider (#424)
+- `aimock-pytest` now defaults to `@copilotkit/aimock` 1.41.0.
+
+### Fixed
+
+- aimock now fails at startup if a BytePlus base already ends in `/api/v3` (#424)
+
 ## [1.40.0] - 2026-09-08
 
 ### Added

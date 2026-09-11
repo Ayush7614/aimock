@@ -283,7 +283,9 @@ function syncDescriptionFromReadme(pkg: { description?: string; [key: string]: u
   const readmePath = resolve("README.md");
   try {
     const readme = readFileSync(readmePath, "utf-8");
-    // The description is the first non-empty, non-heading, non-badge, non-video line
+    // The description is the first non-empty, non-heading, non-badge, non-video,
+    // non-HTML line. The README opens with a raw <div align="center"> wrapper,
+    // which is not prose and must not become the published description.
     const lines = readme.split("\n");
     for (const line of lines) {
       const trimmed = line.trim();
@@ -293,6 +295,7 @@ function syncDescriptionFromReadme(pkg: { description?: string; [key: string]: u
         trimmed.startsWith("[![") ||
         trimmed.startsWith("![") ||
         trimmed.startsWith("[") ||
+        trimmed.startsWith("<") ||
         trimmed.startsWith("http")
       ) {
         continue;
