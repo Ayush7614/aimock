@@ -22,11 +22,25 @@ import { createInterruptionSignal } from "./interruption.js";
 
 /**
  * Extract the multipart boundary string from a Content-Type header.
+ *
+ * Handles both bare (`boundary=abc123`) and RFC 2046 quoted-string
+ * (`boundary="abc123"`) forms — browsers, `form-data`, and Python `requests`
+ * commonly emit the quoted variant. Without unquoting, the `--"abc123"`
+ * delimiter never matches and fields silently fall back to defaults.
  */
 export function extractBoundary(contentType: string | undefined): string | undefined {
   if (!contentType) return undefined;
   const match = contentType.match(/boundary=([^\s;]+)/i);
-  return match?.[1];
+  if (!match?.[1]) return undefined;
+  let boundary = match[1].trim();
+  if (boundary.length >= 2) {
+    const first = boundary[0];
+    const last = boundary[boundary.length - 1];
+    if ((first === '"' && last === '"') || (first === "'" && last === "'")) {
+      boundary = boundary.slice(1, -1);
+    }
+  }
+  return boundary || undefined;
 }
 
 /**

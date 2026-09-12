@@ -494,8 +494,43 @@ async function handleControlAPI(
       return true;
     }
 
-    const status = parsed.status ?? 500;
+    // Validate the payload — an unchecked `status` reaches
+    // `res.writeHead(status)` on the next matched request and throws
+    // ERR_INVALID_HTTP_STATUS/RangeError for 99, 0, 1000, NaN, "500", etc.
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "Invalid body: expected a JSON object" }));
+      return true;
+    }
+    const statusRaw = parsed.status;
+    // Undefined means "omitted" → default 500. Explicit null is invalid
+    // (it would otherwise fall through `??` and silently become 500).
+    const status = statusRaw === undefined ? 500 : statusRaw;
+    // 1xx is excluded: informational statuses can never terminate an HTTP
+    // response, so queueing one hangs the next request on writeHead(100).
+    if (typeof status !== "number" || !Number.isInteger(status) || status < 200 || status > 599) {
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(
+        JSON.stringify({ error: "Invalid 'status': must be an integer between 200 and 599" }),
+      );
+      return true;
+    }
     const errorBody = parsed.body;
+    if (errorBody !== undefined) {
+      if (typeof errorBody !== "object" || errorBody === null || Array.isArray(errorBody)) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Invalid 'body': must be an object" }));
+        return true;
+      }
+      for (const field of ["message", "type", "code"] as const) {
+        const value = errorBody[field];
+        if (value !== undefined && typeof value !== "string") {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: `Invalid 'body.${field}': must be a string` }));
+          return true;
+        }
+      }
+    }
     const errorFixture: Fixture = {
       match: { predicate: () => true },
       response: {
