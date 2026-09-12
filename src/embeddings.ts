@@ -27,6 +27,9 @@ import {
   getContext,
   strictNoMatchMessage,
   strictNoMatchLogLine,
+  validateEmbeddingDimensions,
+  normalizeStringArrayInput,
+  MAX_EMBEDDING_DIMENSIONS,
 } from "./helpers.js";
 import { matchFixtureDiagnostic } from "./router.js";
 import { writeErrorResponse } from "./sse-writer.js";
@@ -107,10 +110,74 @@ export async function handleEmbeddings(
     return;
   }
 
-  // Normalize input to array of strings
-  const inputs: string[] = Array.isArray(embeddingReq.input)
-    ? embeddingReq.input
-    : [embeddingReq.input];
+  // Normalize input to array of strings — reject non-string inputs with 400
+  // instead of crashing downstream in createHash().update() (500).
+  const inputs = normalizeStringArrayInput(embeddingReq.input);
+  if (inputs === null) {
+    journal.add({
+      method: req.method ?? "POST",
+      path: req.url ?? "/v1/embeddings",
+      headers: flattenHeaders(req.headers),
+      body: null,
+      response: { status: 400, fixture: null },
+    });
+    writeErrorResponse(
+      res,
+      400,
+      JSON.stringify({
+        error: {
+          message: "Invalid parameter: 'input' must be a string or an array of strings",
+          type: "invalid_request_error",
+        },
+      }),
+    );
+    return;
+  }
+
+  if (inputs.length === 0) {
+    journal.add({
+      method: req.method ?? "POST",
+      path: req.url ?? "/v1/embeddings",
+      headers: flattenHeaders(req.headers),
+      body: null,
+      response: { status: 400, fixture: null },
+    });
+    writeErrorResponse(
+      res,
+      400,
+      JSON.stringify({
+        error: {
+          message: "Invalid parameter: 'input' array must not be empty",
+          type: "invalid_request_error",
+        },
+      }),
+    );
+    return;
+  }
+
+  // Validate dimensions — reject non-integers, out-of-range, and huge values
+  // with 400 instead of throwing RangeError / OOMing in `new Array()`.
+  const dimensions = validateEmbeddingDimensions(embeddingReq.dimensions);
+  if (dimensions === null) {
+    journal.add({
+      method: req.method ?? "POST",
+      path: req.url ?? "/v1/embeddings",
+      headers: flattenHeaders(req.headers),
+      body: null,
+      response: { status: 400, fixture: null },
+    });
+    writeErrorResponse(
+      res,
+      400,
+      JSON.stringify({
+        error: {
+          message: `Invalid parameter: 'dimensions' must be an integer between 1 and ${MAX_EMBEDDING_DIMENSIONS}`,
+          type: "invalid_request_error",
+        },
+      }),
+    );
+    return;
+  }
 
   // Concatenate all inputs for matching purposes
   const combinedInput = inputs.join(" ");
@@ -280,7 +347,6 @@ export async function handleEmbeddings(
   logger.warn(
     `No embedding fixture matched for "${combinedInput.slice(0, 80)}" — returning deterministic fallback`,
   );
-  const dimensions = embeddingReq.dimensions ?? 1536;
   const embeddings = inputs.map((input) => generateDeterministicEmbedding(input, dimensions));
 
   journal.add({

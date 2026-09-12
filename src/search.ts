@@ -7,7 +7,7 @@
  */
 
 import type * as http from "node:http";
-import { flattenHeaders, matchesPattern } from "./helpers.js";
+import { flattenHeaders, matchesPattern, normalizeTextInput } from "./helpers.js";
 import type { Journal } from "./journal.js";
 import type { Logger } from "./logger.js";
 
@@ -65,7 +65,29 @@ export async function handleSearch(
     return;
   }
 
-  const query = body.query ?? "";
+  const rawQuery: unknown = body.query ?? "";
+  const normalizedQuery = normalizeTextInput(rawQuery);
+  if (normalizedQuery === null) {
+    journal.add({
+      method: req.method ?? "POST",
+      path: req.url ?? "/search",
+      headers: flattenHeaders(req.headers),
+      body: null,
+      service: "search",
+      response: { status: 400, fixture: null },
+    });
+    res.writeHead(400, { "Content-Type": "application/json" });
+    res.end(
+      JSON.stringify({
+        error: {
+          message: "Invalid parameter: 'query' must be a string",
+          type: "invalid_request_error",
+        },
+      }),
+    );
+    return;
+  }
+  const query = normalizedQuery;
   const maxResults = body.max_results;
 
   // Find first matching fixture

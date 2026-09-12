@@ -7,7 +7,7 @@
  */
 
 import type * as http from "node:http";
-import { flattenHeaders, generateId, matchesPattern } from "./helpers.js";
+import { flattenHeaders, generateId, matchesPattern, normalizeTextInput } from "./helpers.js";
 import type { Journal } from "./journal.js";
 import type { Logger } from "./logger.js";
 
@@ -100,9 +100,31 @@ export async function handleModeration(
     return;
   }
 
-  // Normalize input to a single string for matching
-  const rawInput = body.input ?? "";
-  const inputText = Array.isArray(rawInput) ? rawInput.join(" ") : rawInput;
+  // Normalize input to a single string for matching — reject non-string
+  // inputs with 400 instead of crashing in matchesPattern()/slice() (500).
+  const rawInput: unknown = body.input ?? "";
+  const normalized = normalizeTextInput(rawInput);
+  if (normalized === null) {
+    journal.add({
+      method: req.method ?? "POST",
+      path: req.url ?? "/v1/moderations",
+      headers: flattenHeaders(req.headers),
+      body: null,
+      service: "moderation",
+      response: { status: 400, fixture: null },
+    });
+    res.writeHead(400, { "Content-Type": "application/json" });
+    res.end(
+      JSON.stringify({
+        error: {
+          message: "Invalid parameter: 'input' must be a string or an array of strings",
+          type: "invalid_request_error",
+        },
+      }),
+    );
+    return;
+  }
+  const inputText = normalized;
 
   // Find first matching fixture
   let matchedResult: ModerationResult = DEFAULT_RESULT;

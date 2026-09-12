@@ -1357,6 +1357,54 @@ export function slugifyContext(context: string): string {
 const DEFAULT_EMBEDDING_DIMENSIONS = 1536;
 
 /**
+ * Maximum embedding dimensions accepted by POST /v1/embeddings.
+ * Matches the largest OpenAI embedding model (text-embedding-3-large: 3072).
+ * Requests above this are rejected with 400 instead of attempting a huge
+ * allocation (which would OOM the mock server).
+ */
+export const MAX_EMBEDDING_DIMENSIONS = 3072;
+
+/**
+ * Validate an embeddings `dimensions` parameter.
+ * Returns the effective dimensions (default 1536) or null when invalid.
+ * Valid: undefined (→ default), integer in [1, MAX_EMBEDDING_DIMENSIONS].
+ */
+export function validateEmbeddingDimensions(raw: unknown): number | null {
+  if (raw === undefined) return 1536;
+  if (typeof raw !== "number" || !Number.isInteger(raw)) return null;
+  if (raw < 1 || raw > MAX_EMBEDDING_DIMENSIONS) return null;
+  return raw;
+}
+
+/**
+ * Normalize a `string | string[]` text input (embeddings/moderation).
+ * Returns the array of strings, or null when `raw` is neither a string nor
+ * an array consisting solely of strings.
+ */
+export function normalizeStringArrayInput(raw: unknown): string[] | null {
+  if (typeof raw === "string") return [raw];
+  if (Array.isArray(raw)) {
+    if (!raw.every((el) => typeof el === "string")) return null;
+    return raw as string[];
+  }
+  return null;
+}
+
+/**
+ * Normalize a free-text field (moderation input, search/rerank query).
+ * Accepts a string or an array of strings (joined with " "); returns the
+ * combined string, or null when `raw` is neither.
+ */
+export function normalizeTextInput(raw: unknown): string | null {
+  if (typeof raw === "string") return raw;
+  if (Array.isArray(raw)) {
+    if (!raw.every((el) => typeof el === "string")) return null;
+    return (raw as string[]).join(" ");
+  }
+  return null;
+}
+
+/**
  * Generate a deterministic embedding vector from input text.
  * Hashes the input with SHA-256 and spreads the hash bytes across
  * the requested number of dimensions, producing values in [-1, 1].
