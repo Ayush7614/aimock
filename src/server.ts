@@ -3,7 +3,9 @@ import type {
   Fixture,
   FixtureFileEntry,
   ChatCompletionRequest,
+  ChaosConfig,
   HandlerDefaults,
+  JournalEntry,
   MockServerOptions,
   Mountable,
   RecordProviderKey,
@@ -331,6 +333,36 @@ export function performFullReset(fixtures: Fixture[], targets: FullResetTargets 
 }
 
 /**
+ * JSON-safe redaction for control-API inspection output. Functions (fixture
+ * `predicate`s, response factories) and RegExps do not survive
+ * JSON.stringify as anything useful, so they become marker strings.
+ */
+function redactForInspection(value: unknown): unknown {
+  if (typeof value === "function") return "[function]";
+  if (value instanceof RegExp) return String(value);
+  if (Array.isArray(value)) return value.map(redactForInspection);
+  if (value !== null && typeof value === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+      out[key] = redactForInspection(entry);
+    }
+    return out;
+  }
+  return value;
+}
+
+/**
+ * One-line kind label for a fixture response used by
+ * `GET /__aimock/fixtures?include=fixtures` (e.g. "text", "error").
+ * Response factories are reported as "factory".
+ */
+function fixtureResponseKind(response: Fixture["response"]): string {
+  if (typeof response === "function") return "factory";
+  const keys = Object.keys(response as Record<string, unknown>);
+  return keys[0] ?? "unknown";
+}
+
+/**
  * Handle requests under `/__aimock/`. Returns `true` if the request was
  * handled, `false` if the path doesn't match the control prefix.
  */
@@ -338,6 +370,7 @@ async function handleControlAPI(
   req: http.IncomingMessage,
   res: http.ServerResponse,
   pathname: string,
+  searchParams: URLSearchParams,
   fixtures: Fixture[],
   journal: Journal,
   videoStates: VideoStateMap,
@@ -359,17 +392,157 @@ async function handleControlAPI(
     return true;
   }
 
-  // GET /__aimock/journal
+  // GET /__aimock/journal — optionally filtered/paginated.
+  // No query params → full array (historical behaviour, unchanged).
+  // Supported params: limit (int >= 0), offset (int >= 0, default 0),
+  // path (substring), method (exact, case-insensitive), status (int),
+  // service (exact), testId (matches X-Test-Id header or ?testId= in path).
   if (subPath === "/journal" && req.method === "GET") {
+    const bad = (message: string): true => {
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: message }));
+      return true;
+    };
+    const parseNonNegativeInt = (name: string, fallback: number): number | null => {
+      const raw = searchParams.get(name);
+      if (raw === null) return fallback;
+      if (!/^\d+$/.test(raw.trim())) return null;
+      return Number(raw);
+    };
+    const limit = parseNonNegativeInt("limit", -1);
+    const offset = parseNonNegativeInt("offset", 0);
+    if (limit === null) return bad("Invalid 'limit': must be an integer >= 0");
+    if (offset === null) return bad("Invalid 'offset': must be an integer >= 0");
+    let statusFilter: number | undefined;
+    const statusRaw = searchParams.get("status");
+    if (statusRaw !== null) {
+      if (!/^\d+$/.test(statusRaw.trim())) return bad("Invalid 'status': must be an integer");
+      statusFilter = Number(statusRaw);
+    }
+    const pathFilter = searchParams.get("path");
+    const methodFilter = searchParams.get("method");
+    const serviceFilter = searchParams.get("service");
+    const testIdFilter = searchParams.get("testId");
+
+    let entries: JournalEntry[] = journal.getAll();
+    if (methodFilter !== null) {
+      const want = methodFilter.toUpperCase();
+      entries = entries.filter((e) => e.method.toUpperCase() === want);
+    }
+    if (pathFilter !== null) {
+      entries = entries.filter((e) => e.path.includes(pathFilter));
+    }
+    if (statusFilter !== undefined) {
+      entries = entries.filter((e) => e.response.status === statusFilter);
+    }
+    if (serviceFilter !== null) {
+      entries = entries.filter((e) => e.service === serviceFilter);
+    }
+    if (testIdFilter !== null) {
+      entries = entries.filter(
+        (e) => e.headers["x-test-id"] === testIdFilter || e.path.includes(`testId=${testIdFilter}`),
+      );
+    }
+    if (offset > 0) entries = entries.slice(offset);
+    if (limit >= 0) entries = entries.slice(0, limit);
+
     res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify(journal.getAll()));
+    res.end(JSON.stringify(entries));
     return true;
   }
 
-  // GET /__aimock/fixtures — inspect current fixture count
+  // GET /__aimock/fixtures — inspect current fixture count. With
+  // ?include=fixtures, also dump each fixture's (redacted) match criteria
+  // and response kind so harnesses can assert what would match.
   if (subPath === "/fixtures" && req.method === "GET") {
+    const include = searchParams.get("include");
+    if (include === null) {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ count: fixtures.length }));
+      return true;
+    }
+    if (include !== "fixtures") {
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "Invalid 'include': expected 'fixtures'" }));
+      return true;
+    }
     res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ count: fixtures.length }));
+    res.end(
+      JSON.stringify({
+        count: fixtures.length,
+        fixtures: fixtures.map((fixture, index) => ({
+          index,
+          match: redactForInspection(fixture.match),
+          response: fixtureResponseKind(fixture.response),
+          ...(fixture.latency !== undefined ? { latency: fixture.latency } : {}),
+          ...(fixture.chaos !== undefined ? { chaos: fixture.chaos } : {}),
+        })),
+      }),
+    );
+    return true;
+  }
+
+  // GET /__aimock/chaos — read the effective server-level chaos config.
+  if (subPath === "/chaos" && req.method === "GET") {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ chaos: defaults.chaos ?? {} }));
+    return true;
+  }
+
+  // PUT /__aimock/chaos — replace the server-level chaos config at runtime
+  // (no restart). Accepts any subset of dropRate/malformedRate/disconnectRate
+  // as numbers in [0, 1]; `{}` clears back to no chaos. Unknown fields and
+  // out-of-range values are rejected with 400. Note: POST /__aimock/reset
+  // does not clear this — PUT {} to clear.
+  if (subPath === "/chaos" && req.method === "PUT") {
+    let raw: string;
+    try {
+      raw = await readBody(req);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      defaults.logger.error(`PUT /__aimock/chaos: failed to read body: ${msg}`);
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: `Failed to read request body: ${msg}` }));
+      return true;
+    }
+
+    let parsed: Record<string, unknown>;
+    try {
+      parsed = JSON.parse(raw) as Record<string, unknown>;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      defaults.logger.error(`PUT /__aimock/chaos: invalid JSON: ${msg}`);
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: `Invalid JSON: ${msg}` }));
+      return true;
+    }
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "Invalid body: expected a JSON object" }));
+      return true;
+    }
+    const allowed = ["dropRate", "malformedRate", "disconnectRate"] as const;
+    for (const key of Object.keys(parsed)) {
+      if (!(allowed as readonly string[]).includes(key)) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: `Unknown chaos field: '${key}'` }));
+        return true;
+      }
+    }
+    const next: ChaosConfig = {};
+    for (const key of allowed) {
+      const value = parsed[key];
+      if (value === undefined) continue;
+      if (typeof value !== "number" || Number.isNaN(value) || value < 0 || value > 1) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: `Invalid '${key}': must be a number between 0 and 1` }));
+        return true;
+      }
+      next[key] = value;
+    }
+    defaults.chaos = next;
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ chaos: defaults.chaos ?? {} }));
     return true;
   }
 
@@ -1424,13 +1597,21 @@ export async function createServerWithResolvedAuth(
   const logger = new Logger(options?.logLevel ?? "silent");
   const registry = options?.metrics ? createMetricsRegistry() : undefined;
   const serverOptions = options ?? {};
+  // Runtime-mutable server chaos config. Reads fall through to the
+  // construction options until PUT /__aimock/chaos installs an override.
+  let chaosOverride: ChaosConfig | undefined;
+  let chaosOverridden = false;
   const defaults = {
     latency: serverOptions.latency ?? 0,
     chunkSize: Math.max(1, serverOptions.chunkSize ?? DEFAULT_CHUNK_SIZE),
     replaySpeed: serverOptions.replaySpeed ?? 1.0,
     logger,
     get chaos() {
-      return serverOptions.chaos;
+      return chaosOverridden ? chaosOverride : serverOptions.chaos;
+    },
+    set chaos(value: ChaosConfig | undefined) {
+      chaosOverride = value;
+      chaosOverridden = true;
     },
     registry,
     get record() {
@@ -1675,6 +1856,7 @@ export async function createServerWithResolvedAuth(
         req,
         res,
         pathname,
+        parsedUrl.searchParams,
         fixtures,
         journal,
         videoStates,
