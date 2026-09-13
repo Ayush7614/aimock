@@ -414,13 +414,27 @@ export class LLMock {
 
   // ---- Chaos ----
 
+  /**
+   * Set the server-wide chaos baseline. Writes through to a RUNNING server as
+   * well as the construction options: an untagged `POST /__aimock/chaos`
+   * installs a baseline override that shadows `options.chaos`, and without this
+   * the call would silently do nothing until the next `reset()`. Per-testId
+   * overrides still win over the baseline.
+   */
   setChaos(config: ChaosConfig): this {
     this.options.chaos = config;
+    if (this.serverInstance) this.serverInstance.defaults.chaos = config;
     return this;
   }
 
+  /**
+   * Turn chaos off everywhere: the construction config, the runtime baseline,
+   * and every per-testId override (assigning `undefined` is the full-clear
+   * signal the `defaults.chaos` setter defines).
+   */
   clearChaos(): this {
     delete this.options.chaos;
+    if (this.serverInstance) this.serverInstance.defaults.chaos = undefined;
     return this;
   }
 

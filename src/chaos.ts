@@ -4,27 +4,65 @@
  * Provides probabilistic failure injection — requests can be dropped (500),
  * returned with malformed JSON, or have the connection forcibly disconnected.
  *
- * Precedence: per-request headers > fixture-level config > server-level defaults.
+ * Precedence: per-request headers > fixture-level config > server-level defaults
+ * (and the server level is itself scoped per `X-Test-Id` — see `ChaosScope`).
  */
 
 import type * as http from "node:http";
-import type { ChaosAction, ChaosConfig, ChatCompletionRequest, Fixture } from "./types.js";
+import type {
+  ChaosAction,
+  ChaosConfig,
+  ChaosDefaults,
+  ChaosScope,
+  ChatCompletionRequest,
+  Fixture,
+} from "./types.js";
 import { writeErrorResponse } from "./sse-writer.js";
+import { resolveTestId } from "./helpers.js";
 import type { Journal } from "./journal.js";
 import type { Logger } from "./logger.js";
 import type { MetricsRegistry } from "./metrics.js";
 
 /**
+ * Narrow the server-defaults argument. A `ChaosScope` is distinguishable from a
+ * `ChaosConfig` by construction: the latter only ever carries the three rates.
+ */
+export function isChaosScope(defaults: ChaosDefaults): defaults is ChaosScope {
+  return "base" in defaults || "byTestId" in defaults;
+}
+
+/**
+ * Pick the server-level chaos config that applies to THIS request: the override
+ * installed for its testId, else the server-wide baseline. The testId is
+ * resolved by `resolveTestId` — the same helper `getTestId` and the control API
+ * use — so a harness that tags by `?testId=` lands in the same scope its chaos
+ * override was stored under, and the two sides cannot disagree.
+ */
+function resolveScopedDefaults(
+  serverDefaults: ChaosDefaults | undefined,
+  rawHeaders?: http.IncomingHttpHeaders,
+  url?: string,
+): ChaosConfig | undefined {
+  if (!serverDefaults) return undefined;
+  if (!isChaosScope(serverDefaults)) return serverDefaults;
+  const scoped = serverDefaults.byTestId?.get(resolveTestId(rawHeaders ?? {}, url));
+  if (scoped) return scoped;
+  return serverDefaults.base;
+}
+
+/**
  * Resolve chaos config from headers, fixture, and server defaults.
- * Header values override fixture values, which override server defaults.
+ * Header values override fixture values, which override server defaults
+ * (which are themselves per-testId — see `ChaosScope`).
  */
 function resolveChaosConfig(
   fixture: Fixture | null,
-  serverDefaults?: ChaosConfig,
+  serverDefaults?: ChaosDefaults,
   rawHeaders?: http.IncomingHttpHeaders,
   logger?: Logger,
+  url?: string,
 ): ChaosConfig {
-  const base: ChaosConfig = { ...serverDefaults };
+  const base: ChaosConfig = { ...resolveScopedDefaults(serverDefaults, rawHeaders, url) };
 
   // Fixture-level overrides server defaults
   if (fixture?.chaos) {
@@ -100,11 +138,12 @@ function resolveChaosConfig(
  */
 export function evaluateChaos(
   fixture: Fixture | null,
-  serverDefaults?: ChaosConfig,
+  serverDefaults?: ChaosDefaults,
   rawHeaders?: http.IncomingHttpHeaders,
   logger?: Logger,
+  url?: string,
 ): ChaosAction | null {
-  const config = resolveChaosConfig(fixture, serverDefaults, rawHeaders, logger);
+  const config = resolveChaosConfig(fixture, serverDefaults, rawHeaders, logger, url);
 
   if (config.dropRate !== undefined && config.dropRate > 0 && Math.random() < config.dropRate) {
     return "drop";
@@ -138,6 +177,11 @@ interface ChaosJournalContext {
  * Apply chaos to a request. Returns true if chaos was applied (caller should
  * return early), false if the request should proceed normally.
  *
+ * `requestUrl` is the RAW `req.url` (query string included) — chaos scoping
+ * resolves the testId from it exactly as `getTestId` does, so `?testId=` tagged
+ * traffic is not silently unscoped. It is required, not optional, so a new
+ * handler cannot forget it.
+ *
  * `source` is required so the invariant "this handler only applies chaos in
  * the <X> phase" is enforced at the type level. A future handler that grows
  * a proxy path MUST pass `"proxy"` explicitly; the default can't drift silently.
@@ -145,15 +189,16 @@ interface ChaosJournalContext {
 export function applyChaos(
   res: http.ServerResponse,
   fixture: Fixture | null,
-  serverDefaults: ChaosConfig | undefined,
+  serverDefaults: ChaosDefaults | undefined,
   rawHeaders: http.IncomingHttpHeaders,
+  requestUrl: string | undefined,
   journal: Journal,
   context: ChaosJournalContext,
   source: "fixture" | "proxy" | "internal",
   registry?: MetricsRegistry,
   logger?: Logger,
 ): boolean {
-  const action = evaluateChaos(fixture, serverDefaults, rawHeaders, logger);
+  const action = evaluateChaos(fixture, serverDefaults, rawHeaders, logger, requestUrl);
   if (!action) return false;
   applyChaosAction(action, res, fixture, journal, context, source, registry);
   return true;

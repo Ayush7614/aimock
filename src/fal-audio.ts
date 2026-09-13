@@ -327,6 +327,7 @@ async function handleQueueSubmit(
       fixture,
       defaults.chaos,
       req.headers,
+      req.url,
       journal,
       {
         method: req.method ?? "POST",
@@ -894,6 +895,7 @@ async function handleSyncRun(
       fixture,
       defaults.chaos,
       req.headers,
+      req.url,
       journal,
       {
         method: req.method ?? "POST",

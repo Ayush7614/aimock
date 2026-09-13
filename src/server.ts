@@ -3,7 +3,10 @@ import type {
   Fixture,
   FixtureFileEntry,
   ChatCompletionRequest,
+  ChaosConfig,
+  ChaosDefaults,
   HandlerDefaults,
+  JournalEntry,
   MockServerOptions,
   Mountable,
   RecordProviderKey,
@@ -35,6 +38,12 @@ import {
   isErrorResponse,
   serializeErrorResponse,
   isAudioResponse,
+  isResponseFactory,
+  isVideoResponse,
+  isTranscriptionResponse,
+  isImageResponse,
+  isEmbeddingResponse,
+  isJSONResponse,
   flattenHeaders,
   getTestId,
   readBody,
@@ -46,6 +55,7 @@ import {
   strictNoMatchLogLine,
   getContext,
 } from "./helpers.js";
+import { DEFAULT_TEST_ID } from "./constants.js";
 import {
   isOpenRouterPath,
   buildOpenRouterCandidates,
@@ -108,7 +118,7 @@ import { handleWebSocketResponses } from "./ws-responses.js";
 import { handleWebSocketRealtime } from "./ws-realtime.js";
 import { handleWebSocketGeminiLive } from "./ws-gemini-live.js";
 import { Logger } from "./logger.js";
-import { applyChaosAction, evaluateChaos } from "./chaos.js";
+import { applyChaosAction, evaluateChaos, isChaosScope } from "./chaos.js";
 import {
   createMetricsRegistry,
   normalizePathLabel,
@@ -257,6 +267,10 @@ const CORS_HEADERS: Record<string, string> = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
   "Access-Control-Allow-Headers": "*",
+  // Response headers are invisible to cross-origin JS unless exposed. The
+  // journal's pagination total is a response header (the body stays a bare
+  // array for back-compat), so a browser harness needs this to read it.
+  "Access-Control-Expose-Headers": "X-Total-Count",
 };
 
 function setCorsHeaders(res: http.ServerResponse): void {
@@ -284,6 +298,20 @@ function handleNotFound(res: http.ServerResponse, message: string): void {
 
 const CONTROL_PREFIX = "/__aimock";
 
+/** The complete `GET /__aimock/fixtures` query-param vocabulary; anything else 400s. */
+const FIXTURES_PARAMS: ReadonlySet<string> = new Set(["include"]);
+
+/** The complete `GET /__aimock/journal` query-param vocabulary; anything else 400s. */
+const JOURNAL_PARAMS: ReadonlySet<string> = new Set([
+  "limit",
+  "offset",
+  "path",
+  "method",
+  "status",
+  "service",
+  "testId",
+]);
+
 /**
  * The per-server state a full reset clears. `ServerInstance` structurally
  * satisfies this, so `LLMock.reset()` and the control-API full-reset route
@@ -302,8 +330,9 @@ export interface FullResetTargets {
 /**
  * Perform a full reset: clear the fixtures array, the journal (entries *and*
  * per-test fixture match-counts, i.e. sequence position), the video and fal.ai
- * job/queue state, and the Gemini interaction/event-id counters, then re-zero
- * the `aimock_fixtures_loaded` gauge.
+ * job/queue state, the Gemini interaction/event-id counters, and any runtime
+ * chaos override (reverting to the construction-time chaos config), then
+ * re-zero the `aimock_fixtures_loaded` gauge.
  *
  * `targets` is `null` when no server is running (an in-process `reset()` before
  * `start()`). The process-global generation state is reset either way, since it
@@ -320,6 +349,11 @@ export function performFullReset(fixtures: Fixture[], targets: FullResetTargets 
   resetEventIdCounter();
   if (!targets) return;
   targets.journal.clear();
+  // Drop any runtime chaos override installed via POST /__aimock/chaos, so the
+  // server returns to the chaos configuration it was STARTED with. Reset is the
+  // isolation barrier every parallel harness leans on; chaos leaking past it
+  // poisons later tests with 500s that look like application bugs.
+  targets.defaults.chaos = undefined;
   targets.videoStates.clear();
   targets.openRouterVideoJobs.clear();
   targets.veoVideoJobs.clear();
@@ -331,6 +365,107 @@ export function performFullReset(fixtures: Fixture[], targets: FullResetTargets 
 }
 
 /**
+ * JSON-safe redaction for control-API inspection output. Functions (fixture
+ * `predicate`s, response factories) and RegExps do not survive
+ * JSON.stringify as anything useful, so they become marker strings.
+ */
+function redactForInspection(value: unknown): unknown {
+  if (typeof value === "function") return "[function]";
+  if (value instanceof RegExp) return String(value);
+  if (Array.isArray(value)) return value.map(redactForInspection);
+  if (value !== null && typeof value === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+      out[key] = redactForInspection(entry);
+    }
+    return out;
+  }
+  return value;
+}
+
+/**
+ * One-line kind label for a fixture response used by
+ * `GET /__aimock/fixtures?include=fixtures` (e.g. "text", "error").
+ * Response factories are reported as "factory".
+ *
+ * Discriminates with the same `is*Response` guards the request handlers use,
+ * in the same order — NOT by inspecting keys. Every response shape extends
+ * `ResponseOverrides` (`id`/`created`/`model`/`usage`), so a recorded fixture's
+ * first key is usually an envelope override rather than the discriminant. The
+ * audio-before-content/toolCalls order is the ORDERING CONTRACT documented on
+ * `AudioResponse` in types.ts: those shapes structurally overlap.
+ */
+function fixtureResponseKind(response: Fixture["response"]): string {
+  if (isResponseFactory(response)) return "factory";
+  if (isErrorResponse(response)) return "error";
+  if (isAudioResponse(response)) return "audio";
+  if (isVideoResponse(response)) return "video";
+  if (isTranscriptionResponse(response)) return "transcription";
+  if (isImageResponse(response)) return "image";
+  if (isEmbeddingResponse(response)) return "embedding";
+  if (isJSONResponse(response)) return "json";
+  if (isContentWithToolCallsResponse(response)) return "contentWithToolCalls";
+  if (isToolCallResponse(response)) return "toolCalls";
+  if (isTextResponse(response)) return "text";
+  return "unknown";
+}
+
+/**
+ * Resolve a journal entry's testId exactly the way `getTestId` resolves an
+ * incoming request's: the `X-Test-Id` header wins, then `?testId=` parsed out
+ * of the query string, then `DEFAULT_TEST_ID`. The
+ * filter and the server's own per-test isolation must never disagree — and a
+ * raw `path.includes("testId=t1")` both prefix-collides with `t10` and matches
+ * unrelated params like `notTestId`.
+ */
+function journalEntryTestId(entry: JournalEntry): string {
+  const header = entry.headers["x-test-id"];
+  if (header) return header;
+  const qIdx = entry.path.indexOf("?");
+  if (qIdx !== -1) {
+    const queryValue = new URLSearchParams(entry.path.slice(qIdx + 1)).get("testId");
+    if (queryValue) return queryValue;
+  }
+  return DEFAULT_TEST_ID;
+}
+
+/**
+ * The testId a chaos override is stored under, and read back with — resolved by
+ * `getTestId`, i.e. `X-Test-Id` header then `?testId=`, exactly as
+ * `resolveScopedDefaults` resolves the traffic being evaluated. A control call
+ * and the requests it is meant to affect can then never land in different
+ * scopes. `DEFAULT_TEST_ID` (neither header nor param) means the server-wide
+ * baseline.
+ *
+ * Returns `null` when `X-Test-Id` is PRESENT but blank. `String(testId ?? "")`
+ * in a harness produces that trivially, and silently treating it as "untagged"
+ * would install a server-wide baseline that fails every other test — the exact
+ * cross-test leak per-testId scoping exists to prevent. Callers must 400.
+ */
+function chaosScopeId(req: http.IncomingMessage): string | null {
+  const headerValue = req.headers["x-test-id"];
+  const raw = Array.isArray(headerValue) ? headerValue[0] : headerValue;
+  if (typeof raw === "string" && raw.trim() === "") return null;
+  return getTestId(req);
+}
+
+/** 400 for a control call whose `X-Test-Id` is present but blank. */
+function writeBlankTestId(res: http.ServerResponse): true {
+  res.writeHead(400, { "Content-Type": "application/json" });
+  res.end(JSON.stringify({ error: "Invalid 'X-Test-Id': header is present but empty" }));
+  return true;
+}
+
+/** The chaos config in effect for one testId: its override, else the baseline. */
+function effectiveChaos(defaults: HandlerDefaults, scopeId: string): ChaosConfig {
+  const scoped = defaults.chaosByTestId?.get(scopeId);
+  if (scoped) return scoped;
+  const current = defaults.chaos;
+  if (!current) return {};
+  return isChaosScope(current) ? (current.base ?? {}) : current;
+}
+
+/**
  * Handle requests under `/__aimock/`. Returns `true` if the request was
  * handled, `false` if the path doesn't match the control prefix.
  */
@@ -338,6 +473,7 @@ async function handleControlAPI(
   req: http.IncomingMessage,
   res: http.ServerResponse,
   pathname: string,
+  searchParams: URLSearchParams,
   fixtures: Fixture[],
   journal: Journal,
   videoStates: VideoStateMap,
@@ -359,17 +495,216 @@ async function handleControlAPI(
     return true;
   }
 
-  // GET /__aimock/journal
+  // GET /__aimock/journal — optionally filtered/paginated.
+  // No query params → full array (historical behaviour, unchanged).
+  // Supported params: limit (int >= 0), offset (int >= 0, default 0),
+  // path (SUBSTRING), method (exact, case-insensitive), status (int),
+  // service (EXACT), testId (resolved exactly as the server resolves it).
+  // Anything else is a 400: silently ignoring an unknown param would let
+  // `?statusCode=404` return the whole journal and pass a caller's assertion
+  // against traffic it never meant to select.
   if (subPath === "/journal" && req.method === "GET") {
-    res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify(journal.getAll()));
+    const bad = (message: string): true => {
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: message }));
+      return true;
+    };
+    for (const key of searchParams.keys()) {
+      if (!JOURNAL_PARAMS.has(key)) {
+        return bad(
+          `Unknown query parameter: '${key}'. Supported: ${[...JOURNAL_PARAMS].join(", ")}`,
+        );
+      }
+    }
+    const parseNonNegativeInt = (name: string, fallback: number): number | null => {
+      const raw = searchParams.get(name);
+      if (raw === null) return fallback;
+      if (!/^\d+$/.test(raw.trim())) return null;
+      return Number(raw);
+    };
+    const limit = parseNonNegativeInt("limit", -1);
+    const offset = parseNonNegativeInt("offset", 0);
+    if (limit === null) return bad("Invalid 'limit': must be an integer >= 0");
+    if (offset === null) return bad("Invalid 'offset': must be an integer >= 0");
+    let statusFilter: number | undefined;
+    const statusRaw = searchParams.get("status");
+    if (statusRaw !== null) {
+      if (!/^\d+$/.test(statusRaw.trim())) return bad("Invalid 'status': must be an integer");
+      statusFilter = Number(statusRaw);
+    }
+    const pathFilter = searchParams.get("path");
+    const methodFilter = searchParams.get("method");
+    const serviceFilter = searchParams.get("service");
+    const testIdFilter = searchParams.get("testId");
+
+    let entries: JournalEntry[] = journal.getAll();
+    if (methodFilter !== null) {
+      const want = methodFilter.toUpperCase();
+      entries = entries.filter((e) => e.method.toUpperCase() === want);
+    }
+    if (pathFilter !== null) {
+      entries = entries.filter((e) => e.path.includes(pathFilter));
+    }
+    if (statusFilter !== undefined) {
+      entries = entries.filter((e) => e.response.status === statusFilter);
+    }
+    if (serviceFilter !== null) {
+      entries = entries.filter((e) => e.service === serviceFilter);
+    }
+    if (testIdFilter !== null) {
+      entries = entries.filter((e) => journalEntryTestId(e) === testIdFilter);
+    }
+    // Count AFTER filtering but BEFORE pagination, so a paging caller can tell
+    // when it is done. It ships as a header because the body is a bare array
+    // for back-compat and can never grow an envelope.
+    const total = entries.length;
+    if (offset > 0) entries = entries.slice(offset);
+    if (limit >= 0) entries = entries.slice(0, limit);
+
+    res.writeHead(200, {
+      "Content-Type": "application/json",
+      "X-Total-Count": String(total),
+    });
+    res.end(JSON.stringify(entries));
     return true;
   }
 
-  // GET /__aimock/fixtures — inspect current fixture count
+  // GET /__aimock/fixtures — inspect current fixture count. With
+  // ?include=fixtures, also dump each fixture's (redacted) match criteria
+  // and response kind so harnesses can assert what would match.
   if (subPath === "/fixtures" && req.method === "GET") {
+    // Unknown params 400 for the same reason `/journal` does: a typo like
+    // `?incluide=fixtures` must never quietly return the count-only body and
+    // pass an assertion against a dump the caller never received.
+    for (const key of searchParams.keys()) {
+      if (!FIXTURES_PARAMS.has(key)) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify({
+            error: `Unknown query parameter: '${key}'. Supported: ${[...FIXTURES_PARAMS].join(", ")}`,
+          }),
+        );
+        return true;
+      }
+    }
+    const include = searchParams.get("include");
+    if (include === null) {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ count: fixtures.length }));
+      return true;
+    }
+    if (include !== "fixtures") {
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "Invalid 'include': expected 'fixtures'" }));
+      return true;
+    }
     res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ count: fixtures.length }));
+    res.end(
+      JSON.stringify({
+        count: fixtures.length,
+        fixtures: fixtures.map((fixture, index) => ({
+          index,
+          match: redactForInspection(fixture.match),
+          // NOT `response` — that name already means the response ITSELF on
+          // `Fixture`, and this is only a one-word kind label.
+          responseKind: fixtureResponseKind(fixture.response),
+          ...(fixture.latency !== undefined ? { latency: fixture.latency } : {}),
+          ...(fixture.chaos !== undefined ? { chaos: fixture.chaos } : {}),
+        })),
+      }),
+    );
+    return true;
+  }
+
+  // GET /__aimock/chaos — read the chaos config in effect for THIS caller's
+  // testId: its own override if one is installed, else the server-wide
+  // baseline (the construction config, or an untagged override).
+  if (subPath === "/chaos" && req.method === "GET") {
+    const scopeId = chaosScopeId(req);
+    if (scopeId === null) return writeBlankTestId(res);
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ chaos: effectiveChaos(defaults, scopeId) }));
+    return true;
+  }
+
+  // DELETE /__aimock/chaos — drop the override for this caller's testId (or the
+  // server-wide baseline when untagged), falling back to what it shadowed.
+  // `POST {}` means "explicitly no chaos"; this means "forget I said anything".
+  //
+  // SYMMETRIC with POST: an untagged DELETE drops the untagged baseline ONLY.
+  // Dropping every per-testId override too would let one test's cleanup revoke
+  // a concurrently-running test's opt-out. `POST /__aimock/reset` is the one
+  // route that clears everything.
+  if (subPath === "/chaos" && req.method === "DELETE") {
+    const scopeId = chaosScopeId(req);
+    if (scopeId === null) return writeBlankTestId(res);
+    defaults.chaosByTestId?.delete(scopeId);
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ chaos: effectiveChaos(defaults, scopeId) }));
+    return true;
+  }
+
+  // POST /__aimock/chaos — replace the server chaos config at runtime (no
+  // restart). Accepts any subset of dropRate/malformedRate/disconnectRate as
+  // numbers in [0, 1]; `{}` means explicitly no chaos. Unknown fields and
+  // out-of-range values are rejected with 400.
+  //
+  // SCOPED to the caller's testId (`X-Test-Id`, else `?testId=`), like every
+  // other mutable axis in the server (fixture match-counts, video job maps): an
+  // override installed by test `t1` applies only to traffic resolving to `t1`.
+  // An untagged call sets the server-wide baseline. `POST /__aimock/reset`
+  // drops all of it, restoring the chaos config the server was STARTED with.
+  if (subPath === "/chaos" && req.method === "POST") {
+    const scopeId = chaosScopeId(req);
+    if (scopeId === null) return writeBlankTestId(res);
+    let raw: string;
+    try {
+      raw = await readBody(req);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      defaults.logger.error(`POST /__aimock/chaos: failed to read body: ${msg}`);
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: `Failed to read request body: ${msg}` }));
+      return true;
+    }
+
+    let parsed: Record<string, unknown>;
+    try {
+      parsed = JSON.parse(raw) as Record<string, unknown>;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      defaults.logger.error(`POST /__aimock/chaos: invalid JSON: ${msg}`);
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: `Invalid JSON: ${msg}` }));
+      return true;
+    }
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "Invalid body: expected a JSON object" }));
+      return true;
+    }
+    const allowed = ["dropRate", "malformedRate", "disconnectRate"] as const;
+    for (const key of Object.keys(parsed)) {
+      if (!(allowed as readonly string[]).includes(key)) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: `Unknown chaos field: '${key}'` }));
+        return true;
+      }
+    }
+    const next: ChaosConfig = {};
+    for (const key of allowed) {
+      const value = parsed[key];
+      if (value === undefined) continue;
+      if (typeof value !== "number" || Number.isNaN(value) || value < 0 || value > 1) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: `Invalid '${key}': must be a number between 0 and 1` }));
+        return true;
+      }
+      next[key] = value;
+    }
+    defaults.chaosByTestId?.set(scopeId, next);
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ chaos: effectiveChaos(defaults, scopeId) }));
     return true;
   }
 
@@ -848,7 +1183,7 @@ async function handleCompletions(
   //                            beforeWriteResponse hook (passed only when the
   //                            action is malformed, so the hook doesn't need
   //                            to re-check the action).
-  const chaosAction = evaluateChaos(fixture, defaults.chaos, req.headers, defaults.logger);
+  const chaosAction = evaluateChaos(fixture, defaults.chaos, req.headers, defaults.logger, req.url);
   const chaosContext = { method, path, headers: flatHeaders, body };
 
   if (chaosAction === "drop" || chaosAction === "disconnect") {
@@ -1424,13 +1759,39 @@ export async function createServerWithResolvedAuth(
   const logger = new Logger(options?.logLevel ?? "silent");
   const registry = options?.metrics ? createMetricsRegistry() : undefined;
   const serverOptions = options ?? {};
+  // Runtime-mutable server chaos config. Reads fall through to the construction
+  // options until POST /__aimock/chaos installs an override, which is scoped to
+  // the caller's testId. The untagged baseline lives in the SAME map under
+  // DEFAULT_TEST_ID, so "drop the baseline" and "drop one test's override" are
+  // one operation and neither can accidentally take the other's overrides with
+  // it; only assigning `undefined` (a full reset) clears the map.
+  const chaosByTestId = new Map<string, ChaosConfig>();
   const defaults = {
     latency: serverOptions.latency ?? 0,
     chunkSize: Math.max(1, serverOptions.chunkSize ?? DEFAULT_CHUNK_SIZE),
     replaySpeed: serverOptions.replaySpeed ?? 1.0,
     logger,
-    get chaos() {
-      return serverOptions.chaos;
+    chaosByTestId,
+    // Handlers get a SCOPE, not a flat config: chaos.ts picks the override for
+    // the request's X-Test-Id and falls back to the baseline.
+    get chaos(): ChaosDefaults {
+      return {
+        base: chaosByTestId.get(DEFAULT_TEST_ID) ?? serverOptions.chaos,
+        byTestId: chaosByTestId,
+      };
+    },
+    // Assigning `undefined` drops EVERY runtime override instead of latching an
+    // empty one, so the construction-time chaos config is always recoverable
+    // (that is what `POST /__aimock/reset` does). `POST {}` still installs a
+    // real, empty override: "explicitly no chaos".
+    set chaos(value: ChaosDefaults | undefined) {
+      if (value === undefined) {
+        chaosByTestId.clear();
+        return;
+      }
+      const base = isChaosScope(value) ? value.base : value;
+      if (base === undefined) chaosByTestId.delete(DEFAULT_TEST_ID);
+      else chaosByTestId.set(DEFAULT_TEST_ID, base);
     },
     registry,
     get record() {
@@ -1675,6 +2036,7 @@ export async function createServerWithResolvedAuth(
         req,
         res,
         pathname,
+        parsedUrl.searchParams,
         fixtures,
         journal,
         videoStates,
@@ -3170,7 +3532,13 @@ export async function createServerWithResolvedAuth(
       try {
         falBody = req.method === "POST" || req.method === "PUT" ? await readBody(req) : "";
         const raw = falBody;
-        const chaosAction = evaluateChaos(null, defaults.chaos, req.headers, defaults.logger);
+        const chaosAction = evaluateChaos(
+          null,
+          defaults.chaos,
+          req.headers,
+          defaults.logger,
+          req.url,
+        );
         if (chaosAction) {
           applyChaosAction(
             chaosAction,
@@ -3238,7 +3606,13 @@ export async function createServerWithResolvedAuth(
       try {
         const raw =
           req.method === "POST" || req.method === "PUT" ? (falBody ?? (await readBody(req))) : "{}";
-        const chaosAction = evaluateChaos(null, defaults.chaos, req.headers, defaults.logger);
+        const chaosAction = evaluateChaos(
+          null,
+          defaults.chaos,
+          req.headers,
+          defaults.logger,
+          req.url,
+        );
         if (chaosAction) {
           applyChaosAction(
             chaosAction,

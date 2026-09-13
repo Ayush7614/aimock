@@ -489,6 +489,7 @@ export async function handleBedrock(
       fixture,
       defaults.chaos,
       req.headers,
+      req.url,
       journal,
       {
         method: req.method ?? "POST",
@@ -1295,6 +1296,7 @@ export async function handleBedrockStream(
       fixture,
       defaults.chaos,
       req.headers,
+      req.url,
       journal,
       {
         method: req.method ?? "POST",

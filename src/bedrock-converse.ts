@@ -755,6 +755,7 @@ export async function handleConverse(
       fixture,
       defaults.chaos,
       req.headers,
+      req.url,
       journal,
       {
         method: req.method ?? "POST",
@@ -1072,6 +1073,7 @@ export async function handleConverseStream(
       fixture,
       defaults.chaos,
       req.headers,
+      req.url,
       journal,
       {
         method: req.method ?? "POST",

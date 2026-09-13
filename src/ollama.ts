@@ -716,6 +716,7 @@ export async function handleOllama(
       fixture,
       defaults.chaos,
       req.headers,
+      req.url,
       journal,
       {
         method: req.method ?? "POST",
@@ -1106,6 +1107,7 @@ export async function handleOllamaGenerate(
       fixture,
       defaults.chaos,
       req.headers,
+      req.url,
       journal,
       {
         method: req.method ?? "POST",
@@ -1445,6 +1447,7 @@ export async function handleOllamaEmbeddings(
       fixture,
       defaults.chaos,
       req.headers,
+      req.url,
       journal,
       {
         method: req.method ?? "POST",
