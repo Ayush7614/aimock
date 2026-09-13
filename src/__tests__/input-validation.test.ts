@@ -89,10 +89,19 @@ describe("validateEmbeddingDimensions", () => {
     expect(validateEmbeddingDimensions(Number.MAX_SAFE_INTEGER)).toBeNull();
   });
 
-  it("pins the cap to the array-length bound, not an OpenAI model width", () => {
+  it("pins the cap to a width the mock can actually serve", () => {
     // Literal on purpose: referencing the constant alone lets the cap drift.
-    expect(MAX_EMBEDDING_DIMENSIONS).toBe(4294967295);
-    expect(() => new Array(MAX_EMBEDDING_DIMENSIONS + 1)).toThrow(RangeError);
+    //
+    // The cap is a serialization budget, not an allocation bound. Measured on
+    // this tree, a response body costs 19.58 bytes per dimension (4096 ->
+    // 80,456 B; 1,000,000 -> 19,583,034 B), so 100,000 dimensions is a ~1.96 MB
+    // body, built in 7 ms at 83 MB RSS under a 1 GB heap. That leaves >12x the
+    // widest width in circulation (3072 for text-embedding-3-large, 4096/8192
+    // on the OpenAI-compatible servers this endpoint also serves) while keeping
+    // every accepted request serviceable.
+    expect(MAX_EMBEDDING_DIMENSIONS).toBe(100_000);
+    // 20 bytes/dimension, rounded up from the 19.58 measured above.
+    expect(MAX_EMBEDDING_DIMENSIONS * 20).toBeLessThan(2 * 1024 * 1024);
   });
 });
 
@@ -179,7 +188,7 @@ describe("POST /v1/embeddings strict validation", () => {
     expect(res.status).toBe(400);
   });
 
-  it("returns 400 for invalid dimensions (was RangeError/OOM)", async () => {
+  it("returns 400 for invalid dimensions (was RangeError, or a fatal OOM)", async () => {
     instance = await createServer([]);
     for (const dimensions of [0, -1, 1.5, "1536", 4294967296]) {
       const res = await post(`${instance.url}/v1/embeddings`, {
@@ -207,6 +216,32 @@ describe("POST /v1/embeddings strict validation", () => {
         dimensions,
       );
     }
+  });
+
+  it("serves a request at the cap and stays alive afterwards", async () => {
+    // Regression: the cap used to be 2**32-1, the ECMAScript array-length
+    // bound. `new Array(n)` accepts that, but the handler fills and serializes
+    // the array, so one request at the old cap aborted the process with
+    // "FATAL ERROR: CALL_AND_RETRY_LAST Allocation failed - JavaScript heap out
+    // of memory" before writing any response. A cap the server cannot serve is
+    // not a cap; the boundary value must round-trip.
+    instance = await createServer([]);
+    const res = await post(`${instance.url}/v1/embeddings`, {
+      model: "text-embedding-3-small",
+      input: "hi",
+      dimensions: MAX_EMBEDDING_DIMENSIONS,
+    });
+    expect(res.status).toBe(200);
+    expect((res.json as { data: { embedding: number[] }[] }).data[0].embedding).toHaveLength(
+      MAX_EMBEDDING_DIMENSIONS,
+    );
+    // Still serving after the largest request it accepts.
+    const after = await post(`${instance.url}/v1/embeddings`, {
+      model: "text-embedding-3-small",
+      input: "hi",
+      dimensions: 8,
+    });
+    expect(after.status).toBe(200);
   });
 
   it("treats dimensions: null as unset", async () => {

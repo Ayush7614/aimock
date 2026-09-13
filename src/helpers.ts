@@ -1358,13 +1358,26 @@ const DEFAULT_EMBEDDING_DIMENSIONS = 1536;
 
 /**
  * Maximum embedding dimensions accepted by POST /v1/embeddings.
- * Deliberately not a model width: /v1/embeddings also serves Azure and every
- * OpenAI-compatible server routed through COMPAT_SUFFIXES, where 4096-dimension
- * models are ordinary. This is the ECMAScript array-length bound — an Array
- * `length` must be a uint32 (ECMA-262, Array Exotic Objects) — which is exactly
- * where `new Array(n)` throws RangeError.
+ *
+ * A serialization budget, not an allocation bound. The ECMAScript array-length
+ * bound (2**32 - 1) is where `new Array(n)` throws RangeError, but the handler
+ * does not stop at allocating: `generateDeterministicEmbedding` fills the array
+ * and the response is JSON-serialized, so at that bound a single request aborts
+ * the process ("FATAL ERROR: CALL_AND_RETRY_LAST Allocation failed - JavaScript
+ * heap out of memory") before any response is written — taking every other test
+ * sharing the server with it. A cap the server cannot serve is not a cap.
+ *
+ * Derivation, measured on this tree: a response body costs 19.58 bytes per
+ * dimension (4096 -> 80,456 B; 100,000 -> 1,958,539 B; 1,000,000 ->
+ * 19,583,034 B). At 100,000 the body is ~1.96 MB, built in 7 ms at 83 MB RSS
+ * under a 1 GB heap — comfortably serviceable.
+ *
+ * Deliberately still not a model width: /v1/embeddings also serves Azure and
+ * every OpenAI-compatible server routed through COMPAT_SUFFIXES, where
+ * 4096-dimension models are ordinary. 100,000 leaves >12x headroom over the
+ * widest width in circulation while keeping every accepted request answerable.
  */
-export const MAX_EMBEDDING_DIMENSIONS = 2 ** 32 - 1;
+export const MAX_EMBEDDING_DIMENSIONS = 100_000;
 
 /**
  * Validate an embeddings `dimensions` parameter.

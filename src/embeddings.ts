@@ -308,8 +308,10 @@ export async function handleEmbeddings(
     `No embedding fixture matched for "${combinedInput.slice(0, 80)}" — returning deterministic fallback`,
   );
   // Validate dimensions here, on the only path that reads it: a bad value
-  // throws RangeError in `new Array()` below. The fixture-replay, chaos, strict
-  // and record/proxy branches above never touch it, so they must not be gated.
+  // either throws RangeError in `new Array()` below or, past the serialization
+  // budget MAX_EMBEDDING_DIMENSIONS encodes, kills the process outright. The
+  // fixture-replay, chaos, strict and record/proxy branches above never touch
+  // it, so they must not be gated.
   const dimensions = validateEmbeddingDimensions(embeddingReq.dimensions);
   if (dimensions === null) {
     journal.add({
