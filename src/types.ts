@@ -539,6 +539,35 @@ export interface ChaosConfig {
   disconnectRate?: number;
 }
 
+/**
+ * Server-level chaos as the handlers see it: a baseline plus per-`X-Test-Id`
+ * overrides installed at runtime via `POST /__aimock/chaos`.
+ *
+ * Chaos is the LAST link in the precedence chain (request headers > fixture >
+ * server), and this makes that last link test-scoped, the way every other
+ * mutable axis in aimock is (fixture match-counts, video job maps). Under the
+ * shipped topology — one shared `aimock` process serving a parallel suite — a
+ * purely global switch would mean one test's chaos failing every other test.
+ *
+ * Scoping is by the `X-Test-Id` HEADER only, on BOTH sides: the traffic being
+ * evaluated and the control request that installed the override. A client that
+ * cannot set headers therefore reads and writes the same `base` on both sides,
+ * so the two can never silently disagree.
+ */
+export interface ChaosScope {
+  /** Server-wide baseline: the construction config, or the untagged override. */
+  base?: ChaosConfig;
+  /** Per-testId overrides, consulted before `base`. */
+  byTestId?: ReadonlyMap<string, ChaosConfig>;
+}
+
+/**
+ * What `evaluateChaos` / `applyChaos` accept as server defaults. A plain
+ * `ChaosConfig` still works (it is what external callers pass); the server
+ * itself passes a `ChaosScope`.
+ */
+export type ChaosDefaults = ChaosConfig | ChaosScope;
+
 export type ChaosAction = "drop" | "malformed" | "disconnect";
 
 // Response factory — allows dynamic fixture responses based on the incoming request
@@ -1173,7 +1202,16 @@ export interface HandlerDefaults {
   chunkSize: number;
   replaySpeed: number;
   logger: Logger;
-  chaos?: ChaosConfig;
+  /**
+   * Reads resolve to a `ChaosScope` on a real server (baseline + per-testId
+   * overrides); assigning `undefined` drops every runtime override.
+   */
+  chaos?: ChaosDefaults;
+  /**
+   * Live per-testId chaos overrides, owned by the server instance so the
+   * control API can install one without reaching through the getter.
+   */
+  chaosByTestId?: Map<string, ChaosConfig>;
   registry?: MetricsRegistry;
   record?: RecordConfig;
   strict?: boolean;

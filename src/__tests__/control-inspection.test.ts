@@ -10,8 +10,13 @@ import { createServer, type ServerInstance } from "../server.js";
 function request(
   url: string,
   method: string,
-  opts?: { body?: unknown; headers?: Record<string, string> },
-): Promise<{ status: number; body: string; json: unknown }> {
+  opts?: { body?: unknown; headers?: Record<string, string | string[]> },
+): Promise<{
+  status: number;
+  body: string;
+  json: unknown;
+  headers: http.IncomingHttpHeaders;
+}> {
   return new Promise((resolve, reject) => {
     const parsed = new URL(url);
     const data = opts?.body === undefined ? undefined : JSON.stringify(opts.body);
@@ -39,7 +44,12 @@ function request(
           } catch {
             json = null;
           }
-          resolve({ status: res.statusCode ?? 0, body: text, json });
+          resolve({
+            status: res.statusCode ?? 0,
+            body: text,
+            json,
+            headers: res.headers,
+          });
         });
       },
     );
@@ -124,9 +134,16 @@ describe("GET /__aimock/journal filters", () => {
     expect(byMethodGet.status).toBe(200);
     expect(byMethodGet.json).toEqual([]);
 
+    // `path` is a SUBSTRING match — an exact comparison would find nothing.
+    const byPathPart = await request(`${instance!.url}/__aimock/journal?path=chat`, "GET");
+    expect((byPathPart.json as unknown[]).length).toBe(2);
+
     const byService = await request(`${instance!.url}/__aimock/journal?service=search`, "GET");
     expect(byService.status).toBe(200);
     expect((byService.json as unknown[]).length).toBe(1);
+    // ...while `service` is EXACT — a substring match would find "search".
+    const byServicePart = await request(`${instance!.url}/__aimock/journal?service=sear`, "GET");
+    expect(byServicePart.json).toEqual([]);
 
     const byStatus = await request(`${instance!.url}/__aimock/journal?status=200`, "GET");
     expect(byStatus.status).toBe(200);
@@ -196,15 +213,15 @@ describe("GET /__aimock/fixtures dump", () => {
     expect(res.status).toBe(200);
     const body = res.json as {
       count: number;
-      fixtures: { index: number; match: Record<string, unknown>; response: string }[];
+      fixtures: { index: number; match: Record<string, unknown>; responseKind: string }[];
     };
     expect(body.count).toBe(2);
     expect(body.fixtures.length).toBe(2);
-    expect(body.fixtures[0]).toMatchObject({ index: 0, response: "content" });
+    expect(body.fixtures[0]).toMatchObject({ index: 0, responseKind: "text" });
     expect(body.fixtures[0].match).toEqual({ userMessage: "hello" });
     // RegExp stringified, predicate redacted — both JSON-safe
     expect(body.fixtures[1].match).toEqual({ userMessage: "/bye.*/i", predicate: "[function]" });
-    expect(body.fixtures[1].response).toBe("error");
+    expect(body.fixtures[1].responseKind).toBe("error");
     // Round-trips through JSON (no functions survive)
     expect(() => JSON.stringify(body)).not.toThrow();
   });
@@ -217,10 +234,10 @@ describe("GET /__aimock/fixtures dump", () => {
 });
 
 // ---------------------------------------------------------------------------
-// GET/PUT /__aimock/chaos runtime control
+// GET/POST/DELETE /__aimock/chaos runtime control
 // ---------------------------------------------------------------------------
 
-describe("GET/PUT /__aimock/chaos", () => {
+describe("GET/POST/DELETE /__aimock/chaos", () => {
   it("reads the construction chaos config", async () => {
     instance = await createServer([], { chaos: { dropRate: 0 } });
     const res = await request(`${instance.url}/__aimock/chaos`, "GET");
@@ -239,7 +256,7 @@ describe("GET/PUT /__aimock/chaos", () => {
     instance = await createServer([
       { match: { userMessage: "hello" }, response: { content: "Hi" } },
     ]);
-    const put = await request(`${instance.url}/__aimock/chaos`, "PUT", {
+    const put = await request(`${instance.url}/__aimock/chaos`, "POST", {
       body: { dropRate: 1 },
     });
     expect(put.status).toBe(200);
@@ -251,7 +268,7 @@ describe("GET/PUT /__aimock/chaos", () => {
     expect(dropped.status).toBe(500);
 
     // Clearing restores normal traffic
-    const cleared = await request(`${instance.url}/__aimock/chaos`, "PUT", { body: {} });
+    const cleared = await request(`${instance.url}/__aimock/chaos`, "POST", { body: {} });
     expect(cleared.status).toBe(200);
     expect(cleared.json).toEqual({ chaos: {} });
     const ok = await request(`${instance.url}/v1/chat/completions`, "POST", {
@@ -271,13 +288,273 @@ describe("GET/PUT /__aimock/chaos", () => {
       { dropRate: 1, bogus: true },
       [1],
       "chaos",
+      [],
     ];
     for (const body of badBodies) {
-      const res = await request(`${instance.url}/__aimock/chaos`, "PUT", { body });
+      const res = await request(`${instance.url}/__aimock/chaos`, "POST", { body });
       expect(res.status).toBe(400);
     }
     // Nothing was applied
     const current = await request(`${instance.url}/__aimock/chaos`, "GET");
     expect(current.json).toEqual({ chaos: {} });
+  });
+
+  // Reset is the isolation barrier a parallel harness leans on; chaos escaping
+  // it poisons later tests with 500s that look like application bugs.
+  it("POST /__aimock/reset clears the runtime chaos override", async () => {
+    instance = await createServer([
+      { match: { userMessage: "hello" }, response: { content: "Hi" } },
+    ]);
+    const set = await request(`${instance.url}/__aimock/chaos`, "POST", { body: { dropRate: 1 } });
+    expect(set.status).toBe(200);
+    expect(
+      (await request(`${instance.url}/v1/chat/completions`, "POST", { body: chatRequest("hello") }))
+        .status,
+    ).toBe(500);
+
+    expect((await request(`${instance.url}/__aimock/reset`, "POST")).status).toBe(200);
+    expect((await request(`${instance.url}/__aimock/chaos`, "GET")).json).toEqual({ chaos: {} });
+
+    await request(`${instance.url}/__aimock/fixtures`, "POST", {
+      body: { fixtures: [{ match: { userMessage: "hello" }, response: { content: "Hi" } }] },
+    });
+    const ok = await request(`${instance.url}/v1/chat/completions`, "POST", {
+      body: chatRequest("hello"),
+    });
+    expect(ok.status).toBe(200);
+  });
+
+  // The override must not latch: a server started with --chaos-drop has to be
+  // recoverable after any test does PUT {}.
+  it("does not permanently destroy the construction chaos config", async () => {
+    instance = await createServer([], { chaos: { dropRate: 1 } });
+    expect((await request(`${instance.url}/__aimock/chaos`, "POST", { body: {} })).json).toEqual({
+      chaos: {},
+    });
+    await request(`${instance.url}/__aimock/reset`, "POST");
+    expect((await request(`${instance.url}/__aimock/chaos`, "GET")).json).toEqual({
+      chaos: { dropRate: 1 },
+    });
+  });
+
+  // Node tests never issue a preflight, so a browser harness is the only thing
+  // that notices a verb the control API does not advertise.
+  it("only uses verbs the CORS preflight advertises", async () => {
+    instance = await createServer([]);
+    const preflight = await request(`${instance.url}/__aimock/chaos`, "OPTIONS", {
+      headers: {
+        Origin: "http://localhost:3000",
+        "Access-Control-Request-Method": "POST",
+        "Access-Control-Request-Headers": "content-type",
+      },
+    });
+    expect(preflight.status).toBe(204);
+    const allowed = String(preflight.headers["access-control-allow-methods"])
+      .split(",")
+      .map((m) => m.trim());
+    expect(allowed).toEqual(expect.arrayContaining(["GET", "POST", "DELETE"]));
+    // PUT would be the only one in the whole control surface — and is not used.
+    expect(allowed).not.toContain("PUT");
+    expect((await request(`${instance.url}/__aimock/chaos`, "PUT", { body: {} })).status).toBe(404);
+    // The journal total is a response header, so it must be readable too.
+    expect(String(preflight.headers["access-control-expose-headers"])).toContain("X-Total-Count");
+  });
+
+  it("DELETE drops the override without waiting for a full reset", async () => {
+    instance = await createServer([], { chaos: { dropRate: 1 } });
+    await request(`${instance.url}/__aimock/chaos`, "POST", { body: {} });
+    expect((await request(`${instance.url}/__aimock/chaos`, "GET")).json).toEqual({ chaos: {} });
+    const del = await request(`${instance.url}/__aimock/chaos`, "DELETE");
+    expect(del.status).toBe(200);
+    expect(del.json).toEqual({ chaos: { dropRate: 1 } });
+  });
+
+  // Chaos is per-testId like every other mutable axis: one test turning it on
+  // must not fail the tests running beside it on a shared server.
+  it("scopes an override to the caller's testId", async () => {
+    instance = await createServer([
+      { match: { userMessage: "hello" }, response: { content: "Hi" } },
+    ]);
+    const put = await request(`${instance.url}/__aimock/chaos`, "POST", {
+      body: { dropRate: 1 },
+      headers: { "X-Test-Id": "t1" },
+    });
+    expect(put.json).toEqual({ chaos: { dropRate: 1 } });
+
+    // t1's traffic is chaotic...
+    const t1 = await request(`${instance.url}/v1/chat/completions`, "POST", {
+      body: chatRequest("hello"),
+      headers: { "X-Test-Id": "t1" },
+    });
+    expect(t1.status).toBe(500);
+
+    // ...while a concurrent test and untagged traffic are untouched.
+    const t2 = await request(`${instance.url}/v1/chat/completions`, "POST", {
+      body: chatRequest("hello"),
+      headers: { "X-Test-Id": "t2" },
+    });
+    expect(t2.status).toBe(200);
+    const untagged = await request(`${instance.url}/v1/chat/completions`, "POST", {
+      body: chatRequest("hello"),
+    });
+    expect(untagged.status).toBe(200);
+
+    // GET reports per-testId too.
+    const readT1 = await request(`${instance.url}/__aimock/chaos`, "GET", {
+      headers: { "X-Test-Id": "t1" },
+    });
+    expect(readT1.json).toEqual({ chaos: { dropRate: 1 } });
+    expect((await request(`${instance.url}/__aimock/chaos`, "GET")).json).toEqual({ chaos: {} });
+
+    // ...and DELETE scoped to t1 restores it.
+    await request(`${instance.url}/__aimock/chaos`, "DELETE", { headers: { "X-Test-Id": "t1" } });
+    const after = await request(`${instance.url}/v1/chat/completions`, "POST", {
+      body: chatRequest("hello"),
+      headers: { "X-Test-Id": "t1" },
+    });
+    expect(after.status).toBe(200);
+  });
+
+  it("POST /__aimock/reset clears per-testId overrides too", async () => {
+    instance = await createServer([
+      { match: { userMessage: "hello" }, response: { content: "Hi" } },
+    ]);
+    const set = await request(`${instance.url}/__aimock/chaos`, "POST", {
+      body: { dropRate: 1 },
+      headers: { "X-Test-Id": "t1" },
+    });
+    expect(set.status).toBe(200);
+    expect(
+      (
+        await request(`${instance.url}/v1/chat/completions`, "POST", {
+          body: chatRequest("hello"),
+          headers: { "X-Test-Id": "t1" },
+        })
+      ).status,
+    ).toBe(500);
+    await request(`${instance.url}/__aimock/reset`, "POST");
+    await request(`${instance.url}/__aimock/fixtures`, "POST", {
+      body: { fixtures: [{ match: { userMessage: "hello" }, response: { content: "Hi" } }] },
+    });
+    const ok = await request(`${instance.url}/v1/chat/completions`, "POST", {
+      body: chatRequest("hello"),
+      headers: { "X-Test-Id": "t1" },
+    });
+    expect(ok.status).toBe(200);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Journal: unknown params, testId resolution, pagination total
+// ---------------------------------------------------------------------------
+
+async function seedSharpTraffic(): Promise<void> {
+  instance = await createServer([{ match: { userMessage: "hello" }, response: { content: "Hi" } }]);
+  await request(`${instance.url}/search?testId=t10`, "POST", { body: { query: "mice" } });
+  await request(`${instance.url}/search`, "POST", {
+    body: { query: "cats" },
+    headers: { "X-Test-Id": "t1" },
+  });
+  await request(`${instance.url}/search?testId=t2`, "POST", { body: { query: "dogs" } });
+}
+
+describe("journal param handling", () => {
+  it("rejects unknown query parameters with 400", async () => {
+    await seedSharpTraffic();
+    for (const qs of ["pathh=/search", "statusCode=404", "test_id=t1"]) {
+      const res = await request(`${instance!.url}/__aimock/journal?${qs}`, "GET");
+      expect(res.status).toBe(400);
+      expect((res.json as { error: string }).error).toContain("Unknown query parameter");
+    }
+  });
+
+  it("resolves testId exactly, so t1 does not collide with t10", async () => {
+    await seedSharpTraffic();
+    const t1 = await request(`${instance!.url}/__aimock/journal?testId=t1`, "GET");
+    const t1Entries = t1.json as { path: string }[];
+    expect(t1Entries.length).toBe(1);
+    expect(t1Entries[0].path).toBe("/search");
+
+    // ...and a testId carried in the query string still resolves.
+    const t2 = await request(`${instance!.url}/__aimock/journal?testId=t2`, "GET");
+    const t2Entries = t2.json as { path: string }[];
+    expect(t2Entries.length).toBe(1);
+    expect(t2Entries[0].path).toBe("/search?testId=t2");
+  });
+
+  it("reports the pre-pagination match total in X-Total-Count", async () => {
+    await seedSharpTraffic();
+    const all = await request(`${instance!.url}/__aimock/journal`, "GET");
+    expect(all.headers["x-total-count"]).toBe("3");
+    const paged = await request(`${instance!.url}/__aimock/journal?limit=1&offset=1`, "GET");
+    expect((paged.json as unknown[]).length).toBe(1);
+    expect(paged.headers["x-total-count"]).toBe("3");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Fixture dump: response-kind discrimination
+// ---------------------------------------------------------------------------
+
+describe("fixture dump responseKind", () => {
+  it("discriminates by response shape, not by key order", async () => {
+    instance = await createServer([
+      // Recorded shape: ResponseOverrides fields come FIRST in the literal, so
+      // Object.keys()[0] would report "id".
+      {
+        match: { userMessage: "a", systemMessage: ["alpha", "beta"] },
+        response: { id: "chatcmpl-1", model: "gpt-4", usage: {}, content: "Hi" },
+        latency: 25,
+        chaos: { dropRate: 0.5 },
+      },
+      { match: { userMessage: "b" }, response: { status: 400, error: { message: "nope" } } },
+      // ORDERING CONTRACT: audio wins over the content/toolCalls guards.
+      {
+        match: { userMessage: "c" },
+        response: { content: "spoken", toolCalls: [], audio: "AAAA", format: "mp3" },
+      },
+      { match: { userMessage: "d" }, response: { embedding: [0.1, 0.2] } },
+      { match: { userMessage: "e" }, response: { image: { b64Json: "AAAA" } } },
+      { match: { userMessage: "f" }, response: { json: { ok: true } } },
+      {
+        match: { userMessage: "g" },
+        response: { video: { id: "v1", status: "completed", url: "https://x/y.mp4" } },
+      },
+      { match: { userMessage: "h" }, response: { transcription: { text: "hi" } } },
+      { match: { userMessage: "i" }, response: { toolCalls: [{ name: "t", arguments: "{}" }] } },
+      {
+        match: { userMessage: "j" },
+        response: { content: "both", toolCalls: [{ name: "t", arguments: "{}" }] },
+      },
+      { match: { userMessage: "k" }, response: () => ({ content: "from a factory" }) },
+    ]);
+    const res = await request(`${instance.url}/__aimock/fixtures?include=fixtures`, "GET");
+    expect(res.status).toBe(200);
+    const body = res.json as { fixtures: Record<string, unknown>[] };
+    expect(body.fixtures.map((f) => f.responseKind)).toEqual([
+      "text",
+      "error",
+      "audio",
+      "embedding",
+      "image",
+      "json",
+      "video",
+      "transcription",
+      "toolCalls",
+      "contentWithToolCalls",
+      "factory",
+    ]);
+    // The kind label lives under `responseKind`; `response` means the response
+    // ITSELF on Fixture and must not name a kind string.
+    expect(body.fixtures[0]).not.toHaveProperty("response");
+    // Per-fixture latency/chaos still ride along.
+    expect(body.fixtures[0].latency).toBe(25);
+    expect(body.fixtures[0].chaos).toEqual({ dropRate: 0.5 });
+    expect(body.fixtures[1]).not.toHaveProperty("latency");
+    // Array-valued match criteria survive redaction as arrays.
+    expect(body.fixtures[0].match).toEqual({
+      userMessage: "a",
+      systemMessage: ["alpha", "beta"],
+    });
   });
 });
