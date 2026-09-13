@@ -87,6 +87,11 @@
             unmatched queries return an empty <code>results</code> array
           </li>
           <li>
+            Under strict mode (<code>--strict</code>, or <code>X-AIMock-Strict: true</code> on the
+            request), an unmatched query returns <code>503 no_fixture_match</code> instead of an
+            empty array
+          </li>
+          <li>
             An array <code>query</code> is joined with spaces for matching, and the response echoes
             the raw <code>query</code> value back unchanged
           </li>

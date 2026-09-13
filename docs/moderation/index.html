@@ -88,6 +88,11 @@
             category (and category score) set to <code>false</code> / <code>0</code>
           </li>
           <li>
+            Under strict mode (<code>--strict</code>, or <code>X-AIMock-Strict: true</code> on the
+            request), an unmatched input returns <code>503 no_fixture_match</code> instead of the
+            unflagged default
+          </li>
+          <li>
             An array <code>input</code> is joined with spaces for matching, and multimodal
             <code>text</code> parts contribute their text
           </li>
