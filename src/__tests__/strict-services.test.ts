@@ -33,6 +33,12 @@ async function postJson(
   return { status: res.status, json, message: json?.error?.message, code: json?.error?.code };
 }
 
+/** The journal entry for the last request to `path`. */
+function lastEntry(path: string) {
+  const entries = mock!.journal.getAll().filter((e) => e.path === path);
+  return entries[entries.length - 1];
+}
+
 const STRICT = { "X-AIMock-Strict": "true" };
 const NOT_STRICT = { "X-AIMock-Strict": "false" };
 
@@ -61,6 +67,7 @@ describe("POST /v1/moderations strict mode", () => {
     expect(status).toBe(503);
     expect(message).toBe("Strict mode: no fixture matched");
     expect(code).toBe("no_fixture_match");
+    expect(lastEntry("/v1/moderations").response.strictOverride).toBe(true);
   });
 
   test("miss on a strict server returns 503", async () => {
@@ -79,6 +86,7 @@ describe("POST /v1/moderations strict mode", () => {
       body: JSON.stringify({ input: "hello" }),
     });
     expect(res.status).toBe(200);
+    expect(lastEntry("/v1/moderations").response.strictOverride).toBe(false);
   });
 
   test("hit under strict still returns the fixture 200", async () => {
@@ -124,6 +132,7 @@ describe("POST /search strict mode", () => {
     expect(status).toBe(503);
     expect(message).toBe("Strict mode: no fixture matched");
     expect(code).toBe("no_fixture_match");
+    expect(lastEntry("/search").response.strictOverride).toBe(true);
   });
 
   test("miss on a strict server returns 503", async () => {
@@ -138,6 +147,7 @@ describe("POST /search strict mode", () => {
     await mock.start();
     const { status } = await postJson(`${mock.url}/search`, { query: "nope" }, NOT_STRICT);
     expect(status).toBe(200);
+    expect(lastEntry("/search").response.strictOverride).toBe(false);
   });
 
   test("hit under strict still returns the fixture 200", async () => {
@@ -181,6 +191,7 @@ describe("POST /v2/rerank strict mode", () => {
     expect(status).toBe(503);
     expect(message).toBe("Strict mode: no fixture matched");
     expect(code).toBe("no_fixture_match");
+    expect(lastEntry("/v2/rerank").response.strictOverride).toBe(true);
   });
 
   test("miss on a strict server returns 503", async () => {
@@ -195,6 +206,7 @@ describe("POST /v2/rerank strict mode", () => {
     await mock.start();
     const { status } = await postJson(`${mock.url}/v2/rerank`, { query: "nope" }, NOT_STRICT);
     expect(status).toBe(200);
+    expect(lastEntry("/v2/rerank").response.strictOverride).toBe(false);
   });
 
   test("hit under strict still returns the fixture 200", async () => {

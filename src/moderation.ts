@@ -195,7 +195,11 @@ export async function handleModeration(
     headers: flattenHeaders(req.headers),
     body: null,
     service: "moderation",
-    response: { status: 200, fixture: null },
+    response: {
+      status: 200,
+      fixture: null,
+      ...strictOverrideField(defaults.strict, req.headers),
+    },
   });
 
   res.writeHead(200, { "Content-Type": "application/json" });

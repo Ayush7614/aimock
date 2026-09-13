@@ -160,7 +160,11 @@ export async function handleSearch(
     headers: flattenHeaders(req.headers),
     body: null,
     service: "search",
-    response: { status: 200, fixture: null },
+    response: {
+      status: 200,
+      fixture: null,
+      ...strictOverrideField(defaults.strict, req.headers),
+    },
   });
 
   res.writeHead(200, { "Content-Type": "application/json" });
