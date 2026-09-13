@@ -84,6 +84,19 @@ export class A2AMock implements Mountable {
 
   // ---- Mountable interface ----
 
+  private journalRequest(req: http.IncomingMessage, pathname: string, status: number): void {
+    if (this.journal) {
+      this.journal.add({
+        method: req.method ?? "POST",
+        path: pathname,
+        headers: flattenHeaders(req.headers),
+        body: null,
+        service: "a2a",
+        response: { status, fixture: null },
+      });
+    }
+  }
+
   async handleRequest(
     req: http.IncomingMessage,
     res: http.ServerResponse,
@@ -100,6 +113,7 @@ export class A2AMock implements Mountable {
         "A2A-Version": "1.0",
       });
       res.end(JSON.stringify(card));
+      this.journalRequest(req, pathname, 200);
       return true;
     }
 
@@ -123,6 +137,7 @@ export class A2AMock implements Mountable {
             error: { code: -32700, message: "Parse error" },
           }),
         );
+        this.journalRequest(req, pathname, 200);
         return true;
       }
 
@@ -273,6 +288,16 @@ export class A2AMock implements Mountable {
           error: { code: -32000, message: "No matching pattern for message" },
         }),
       );
+      if (this.journal) {
+        this.journal.add({
+          method: "POST",
+          path: "/",
+          headers: flattenHeaders(req.headers),
+          body: null,
+          service: "a2a",
+          response: { status: res.statusCode, fixture: null },
+        });
+      }
       return;
     }
 

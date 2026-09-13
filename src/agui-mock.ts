@@ -251,6 +251,7 @@ export class AGUIMock implements Mountable {
           } else if (!res.writableEnded) {
             res.end();
           }
+          this.journalRequest(req, url.pathname, res.statusCode);
           return true;
         });
         if (!handled && !res.headersSent) {
