@@ -333,6 +333,18 @@ describe("POST /__aimock/error validation", () => {
     expect((await chatHello()).status).toBe(500);
   });
 
+  it("accepts a null body — an absent body, not a malformed one", async () => {
+    instance = await createServer(makeFixtures());
+    const queued = await httpRequest(`${instance.url}/__aimock/error`, "POST", {
+      status: 429,
+      body: null,
+    });
+    expect(queued.status).toBe(200);
+    const errRes = await chatHello();
+    expect(errRes.status).toBe(429);
+    expect(errRes.body).toContain("Injected error");
+  });
+
   it("accepts aimock's own error envelope verbatim (code: null)", async () => {
     instance = await createServer(makeFixtures());
     // `serializeErrorResponse` emits `code: null` / `param: null`, and so does

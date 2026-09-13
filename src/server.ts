@@ -517,8 +517,12 @@ async function handleControlAPI(
       return true;
     }
     const errorBody = parsed.body;
-    if (errorBody !== undefined) {
-      if (typeof errorBody !== "object" || errorBody === null || Array.isArray(errorBody)) {
+    // `body: null` is an absent body, not a malformed one — same rule as the
+    // fields below and as `status`. Rejecting it broke a call that worked
+    // (main defaulted every field) for a shape any serializer emits for an
+    // unset optional.
+    if (errorBody !== undefined && errorBody !== null) {
+      if (typeof errorBody !== "object" || Array.isArray(errorBody)) {
         res.writeHead(400, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: "Invalid 'body': must be an object" }));
         return true;

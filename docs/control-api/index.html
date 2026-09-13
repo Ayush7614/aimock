@@ -333,10 +333,11 @@
             500. A string such as <code>"500"</code> is rejected: send a number.
           </li>
           <li>
-            <code>body</code>, when present, must be an object; its <code>message</code>,
-            <code>type</code> and <code>code</code> must be strings. <code>null</code> is accepted
-            for any of them and means &ldquo;absent&rdquo;, so an error envelope captured from
-            aimock or from OpenAI (both emit <code>"code": null</code>) can be pasted back verbatim.
+            <code>body</code>, when present, must be an object &mdash; <code>null</code> means
+            absent; its <code>message</code>, <code>type</code> and <code>code</code> must be
+            strings. <code>null</code> is accepted for any of them and means &ldquo;absent&rdquo;,
+            so an error envelope captured from aimock or from OpenAI (both emit
+            <code>"code": null</code>) can be pasted back verbatim.
           </li>
         </ul>
       </main>
