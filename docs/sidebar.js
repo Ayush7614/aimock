@@ -48,6 +48,9 @@
       title: "LLM Features",
       links: [
         { label: "Embeddings", href: "/embeddings" },
+        { label: "Web Search", href: "/search" },
+        { label: "Rerank", href: "/rerank" },
+        { label: "Moderation", href: "/moderation" },
         { label: "Structured Output", href: "/structured-output" },
         { label: "Sequential Responses", href: "/sequential-responses" },
         { label: "Multi-Turn Conversations", href: "/multi-turn" },
