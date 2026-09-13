@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- **`GET /__aimock/journal` filtering and pagination.** The journal endpoint dumped the entire unbounded array with no way to narrow it. It now accepts `path` (substring), `method` (exact, case-insensitive), `status`, `service` (exact), `testId`, `limit` and `offset`. **Any other query parameter is rejected with `400`**, so a typo like `?statusCode=404` can never quietly return the whole journal and pass an assertion against traffic it did not select. `testId` is resolved per entry exactly the way the server resolves an incoming request's (`X-Test-Id` header, else `?testId=` in the recorded path), so `?testId=t1` cannot collide with `t10`. Every response carries an `X-Total-Count` header with the post-filter, pre-pagination match count — the body stays a bare array, so callers that sent no parameters see no change (#435)
+
+- **`GET /__aimock/fixtures?include=fixtures` — dump what each fixture matches on.** Returns each fixture's redacted `match` criteria (regexps stringified, predicate functions as `"[function]"`) plus a one-word `responseKind` discriminated by the same `is*Response` guards the request handlers use. Response bodies are never serialized. Bare `GET /__aimock/fixtures` still returns `{ count }` (#435)
+
+- **`GET` / `POST` / `DELETE /__aimock/chaos` — read, set and clear chaos at runtime**, no restart. `POST` accepts any subset of `dropRate` / `malformedRate` / `disconnectRate` in `[0, 1]`; unknown fields and out-of-range values are `400`. **Overrides are scoped to the caller's `X-Test-Id`**, the way fixture match-counts and video job state already are: chaos installed by test `t1` applies only to traffic carrying `X-Test-Id: t1`, so one test cannot fail the tests running beside it on the shared `aimock` process that a parallel suite points at. An untagged call sets the server-wide baseline. Scoping is by header on both sides — the control call and the traffic it affects — so the two can never resolve to different scopes. `DELETE` drops one override; `POST /__aimock/reset` drops them all, restoring the chaos config the server was started with, so a leaked setting can never survive the isolation barrier and a `--chaos-drop` baseline is always recoverable (#435)
+
 ### Fixed
 
 - **An injected error status is validated once, for all three doors that queue one, and the bounds are measured (#434).** A queued status lands on `res.writeHead(status)` for the next matching request, where Node accepts 100-999 and throws outside it — so `99`, `0`, `1000` or `99.5` threw inside the response path, the injected error was LOST, and the caller saw a generic `500` that looked like a bug in their own client; a 1xx status is accepted by Node but cannot terminate a response, so the request HUNG until the client timed out. `POST /__aimock/error`, `LLMock.nextRequestError()` (the form the docs use, which never touches the control API) and a fixture's `response.status` now share one predicate: **an integer from 200 to 999**. The control API answers `400` and queues nothing, `nextRequestError()` throws a `RangeError` naming the offending call, a fixture fails validation. 600-999 is allowed on purpose — unassigned is not invalid, and a mock server is the one place those codes are legitimate — where fixture validation used to reject it while the same value worked over HTTP; 1xx, which that validation used to accept (its range was 100-599), is now rejected everywhere.
@@ -11,6 +19,7 @@
 ### Changed
 
 - **`POST /__aimock/error` validates its payload instead of accepting anything (#434).** A non-object top level, a non-object `body`, a non-string `message` / `type` / `code`, and a non-numeric `status` — including a stringified `"500"`, which Node used to coerce — are answered with `400` and nothing is queued. `aimock-pytest`'s `next_error()` calls `raise_for_status()`, so a payload that previously defaulted to a silent `500` or threw later inside the response path now fails the calling test at the point of the mistake. Valid payloads are unaffected.
+- `X-Total-Count` is listed in `Access-Control-Expose-Headers`, so browser-context harnesses can read the journal's pagination total (#435)
 
 ## [1.41.0] - 2026-09-10
 

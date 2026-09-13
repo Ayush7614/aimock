@@ -80,12 +80,12 @@
             <tr>
               <td><code>GET</code></td>
               <td><code>/__aimock/journal</code></td>
-              <td>Read-only snapshot of recorded requests</td>
+              <td>Read-only snapshot of recorded requests, optionally filtered and paginated</td>
             </tr>
             <tr>
               <td><code>GET</code></td>
               <td><code>/__aimock/fixtures</code></td>
-              <td>How many fixtures are currently loaded</td>
+              <td>How many fixtures are loaded, and optionally what they match on</td>
             </tr>
             <tr>
               <td><code>POST</code></td>
@@ -120,6 +120,21 @@
               <td><code>/__aimock/error</code></td>
               <td>Queue a one-shot error injection</td>
             </tr>
+            <tr>
+              <td><code>GET</code></td>
+              <td><code>/__aimock/chaos</code></td>
+              <td>Read the chaos config in effect for your test</td>
+            </tr>
+            <tr>
+              <td><code>POST</code></td>
+              <td><code>/__aimock/chaos</code></td>
+              <td>Replace the chaos config at runtime, scoped to your test</td>
+            </tr>
+            <tr>
+              <td><code>DELETE</code></td>
+              <td><code>/__aimock/chaos</code></td>
+              <td>Drop the chaos override</td>
+            </tr>
           </tbody>
         </table>
 
@@ -130,10 +145,11 @@
           fal.ai jobs, plus the Gemini interaction and event-id counters), the
           <strong>fixture match-counts</strong> (sequence position), and the
           <strong>request journal</strong> (recorded requests). Two routes clear it:
-          <code>POST /__aimock/reset</code> clears all of it, and
-          <code>POST /__aimock/reset/journal</code> clears only the recorded requests and leaves
-          everything else intact. A third, <code>POST /__aimock/reset/fixtures</code>, is a
-          deprecated alias for the full reset.
+          <code>POST /__aimock/reset</code> clears all of it &mdash; including any runtime chaos
+          override (including per-test ones), which reverts to the chaos config the server was
+          started with &mdash; and <code>POST /__aimock/reset/journal</code> clears only the
+          recorded requests and leaves everything else intact. A third,
+          <code>POST /__aimock/reset/fixtures</code>, is a deprecated alias for the full reset.
         </p>
 
         <div
@@ -166,7 +182,8 @@
           <strong>Full reset.</strong> Returns the server to a pristine, fixture-free state. It
           clears the in-memory fixtures, the journal entries <em>and</em> the per-test fixture
           match-counts (so sequenced fixtures rewind to their first response), the video and fal.ai
-          job and queue state, and the Gemini interaction and event-id counters.
+          job and queue state, the Gemini interaction and event-id counters, and every runtime chaos
+          override set via <code>POST /__aimock/chaos</code>.
         </p>
         <div class="code-block">
           <div class="code-block-header">Full reset <span class="lang-tag">shell</span></div>
@@ -246,6 +263,67 @@
           <div class="code-block-header">Read the journal <span class="lang-tag">shell</span></div>
           <pre><code>$ curl http://localhost:4010/__aimock/journal</code></pre>
         </div>
+        <p>
+          With no query parameters the full array is returned. These parameters filter and paginate
+          it; <strong>any other parameter is rejected with <code>400</code></strong
+          >, so a typo can never quietly return the whole journal:
+        </p>
+        <table class="endpoint-table">
+          <thead>
+            <tr>
+              <th>Param</th>
+              <th>Matching</th>
+              <th>Notes</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>path</code></td>
+              <td>Substring</td>
+              <td><code>?path=chat</code> matches a chat completions path</td>
+            </tr>
+            <tr>
+              <td><code>method</code></td>
+              <td>Exact, case-insensitive</td>
+              <td><code>?method=post</code></td>
+            </tr>
+            <tr>
+              <td><code>status</code></td>
+              <td>Exact integer</td>
+              <td>Response status code</td>
+            </tr>
+            <tr>
+              <td><code>service</code></td>
+              <td>Exact</td>
+              <td>Not a substring: <code>?service=sear</code> matches nothing</td>
+            </tr>
+            <tr>
+              <td><code>testId</code></td>
+              <td>Exact</td>
+              <td>
+                Resolved per entry as the server resolves it: the <code>X-Test-Id</code> header,
+                else <code>?testId=</code> in the recorded path
+              </td>
+            </tr>
+            <tr>
+              <td><code>limit</code>, <code>offset</code></td>
+              <td>Integers &ge; 0</td>
+              <td>Applied last, after filtering</td>
+            </tr>
+          </tbody>
+        </table>
+        <p>
+          Every response carries an <code>X-Total-Count</code> header with the number of entries
+          that <em>matched the filters</em>, before <code>limit</code> / <code>offset</code> were
+          applied &mdash; so a paging caller can tell when it is done. The body stays a bare array.
+        </p>
+        <div class="code-block">
+          <div class="code-block-header">
+            Filter and paginate <span class="lang-tag">shell</span>
+          </div>
+          <pre><code>$ curl -i <span class="str">"http://localhost:4010/__aimock/journal?path=chat&amp;status=200&amp;limit=10"</span>
+<span class="cm">// X-Total-Count: 42   (response header)</span></code></pre>
+        </div>
         <div class="code-block">
           <div class="code-block-header">Response <span class="lang-tag">json</span></div>
           <pre><code>[
@@ -259,8 +337,8 @@
         <p>
           Read-only: how many fixtures are currently registered. Useful for asserting a CI job or
           test harness actually loaded its tape before it starts making requests, without having to
-          send a probe request and infer the answer from the reply. Returns the count only —
-          fixtures hold predicate functions, so nothing about their contents is serialized.
+          send a probe request and infer the answer from the reply. Returns the count only by
+          default.
         </p>
         <div class="code-block">
           <div class="code-block-header">Count fixtures <span class="lang-tag">shell</span></div>
@@ -269,6 +347,33 @@
         <div class="code-block">
           <div class="code-block-header">Response <span class="lang-tag">json</span></div>
           <pre><code>{ <span class="prop">"count"</span>: <span class="num">2</span> }</code></pre>
+        </div>
+        <p>
+          Add <code>?include=fixtures</code> to also dump what each fixture matches on, so a harness
+          can assert which fixture <em>would</em> serve a request without sending one. Any other
+          <code>include</code> value is rejected with <code>400</code>. Match criteria are
+          JSON-safe: regexps are stringified and predicate functions become
+          <code>"[function]"</code>. Response bodies are never serialized &mdash; each fixture
+          reports only a one-word <code>responseKind</code> (<code>text</code>,
+          <code>toolCalls</code>, <code>error</code>, <code>audio</code>, <code>image</code>,
+          <code>factory</code>, &hellip;).
+        </p>
+        <div class="code-block">
+          <div class="code-block-header">Dump fixtures <span class="lang-tag">shell</span></div>
+          <pre><code>$ curl <span class="str">"http://localhost:4010/__aimock/fixtures?include=fixtures"</span></code></pre>
+        </div>
+        <div class="code-block">
+          <div class="code-block-header">Response <span class="lang-tag">json</span></div>
+          <pre><code>{
+  <span class="prop">"count"</span>: <span class="num">1</span>,
+  <span class="prop">"fixtures"</span>: [
+    {
+      <span class="prop">"index"</span>: <span class="num">0</span>,
+      <span class="prop">"match"</span>: { <span class="prop">"userMessage"</span>: <span class="str">"hello"</span> },
+      <span class="prop">"responseKind"</span>: <span class="str">"text"</span>
+    }
+  ]
+}</code></pre>
         </div>
 
         <h3>POST /__aimock/fixtures</h3>
@@ -340,6 +445,83 @@
             <code>"code": null</code>) can be pasted back verbatim.
           </li>
         </ul>
+
+        <h2>Chaos</h2>
+
+        <div
+          class="callout"
+          style="
+            border: 1px solid var(--warning);
+            border-left-width: 4px;
+            border-radius: 6px;
+            background: var(--bg-card);
+            padding: 1rem 1.25rem;
+            margin: 1.5rem 0;
+          "
+        >
+          <strong style="color: var(--warning)">Send your <code>X-Test-Id</code></strong> &mdash;
+          chaos overrides are scoped to it, like fixture match-counts and video job state. An
+          override installed with <code>X-Test-Id: t1</code> applies only to traffic carrying that
+          same header, so one test turning chaos on cannot fail the tests running beside it on a
+          shared <code>aimock</code> process. A call with <em>no</em> <code>X-Test-Id</code> sets
+          the server-wide baseline, which applies to every test that has no override of its own.
+          Scoping is by header on both sides &mdash; the control call and the traffic it affects.
+          For chaos on a single request, the <code>X-AIMock-Chaos-Drop</code>,
+          <code>X-AIMock-Chaos-Malformed</code> and <code>X-AIMock-Chaos-Disconnect</code> request
+          headers still override everything.
+        </div>
+
+        <h3>GET /__aimock/chaos</h3>
+        <p>
+          Reads the chaos config in effect for the caller's <code>X-Test-Id</code>: that test's
+          override if one is installed, otherwise the server-wide baseline &mdash; an untagged
+          override, or whatever the server was started with (<code>--chaos-drop</code> and friends).
+        </p>
+        <div class="code-block">
+          <div class="code-block-header">Read chaos <span class="lang-tag">shell</span></div>
+          <pre><code>$ curl http://localhost:4010/__aimock/chaos</code></pre>
+        </div>
+        <div class="code-block">
+          <div class="code-block-header">Response <span class="lang-tag">json</span></div>
+          <pre><code>{ <span class="prop">"chaos"</span>: { <span class="prop">"dropRate"</span>: <span class="num">0.1</span> } }</code></pre>
+        </div>
+
+        <h3>POST /__aimock/chaos</h3>
+        <p>
+          Replaces the chaos config at runtime, no restart, for the caller's
+          <code>X-Test-Id</code>. The body is an object with any subset of <code>dropRate</code>,
+          <code>malformedRate</code> and <code>disconnectRate</code>, each a number in
+          <code>[0, 1]</code>. Unknown fields and out-of-range values are rejected with
+          <code>400</code>. <code>POST {}</code> means &ldquo;explicitly no chaos&rdquo;.
+        </p>
+        <div class="code-block">
+          <div class="code-block-header">Set chaos <span class="lang-tag">shell</span></div>
+          <pre><code>$ curl -X POST http://localhost:4010/__aimock/chaos \
+  -H <span class="str">"Content-Type: application/json"</span> \
+  -H <span class="str">"X-Test-Id: t1"</span> \
+  -d <span class="str">'{ "dropRate": 0.25 }'</span></code></pre>
+        </div>
+        <div class="code-block">
+          <div class="code-block-header">Response <span class="lang-tag">json</span></div>
+          <pre><code>{ <span class="prop">"chaos"</span>: { <span class="prop">"dropRate"</span>: <span class="num">0.25</span> } }</code></pre>
+        </div>
+
+        <h3>DELETE /__aimock/chaos</h3>
+        <p>
+          Drops the override for the caller's <code>X-Test-Id</code> (or the server-wide baseline
+          when untagged), falling back to whatever it was shadowing.
+          <code>POST /__aimock/reset</code> drops <em>every</em> override at once, restoring the
+          config the server was started with.
+        </p>
+        <div class="code-block">
+          <div class="code-block-header">Clear chaos <span class="lang-tag">shell</span></div>
+          <pre><code>$ curl -X DELETE http://localhost:4010/__aimock/chaos \
+  -H <span class="str">"X-Test-Id: t1"</span></code></pre>
+        </div>
+        <div class="code-block">
+          <div class="code-block-header">Response <span class="lang-tag">json</span></div>
+          <pre><code>{ <span class="prop">"chaos"</span>: {} }</code></pre>
+        </div>
       </main>
       <aside class="page-toc" id="page-toc"></aside>
     </div>
