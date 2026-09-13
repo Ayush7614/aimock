@@ -42,7 +42,18 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+
+// The `EXECUTED` guards below run the workflow's own `run:` bodies under bash,
+// shelling out many times per observation — orders of magnitude slower than the
+// substring guards beside them. On an IDLE 18-core machine the slowest,
+// `EXECUTED POSITIVE CONTROL: base exits 0 and 2 stay non-fatal`, measured
+// 3039ms of the inherited 5000ms default; re-measured with the suite running
+// concurrently it reached 5490ms and timed out. A guard whose RED cannot be
+// told apart from a timeout proves nothing, so the budget for this file is
+// stated — matching fix-drift-workflow and unreleased-check-workflow, which run
+// the same harness and already state theirs.
+vi.setConfig({ testTimeout: 30_000 });
 
 const WORKFLOW = resolve(__dirname, "../../.github/workflows/test-drift.yml");
 const wf = readFileSync(WORKFLOW, "utf8");
