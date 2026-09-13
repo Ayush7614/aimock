@@ -1,6 +1,8 @@
 import { describe, test, expect, afterEach } from "vitest";
 import { LLMock } from "../llmock.js";
 import { validateChatMessages, validateToolsField } from "../helpers.js";
+import { bedrockToCompletionRequest } from "../bedrock.js";
+import { cohereToCompletionRequest } from "../cohere.js";
 
 /**
  * Wrong-typed fields used to throw inside the provider converters
@@ -276,3 +278,61 @@ describe("bedrock wrong-type fields", () => {
     expect(message).toBe("Invalid request: system must be a string or an array");
   });
 });
+
+// ─── CR #439 regressions ────────────────────────────────────────────────────
+
+describe("ollama embeddings input/prompt shapes (CR #439)", () => {
+  for (const path of ["/api/embeddings", "/api/embed"]) {
+    test(`${path} accepts pre-tokenized number[] and number[][] input`, async () => {
+      const url = await start();
+      for (const input of [
+        [1, 2, 3],
+        [
+          [1, 2],
+          [3, 4],
+        ],
+      ]) {
+        const res = await fetch(`${url}${path}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ model: "llama3", input }),
+        });
+        expect(res.status).toBe(200);
+      }
+    });
+  }
+
+  test("null prompt falls through to input instead of 400ing", async () => {
+    const url = await start();
+    const res = await fetch(`${url}/api/embeddings`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: "llama3", prompt: null, input: "a" }),
+    });
+    expect(res.status).toBe(200);
+  });
+
+  test("null prompt AND null input keeps the accurate 'required' message", async () => {
+    const { status, message } = await postJson(`${await start()}/api/embeddings`, {
+      model: "llama3",
+      prompt: null,
+      input: null,
+    });
+    expect(status).toBe(400);
+    expect(message).toBe("Invalid request: prompt or input field is required");
+  });
+
+  test("genuinely wrong-typed prompt/input still 400", async () => {
+    const url = await start();
+    expect((await postJson(`${url}/api/embeddings`, { model: "m", prompt: 123 })).message).toBe(
+      "Invalid request: prompt field must be a string",
+    );
+    expect(
+      (await postJson(`${url}/api/embeddings`, { model: "m", prompt: ["a", "b"] })).message,
+    ).toBe("Invalid request: prompt field must be a string");
+    expect((await postJson(`${url}/api/embeddings`, { model: "m", input: ["a", 1] })).message).toBe(
+      "Invalid request: input field must be a string or an array of strings",
+    );
+  });
+});
+

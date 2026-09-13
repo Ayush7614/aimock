@@ -31,6 +31,7 @@ import {
   isEmbeddingResponse,
   validateChatMessages,
   validateToolsField,
+  normalizeEmbeddingInput,
   resolveFixtureBlocks,
   serializeErrorResponse,
   generateDeterministicEmbedding,
@@ -1445,12 +1446,15 @@ export async function handleOllamaEmbeddings(
 
   // Reject wrong-typed prompt/input before `.slice()` / `.join()` below read
   // them — a number passes the presence checks and then throws a TypeError.
+  // `null` means "absent" on both fields, matching the `??` fall-through below.
+  // `input` is checked with the repo's shared `normalizeEmbeddingInput`, which
+  // also accepts the pre-tokenized `number[]` / `number[][]` shapes.
   const promptShapeError =
-    embReq.prompt !== undefined && typeof embReq.prompt !== "string"
+    embReq.prompt !== undefined && embReq.prompt !== null && typeof embReq.prompt !== "string"
       ? "prompt field must be a string"
       : embReq.input !== undefined &&
-          typeof embReq.input !== "string" &&
-          !(Array.isArray(embReq.input) && embReq.input.every((el) => typeof el === "string"))
+          embReq.input !== null &&
+          normalizeEmbeddingInput(embReq.input) === null
         ? "input field must be a string or an array of strings"
         : null;
   if (promptShapeError) {
