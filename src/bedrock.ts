@@ -37,6 +37,7 @@ import {
   isContentWithToolCallsResponse,
   isErrorResponse,
   flattenHeaders,
+  isJsonObject,
   getContext,
   getTestId,
   resolveResponse,
@@ -449,7 +450,7 @@ export async function handleBedrock(
   // Reject non-object bodies (e.g. `null`) before touching fields —
   // otherwise `bedrockReq.messages` throws a TypeError that surfaces as a 500
   // instead of a 400.
-  if (bedrockReq === null || typeof bedrockReq !== "object" || Array.isArray(bedrockReq)) {
+  if (!isJsonObject(bedrockReq)) {
     journal.add({
       method: req.method ?? "POST",
       path: urlPath,
@@ -1291,7 +1292,7 @@ export async function handleBedrockStream(
   // Reject non-object bodies (e.g. `null`) before touching fields —
   // otherwise `bedrockReq.messages` throws a TypeError that surfaces as a 500
   // instead of a 400.
-  if (bedrockReq === null || typeof bedrockReq !== "object" || Array.isArray(bedrockReq)) {
+  if (!isJsonObject(bedrockReq)) {
     journal.add({
       method: req.method ?? "POST",
       path: urlPath,

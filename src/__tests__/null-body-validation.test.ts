@@ -9,6 +9,8 @@ import { isJsonObject } from "../helpers.js";
  * Every JSON handler must reject a non-object body with a 400 instead.
  */
 
+const BEDROCK_MODEL = "/model/anthropic.claude-3-sonnet-20240229-v1:0";
+
 let mock: LLMock | null = null;
 
 afterEach(async () => {
@@ -102,6 +104,66 @@ describe("null JSON body returns 400, not 500", () => {
   test("POST /v1/sound-generation (elevenlabs)", async () => {
     await expect400ObjectBody(`${await start()}/v1/sound-generation`);
   });
+
+  test("POST /v1/chat/completions", async () => {
+    await expect400ObjectBody(`${await start()}/v1/chat/completions`);
+  });
+
+  test("POST /v1/messages", async () => {
+    await expect400ObjectBody(`${await start()}/v1/messages`);
+  });
+
+  test("POST /v1/responses", async () => {
+    await expect400ObjectBody(`${await start()}/v1/responses`);
+  });
+
+  test("POST /v2/chat (cohere)", async () => {
+    await expect400ObjectBody(`${await start()}/v2/chat`);
+  });
+
+  test("POST /v2/embed (cohere)", async () => {
+    await expect400ObjectBody(`${await start()}/v2/embed`);
+  });
+
+  test("POST /v1beta/models/{model}:generateContent (gemini)", async () => {
+    await expect400ObjectBody(`${await start()}/v1beta/models/gemini-2.0-flash:generateContent`);
+  });
+
+  test("POST /v1beta/models/{model}:embedContent (gemini)", async () => {
+    await expect400ObjectBody(`${await start()}/v1beta/models/text-embedding-004:embedContent`);
+  });
+
+  test("POST /v1beta/interactions (gemini)", async () => {
+    await expect400ObjectBody(`${await start()}/v1beta/interactions`);
+  });
+
+  test("POST /api/chat (ollama)", async () => {
+    await expect400ObjectBody(`${await start()}/api/chat`);
+  });
+
+  test("POST /api/generate (ollama)", async () => {
+    await expect400ObjectBody(`${await start()}/api/generate`);
+  });
+
+  test("POST /api/embeddings (ollama)", async () => {
+    await expect400ObjectBody(`${await start()}/api/embeddings`);
+  });
+
+  test("POST /model/{id}/invoke (bedrock)", async () => {
+    await expect400ObjectBody(`${await start()}${BEDROCK_MODEL}/invoke`);
+  });
+
+  test("POST /model/{id}/invoke-with-response-stream (bedrock)", async () => {
+    await expect400ObjectBody(`${await start()}${BEDROCK_MODEL}/invoke-with-response-stream`);
+  });
+
+  test("POST /model/{id}/converse (bedrock)", async () => {
+    await expect400ObjectBody(`${await start()}${BEDROCK_MODEL}/converse`);
+  });
+
+  test("POST /model/{id}/converse-stream (bedrock)", async () => {
+    await expect400ObjectBody(`${await start()}${BEDROCK_MODEL}/converse-stream`);
+  });
 });
 
 describe("non-object JSON bodies are rejected with the same 400", () => {
@@ -122,6 +184,37 @@ describe("non-object JSON bodies are rejected with the same 400", () => {
   test("numeric body on POST /search", async () => {
     const base = await start();
     const { status, message } = await postRaw(`${base}/search`, "123");
+    expect(status).toBe(400);
+    expect(message).toBe("Request body must be a JSON object");
+  });
+
+  test("array body on POST /v1/responses", async () => {
+    const base = await start();
+    const { status, message } = await postRaw(`${base}/v1/responses`, '[{"model":"gpt-4o"}]');
+    expect(status).toBe(400);
+    expect(message).toBe("Request body must be a JSON object");
+  });
+
+  test("string body on POST /v1/responses", async () => {
+    const base = await start();
+    const { status, message } = await postRaw(`${base}/v1/responses`, '"hi"');
+    expect(status).toBe(400);
+    expect(message).toBe("Request body must be a JSON object");
+  });
+
+  test("scalar body on POST /v1beta/models/{model}:embedContent", async () => {
+    const base = await start();
+    const { status, message } = await postRaw(
+      `${base}/v1beta/models/text-embedding-004:embedContent`,
+      "123",
+    );
+    expect(status).toBe(400);
+    expect(message).toBe("Request body must be a JSON object");
+  });
+
+  test("array body on POST /v1/chat/completions", async () => {
+    const base = await start();
+    const { status, message } = await postRaw(`${base}/v1/chat/completions`, "[]");
     expect(status).toBe(400);
     expect(message).toBe("Request body must be a JSON object");
   });

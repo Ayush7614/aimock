@@ -36,6 +36,7 @@ import {
   validateChatMessages,
   validateToolsField,
   flattenHeaders,
+  isJsonObject,
   getTestId,
   resolveFixtureBlocks,
   resolveResponse,
@@ -946,7 +947,7 @@ export async function handleCohere(
   // Reject non-object bodies (e.g. `null`) before touching fields —
   // otherwise `cohereReq.model` throws a TypeError that surfaces as a 500
   // instead of a 400.
-  if (cohereReq === null || typeof cohereReq !== "object" || Array.isArray(cohereReq)) {
+  if (!isJsonObject(cohereReq)) {
     journal.add({
       method: req.method ?? "POST",
       path: req.url ?? "/v2/chat",
@@ -1403,7 +1404,7 @@ export async function handleCohereEmbed(
   // Reject non-object bodies (e.g. `null`) before touching fields —
   // otherwise `embedReq.model` throws a TypeError that surfaces as a 500
   // instead of a 400.
-  if (embedReq === null || typeof embedReq !== "object" || Array.isArray(embedReq)) {
+  if (!isJsonObject(embedReq)) {
     journal.add({
       method: req.method ?? "POST",
       path: req.url ?? "/v2/embed",

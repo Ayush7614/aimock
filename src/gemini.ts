@@ -31,6 +31,7 @@ import {
   validateToolsField,
   formatToMime,
   flattenHeaders,
+  isJsonObject,
   getContext,
   getTestId,
   resolveFixtureBlocks,
@@ -833,7 +834,7 @@ export async function handleGemini(
   // Reject non-object bodies (e.g. `null`) before touching fields —
   // otherwise the converter dereference throws a TypeError that surfaces as
   // a 500 instead of a 400.
-  if (geminiReq === null || typeof geminiReq !== "object" || Array.isArray(geminiReq)) {
+  if (!isJsonObject(geminiReq)) {
     journal.add({
       method: req.method ?? "POST",
       path: req.url ?? `/v1beta/models/${model}:generateContent`,

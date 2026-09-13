@@ -22,6 +22,7 @@ import {
   isErrorResponse,
   generateDeterministicEmbedding,
   flattenHeaders,
+  isJsonObject,
   getTestId,
   resolveResponse,
   resolveStrictMode,
@@ -97,6 +98,31 @@ export async function handleGeminiEmbedContent(
       JSON.stringify({
         error: {
           message: `Malformed JSON body: ${detail}`,
+          code: 400,
+          status: "INVALID_ARGUMENT",
+        },
+      }),
+    );
+    return;
+  }
+
+  // Reject bodies that parsed but are not a JSON object (e.g. `null`) before
+  // touching fields — otherwise `embedReq.content` throws a TypeError that
+  // surfaces as a 500 instead of a 400.
+  if (!isJsonObject(embedReq)) {
+    journal.add({
+      method: req.method ?? "POST",
+      path: req.url ?? `/v1beta/models/${model}:embedContent`,
+      headers: flattenHeaders(req.headers),
+      body: null,
+      response: { status: 400, fixture: null },
+    });
+    writeErrorResponse(
+      res,
+      400,
+      JSON.stringify({
+        error: {
+          message: "Request body must be a JSON object",
           code: 400,
           status: "INVALID_ARGUMENT",
         },

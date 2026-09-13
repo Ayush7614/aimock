@@ -45,6 +45,7 @@ import {
   isEmbeddingResponse,
   isJSONResponse,
   flattenHeaders,
+  isJsonObject,
   getTestId,
   readBody,
   resolveResponse,
@@ -960,10 +961,6 @@ async function handleCompletions(
   let body: ChatCompletionRequest;
   try {
     body = JSON.parse(raw) as ChatCompletionRequest;
-    // Azure deployments may omit model from body — use deployment ID as fallback
-    if (modelFallback && !body.model) {
-      body.model = modelFallback;
-    }
   } catch (parseErr: unknown) {
     const detail = parseErr instanceof Error ? parseErr.message : "unknown parse error";
     journal.add({
@@ -988,6 +985,37 @@ async function handleCompletions(
           }),
     );
     return;
+  }
+
+  // Reject bodies that parsed but are not a JSON object (e.g. `null`) before
+  // touching fields — otherwise `body.messages` throws a TypeError that
+  // surfaces as a 500 instead of a 400.
+  if (!isJsonObject(body)) {
+    journal.add({
+      method: req.method ?? "POST",
+      path: req.url ?? COMPLETIONS_PATH,
+      headers: flattenHeaders(req.headers),
+      body: null,
+      response: { status: 400, fixture: null },
+    });
+    writeErrorResponse(
+      res,
+      400,
+      openRouter
+        ? serializeOpenRouterError(400, "Request body must be a JSON object")
+        : JSON.stringify({
+            error: {
+              message: "Request body must be a JSON object",
+              type: "invalid_request_error",
+            },
+          }),
+    );
+    return;
+  }
+
+  // Azure deployments may omit model from body — use deployment ID as fallback
+  if (modelFallback && !body.model) {
+    body.model = modelFallback;
   }
 
   // Validate messages array

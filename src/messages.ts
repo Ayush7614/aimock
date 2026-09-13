@@ -29,6 +29,7 @@ import {
   isErrorResponse,
   resolveFixtureBlocks,
   flattenHeaders,
+  isJsonObject,
   getTestId,
   resolveResponse,
   resolveStrictMode,
@@ -1233,6 +1234,30 @@ export async function handleMessages(
       JSON.stringify({
         error: {
           message: `Malformed JSON: ${detail}`,
+          type: "invalid_request_error",
+        },
+      }),
+    );
+    return;
+  }
+
+  // Reject bodies that parsed but are not a JSON object (e.g. `null`) before
+  // touching fields — otherwise `claudeReq.thinking` throws a TypeError that
+  // surfaces as a 500 instead of a 400.
+  if (!isJsonObject(claudeReq)) {
+    journal.add({
+      method: req.method ?? "POST",
+      path: req.url ?? "/v1/messages",
+      headers: flattenHeaders(req.headers),
+      body: null,
+      response: { status: 400, fixture: null },
+    });
+    writeErrorResponse(
+      res,
+      400,
+      JSON.stringify({
+        error: {
+          message: "Request body must be a JSON object",
           type: "invalid_request_error",
         },
       }),

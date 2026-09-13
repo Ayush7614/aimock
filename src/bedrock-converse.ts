@@ -27,6 +27,7 @@ import {
   resolveFixtureBlocks,
   isErrorResponse,
   flattenHeaders,
+  isJsonObject,
   getContext,
   getTestId,
   resolveResponse,
@@ -702,6 +703,30 @@ export async function handleConverse(
     return;
   }
 
+  // Reject bodies that parsed but are not a JSON object (e.g. `null`) before
+  // touching fields — otherwise `converseReq.messages` throws a TypeError that
+  // surfaces as a 500 instead of a 400.
+  if (!isJsonObject(converseReq)) {
+    journal.add({
+      method: req.method ?? "POST",
+      path: urlPath,
+      headers: flattenHeaders(req.headers),
+      body: null,
+      response: { status: 400, fixture: null },
+    });
+    writeErrorResponse(
+      res,
+      400,
+      JSON.stringify({
+        error: {
+          message: "Request body must be a JSON object",
+          type: "invalid_request_error",
+        },
+      }),
+    );
+    return;
+  }
+
   if (!converseReq.messages || !Array.isArray(converseReq.messages)) {
     journal.add({
       method: req.method ?? "POST",
@@ -1012,6 +1037,30 @@ export async function handleConverseStream(
       JSON.stringify({
         error: {
           message: `Malformed JSON: ${detail}`,
+          type: "invalid_request_error",
+        },
+      }),
+    );
+    return;
+  }
+
+  // Reject bodies that parsed but are not a JSON object (e.g. `null`) before
+  // touching fields — otherwise `converseReq.messages` throws a TypeError that
+  // surfaces as a 500 instead of a 400.
+  if (!isJsonObject(converseReq)) {
+    journal.add({
+      method: req.method ?? "POST",
+      path: urlPath,
+      headers: flattenHeaders(req.headers),
+      body: null,
+      response: { status: 400, fixture: null },
+    });
+    writeErrorResponse(
+      res,
+      400,
+      JSON.stringify({
+        error: {
+          message: "Request body must be a JSON object",
           type: "invalid_request_error",
         },
       }),
