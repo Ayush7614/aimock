@@ -131,6 +131,30 @@ describe("vector wrapper journal coverage", () => {
       await llm.stop();
     }
   });
+
+  test("mounted: a declined path the parent serves is not journaled as a vector 404", async () => {
+    // The wrapper declines /api/tags, but the parent server owns that route
+    // and answers 200. The mounted-404 finish hook must stay silent, or the
+    // journal grows a phantom `vector ... 404` entry for a 200 response.
+    vector = new VectorMock();
+    vector.addCollection("default", { dimension: 3 });
+
+    const llm = new LLMock();
+    llm.mount("/api", vector);
+    await llm.start();
+    try {
+      const res = await rawRequest(llm.url, "/api/tags", "GET");
+      expect(res.status).toBe(200);
+
+      // The finish hook, if it fires, runs after the response is flushed.
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      const vectorEntries = llm.getRequests().filter((e) => e.service === "vector");
+      expect(vectorEntries).toEqual([]);
+    } finally {
+      await llm.stop();
+    }
+  });
 });
 
 describe("a2a wrapper journal coverage", () => {
