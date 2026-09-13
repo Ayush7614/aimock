@@ -86,6 +86,16 @@ export class VectorMock implements Mountable {
         if (body) parsed = JSON.parse(body);
       } catch (parseErr) {
         const detail = parseErr instanceof Error ? parseErr.message : "unknown";
+        if (this.journal) {
+          this.journal.add({
+            method: req.method ?? "GET",
+            path: req.url ?? "/",
+            headers: flattenHeaders(req.headers),
+            body: null,
+            service: "vector",
+            response: { status: 400, fixture: null },
+          });
+        }
         res.writeHead(400, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: `Malformed JSON body: ${detail}` }));
         return true;
@@ -109,6 +119,26 @@ export class VectorMock implements Mountable {
         body: null,
         service: "vector",
         response: { status: res.statusCode, fixture: null },
+      });
+    }
+
+    // When mounted, an unmatched path is answered by the parent server, not
+    // here, so journal it once the response is out and only if it really was
+    // a 404 — otherwise a path this wrapper declines but the server rewrites
+    // and serves would be journaled twice. Keeps mounted mode in step with
+    // the standalone 404 journaling below.
+    if (!handled && this.journal) {
+      const journal = this.journal;
+      res.once("finish", () => {
+        if (res.statusCode !== 404) return;
+        journal.add({
+          method: req.method ?? "GET",
+          path: req.url ?? "/",
+          headers: flattenHeaders(req.headers),
+          body: null,
+          service: "vector",
+          response: { status: 404, fixture: null },
+        });
       });
     }
 
@@ -152,6 +182,16 @@ export class VectorMock implements Mountable {
           } catch (parseErr) {
             if (req.method !== "GET") {
               const detail = parseErr instanceof Error ? parseErr.message : "unknown";
+              if (this.journal) {
+                this.journal.add({
+                  method: req.method ?? "GET",
+                  path: req.url ?? "/",
+                  headers: flattenHeaders(req.headers),
+                  body: null,
+                  service: "vector",
+                  response: { status: 400, fixture: null },
+                });
+              }
               res.writeHead(400, { "Content-Type": "application/json" });
               res.end(JSON.stringify({ error: `Malformed JSON body: ${detail}` }));
               return;
@@ -173,6 +213,16 @@ export class VectorMock implements Mountable {
             });
           }
           if (!handled) {
+            if (this.journal) {
+              this.journal.add({
+                method: req.method ?? "GET",
+                path: req.url ?? "/",
+                headers: flattenHeaders(req.headers),
+                body: null,
+                service: "vector",
+                response: { status: 404, fixture: null },
+              });
+            }
             res.writeHead(404, { "Content-Type": "application/json" });
             res.end(JSON.stringify({ error: "Not found" }));
           }

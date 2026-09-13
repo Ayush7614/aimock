@@ -84,6 +84,22 @@ export class A2AMock implements Mountable {
 
   // ---- Mountable interface ----
 
+  private journalRequest(req: http.IncomingMessage, pathname: string, status: number): void {
+    if (this.journal) {
+      this.journal.add({
+        // req.url keeps the mount prefix and the query string, which pathname
+        // (the mount-relative sub-path) drops; the journal's ?path= and
+        // ?testId= filters both read this field.
+        method: req.method ?? "POST",
+        path: req.url ?? pathname,
+        headers: flattenHeaders(req.headers),
+        body: null,
+        service: "a2a",
+        response: { status, fixture: null },
+      });
+    }
+  }
+
   async handleRequest(
     req: http.IncomingMessage,
     res: http.ServerResponse,
@@ -100,6 +116,7 @@ export class A2AMock implements Mountable {
         "A2A-Version": "1.0",
       });
       res.end(JSON.stringify(card));
+      this.journalRequest(req, pathname, 200);
       return true;
     }
 
@@ -123,6 +140,7 @@ export class A2AMock implements Mountable {
             error: { code: -32700, message: "Parse error" },
           }),
         );
+        this.journalRequest(req, pathname, 200);
         return true;
       }
 
@@ -147,16 +165,7 @@ export class A2AMock implements Mountable {
       await this.dispatcher(req, res, body);
 
       // Journal the request after the handler completes
-      if (this.journal) {
-        this.journal.add({
-          method: req.method ?? "POST",
-          path: pathname,
-          headers: flattenHeaders(req.headers),
-          body: null,
-          service: "a2a",
-          response: { status: res.statusCode, fixture: null },
-        });
-      }
+      this.journalRequest(req, pathname, res.statusCode);
 
       return true;
     }
@@ -201,6 +210,7 @@ export class A2AMock implements Mountable {
           } else if (!res.writableEnded) {
             res.end();
           }
+          this.journalRequest(req, url.pathname, res.statusCode);
         });
       });
 
@@ -273,6 +283,7 @@ export class A2AMock implements Mountable {
           error: { code: -32000, message: "No matching pattern for message" },
         }),
       );
+      this.journalRequest(req, "/", res.statusCode);
       return;
     }
 

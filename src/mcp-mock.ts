@@ -186,6 +186,16 @@ export class MCPMock implements Mountable {
               } else if (!res.writableEnded) {
                 res.end();
               }
+              if (this.journal) {
+                this.journal.add({
+                  method: req.method ?? "POST",
+                  path: req.url ?? "/",
+                  headers: flattenHeaders(req.headers),
+                  body: null,
+                  service: "mcp",
+                  response: { status: res.statusCode, fixture: null },
+                });
+              }
             });
         });
       });
