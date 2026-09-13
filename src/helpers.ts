@@ -1445,6 +1445,22 @@ export function validateToolsField(tools: unknown): string | null {
   return null;
 }
 
+// ─── Request body helpers ──────────────────────────────────────────────────
+
+/**
+ * True when a parsed JSON request body is a plain object.
+ *
+ * `JSON.parse("null")` yields `null`, and `"123"` / `"\"hi\""` yield
+ * non-objects — every handler that then reads `body.field` throws a TypeError
+ * that surfaces as a 500. Call this right after `JSON.parse` and answer 400
+ * ("Request body must be a JSON object") instead. Arrays are rejected too:
+ * `[].field` reads as `undefined` today, which degrades into a misleading
+ * "missing parameter" 400 — rejecting up front names the real problem.
+ */
+export function isJsonObject(body: unknown): body is Record<string, unknown> {
+  return body !== null && typeof body === "object" && !Array.isArray(body);
+}
+
 // ─── Embedding helpers ─────────────────────────────────────────────────────
 
 const DEFAULT_EMBEDDING_DIMENSIONS = 1536;

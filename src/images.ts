@@ -8,6 +8,7 @@ import type {
 import {
   isImageResponse,
   isErrorResponse,
+  isJsonObject,
   serializeErrorResponse,
   flattenHeaders,
   getContext,
@@ -80,8 +81,33 @@ export async function handleImages(
   let model: string;
   let prompt: string;
 
+  let body: unknown;
   try {
-    const body = JSON.parse(raw);
+    body = JSON.parse(raw);
+    // Reject bodies that parsed but are not a JSON object (e.g. `null`) before
+    // touching fields — without this the TypeError below lands in the
+    // malformed-JSON branch with a misleading message.
+    if (!isJsonObject(body)) {
+      journal.add({
+        method,
+        path,
+        headers: flattenHeaders(req.headers),
+        body: null,
+        response: { status: 400, fixture: null },
+      });
+      writeErrorResponse(
+        res,
+        400,
+        JSON.stringify({
+          error: {
+            message: "Request body must be a JSON object",
+            type: "invalid_request_error",
+            code: "invalid_json",
+          },
+        }),
+      );
+      return;
+    }
     if (format === "gemini") {
       const geminiReq = body as GeminiPredictRequest;
       prompt = geminiReq.instances?.[0]?.prompt ?? "";
