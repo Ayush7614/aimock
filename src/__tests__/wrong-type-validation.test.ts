@@ -394,3 +394,84 @@ describe("tool_calls validation is scoped to providers that read it (CR #439)", 
   });
 });
 
+describe("converter null-block guards are load-bearing (CR #439)", () => {
+  // These guards are unreachable over HTTP (validateChatMessages rejects
+  // `content: [null]` first) but bedrockToCompletionRequest and
+  // cohereToCompletionRequest are public exports. Each case throws
+  // "Cannot read properties of null" if its guard is removed.
+  test("bedrockToCompletionRequest tolerates null content blocks", () => {
+    expect(() =>
+      bedrockToCompletionRequest(
+        { messages: [{ role: "user", content: [null, { type: "text", text: "hi" }] }] } as never,
+        "m",
+      ),
+    ).not.toThrow();
+    expect(() =>
+      bedrockToCompletionRequest(
+        {
+          system: [null, { type: "text", text: "s" }],
+          messages: [{ role: "user", content: "hi" }],
+        } as never,
+        "m",
+      ),
+    ).not.toThrow();
+    expect(() =>
+      bedrockToCompletionRequest(
+        {
+          messages: [
+            {
+              role: "user",
+              content: [
+                null,
+                { type: "tool_result", tool_use_id: "t", content: "r" },
+                { type: "text", text: "hi" },
+              ],
+            },
+          ],
+        } as never,
+        "m",
+      ),
+    ).not.toThrow();
+    expect(() =>
+      bedrockToCompletionRequest(
+        {
+          messages: [
+            {
+              role: "user",
+              content: [
+                {
+                  type: "tool_result",
+                  tool_use_id: "t",
+                  content: [null, { type: "text", text: "r" }],
+                },
+              ],
+            },
+          ],
+        } as never,
+        "m",
+      ),
+    ).not.toThrow();
+    expect(() =>
+      bedrockToCompletionRequest(
+        {
+          messages: [
+            {
+              role: "assistant",
+              content: [null, { type: "tool_use", id: "t", name: "f", input: {} }],
+            },
+          ],
+        } as never,
+        "m",
+      ),
+    ).not.toThrow();
+  });
+
+  test("cohereToCompletionRequest tolerates null content parts", () => {
+    expect(() =>
+      cohereToCompletionRequest({
+        model: "c",
+        messages: [{ role: "user", content: [null, { type: "text", text: "hi" }] }],
+      } as never),
+    ).not.toThrow();
+  });
+});
