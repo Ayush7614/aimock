@@ -7,7 +7,7 @@
  */
 
 import type * as http from "node:http";
-import { flattenHeaders, matchesPattern } from "./helpers.js";
+import { flattenHeaders, matchesPattern, normalizeTextInput } from "./helpers.js";
 import type { Journal } from "./journal.js";
 import type { Logger } from "./logger.js";
 
@@ -39,9 +39,9 @@ export async function handleSearch(
   const { logger } = defaults;
   setCorsHeaders(res);
 
-  let body: { query?: string; max_results?: number };
+  let body: { query?: unknown; max_results?: number };
   try {
-    body = JSON.parse(raw) as { query?: string; max_results?: number };
+    body = JSON.parse(raw) as { query?: unknown; max_results?: number };
   } catch (parseErr) {
     const detail = parseErr instanceof Error ? parseErr.message : "unknown";
     journal.add({
@@ -65,7 +65,31 @@ export async function handleSearch(
     return;
   }
 
-  const query = body.query ?? "";
+  const rawQuery: unknown = body.query ?? "";
+  const normalizedQuery = normalizeTextInput(rawQuery);
+  if (normalizedQuery === null) {
+    journal.add({
+      method: req.method ?? "POST",
+      path: req.url ?? "/search",
+      headers: flattenHeaders(req.headers),
+      body: null,
+      service: "search",
+      response: { status: 400, fixture: null },
+    });
+    res.writeHead(400, { "Content-Type": "application/json" });
+    res.end(
+      JSON.stringify({
+        error: {
+          message: "Invalid parameter: 'query' must be a string or an array of strings",
+          type: "invalid_request_error",
+        },
+      }),
+    );
+    return;
+  }
+  // `query` is the normalized string used for matching; the response echoes
+  // `rawQuery` so an array payload round-trips exactly as it did before.
+  const query = normalizedQuery;
   const maxResults = body.max_results;
 
   // Find first matching fixture
@@ -103,7 +127,7 @@ export async function handleSearch(
   res.writeHead(200, { "Content-Type": "application/json" });
   res.end(
     JSON.stringify({
-      query,
+      query: rawQuery,
       results: matchedResults,
       images: [],
       response_time: 0,
