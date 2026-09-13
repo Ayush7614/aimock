@@ -25,6 +25,8 @@ import {
 } from "./server.js";
 import type { ResolvedInboundAuth } from "./api-key-auth.js";
 import {
+  isInjectableStatus,
+  INJECTED_STATUS_RANGE,
   loadFixtureFile,
   loadFixturesFromDir,
   entryToFixture,
@@ -309,6 +311,16 @@ export class LLMock {
     status: number,
     errorBody?: { message?: string; type?: string; code?: string },
   ): this {
+    // Same gate as `POST /__aimock/error` and fixture validation — this is the
+    // form the docs use, and an unchecked status reaches `res.writeHead` on
+    // the next matched request: 99/1000 throw there (the injected error is
+    // lost and the caller sees a generic 500), and 1xx hangs the request until
+    // the client times out. Throwing HERE names the offending call instead.
+    if (!isInjectableStatus(status)) {
+      throw new RangeError(
+        `nextRequestError: invalid status ${String(status)} — must be ${INJECTED_STATUS_RANGE}`,
+      );
+    }
     const errorResponse: FixtureResponse = {
       error: {
         message: errorBody?.message ?? "Injected error",
