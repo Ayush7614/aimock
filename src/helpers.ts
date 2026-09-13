@@ -1362,6 +1362,80 @@ export function slugifyContext(context: string): string {
     .toLowerCase();
 }
 
+// ─── Request shape validation ──────────────────────────────────────────────
+
+/**
+ * Validate the shape of a chat `messages` array (Cohere / Ollama / Bedrock
+ * style: entries with `content` and optional `tool_calls`).
+ *
+ * Returns an error detail string when the shape is wrong, or null when the
+ * provider converter can safely consume it. Wrong types here used to throw
+ * inside the converters (`content.filter` on a number, `.map` on a string
+ * `tools`, `msg.role` on a null entry) and surface as 500s. `null` content
+ * is accepted — assistant messages legitimately carry `content: null`
+ * alongside tool calls, and the converters coerce it to "".
+ */
+export function validateChatMessages(messages: unknown): string | null {
+  // Matches the historic "messages array is required" detail so handlers can
+  // compose the exact legacy message for a missing/non-array field.
+  if (!Array.isArray(messages)) return "messages array is required";
+  for (let i = 0; i < messages.length; i++) {
+    const msg = messages[i] as Record<string, unknown> | null;
+    if (msg === null || typeof msg !== "object" || Array.isArray(msg)) {
+      return `messages[${i}] must be an object`;
+    }
+    const content = msg.content;
+    if (
+      content !== undefined &&
+      content !== null &&
+      typeof content !== "string" &&
+      !Array.isArray(content)
+    ) {
+      return `messages[${i}].content must be a string or an array`;
+    }
+    if (Array.isArray(content) && content.some((p) => p === null || p === undefined)) {
+      return `messages[${i}].content must be a string or an array`;
+    }
+    const toolCalls = msg.tool_calls;
+    if (toolCalls !== undefined && toolCalls !== null) {
+      if (!Array.isArray(toolCalls)) {
+        return `messages[${i}].tool_calls must be an array`;
+      }
+      for (const tc of toolCalls) {
+        if (tc === null || typeof tc !== "object" || Array.isArray(tc)) {
+          return `messages[${i}].tool_calls entries must be objects`;
+        }
+        const fn = (tc as Record<string, unknown>).function;
+        if (fn === null || typeof fn !== "object" || Array.isArray(fn)) {
+          return `messages[${i}].tool_calls entries must have a function object`;
+        }
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * Validate an optional top-level `tools` field. A string (or other
+ * non-array) value passes the `req.tools && req.tools.length` gate
+ * (`"hi".length > 0`) and then throws on `.map` — a 500 instead of a 400.
+ * Returns an error detail string, or null when absent or a valid array.
+ */
+export function validateToolsField(tools: unknown): string | null {
+  if (tools !== undefined && tools !== null && !Array.isArray(tools)) {
+    return "tools must be an array";
+  }
+  if (Array.isArray(tools)) {
+    for (let i = 0; i < tools.length; i++) {
+      const t = tools[i] as Record<string, unknown> | null;
+      if (t === null || typeof t !== "object" || Array.isArray(t)) {
+        return `tools[${i}] must be an object`;
+      }
+    }
+  }
+  return null;
+}
+
 // ─── Embedding helpers ─────────────────────────────────────────────────────
 
 const DEFAULT_EMBEDDING_DIMENSIONS = 1536;

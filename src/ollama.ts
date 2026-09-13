@@ -29,6 +29,8 @@ import {
   isContentWithToolCallsResponse,
   isErrorResponse,
   isEmbeddingResponse,
+  validateChatMessages,
+  validateToolsField,
   resolveFixtureBlocks,
   serializeErrorResponse,
   generateDeterministicEmbedding,
@@ -665,7 +667,10 @@ export async function handleOllama(
     return;
   }
 
-  if (!ollamaReq.messages || !Array.isArray(ollamaReq.messages)) {
+  // Reject non-object bodies (e.g. `null`) before touching fields —
+  // otherwise `ollamaReq.messages` throws a TypeError that surfaces as a 500
+  // instead of a 400.
+  if (ollamaReq === null || typeof ollamaReq !== "object" || Array.isArray(ollamaReq)) {
     journal.add({
       method: req.method ?? "POST",
       path: urlPath,
@@ -678,7 +683,32 @@ export async function handleOllama(
       400,
       JSON.stringify({
         error: {
-          message: "Invalid request: messages array is required",
+          message: "Request body must be a JSON object",
+          type: "invalid_request_error",
+        },
+      }),
+    );
+    return;
+  }
+
+  // Reject wrong-typed message/tool fields before the converter dereferences
+  // them. A missing/non-array `messages` keeps the historic message below.
+  const chatShapeError =
+    validateChatMessages(ollamaReq.messages) ?? validateToolsField(ollamaReq.tools);
+  if (chatShapeError) {
+    journal.add({
+      method: req.method ?? "POST",
+      path: urlPath,
+      headers: flattenHeaders(req.headers),
+      body: null,
+      response: { status: 400, fixture: null },
+    });
+    writeErrorResponse(
+      res,
+      400,
+      JSON.stringify({
+        error: {
+          message: `Invalid request: ${chatShapeError}`,
           type: "invalid_request_error",
         },
       }),
@@ -1056,6 +1086,30 @@ export async function handleOllamaGenerate(
     return;
   }
 
+  // Reject non-object bodies (e.g. `null`) before touching fields —
+  // otherwise `generateReq.prompt` throws a TypeError that surfaces as a 500
+  // instead of a 400.
+  if (generateReq === null || typeof generateReq !== "object" || Array.isArray(generateReq)) {
+    journal.add({
+      method: req.method ?? "POST",
+      path: urlPath,
+      headers: flattenHeaders(req.headers),
+      body: null,
+      response: { status: 400, fixture: null },
+    });
+    writeErrorResponse(
+      res,
+      400,
+      JSON.stringify({
+        error: {
+          message: "Request body must be a JSON object",
+          type: "invalid_request_error",
+        },
+      }),
+    );
+    return;
+  }
+
   if (!generateReq.prompt || typeof generateReq.prompt !== "string") {
     journal.add({
       method: req.method ?? "POST",
@@ -1358,6 +1412,61 @@ export async function handleOllamaEmbeddings(
       JSON.stringify({
         error: {
           message: `Malformed JSON body: ${detail}`,
+          type: "invalid_request_error",
+        },
+      }),
+    );
+    return;
+  }
+
+  // Reject non-object bodies (e.g. `null`) before touching fields —
+  // otherwise `embReq.prompt` throws a TypeError that surfaces as a 500
+  // instead of a 400.
+  if (embReq === null || typeof embReq !== "object" || Array.isArray(embReq)) {
+    journal.add({
+      method: req.method ?? "POST",
+      path: urlPath,
+      headers: flattenHeaders(req.headers),
+      body: null,
+      response: { status: 400, fixture: null },
+    });
+    writeErrorResponse(
+      res,
+      400,
+      JSON.stringify({
+        error: {
+          message: "Request body must be a JSON object",
+          type: "invalid_request_error",
+        },
+      }),
+    );
+    return;
+  }
+
+  // Reject wrong-typed prompt/input before `.slice()` / `.join()` below read
+  // them — a number passes the presence checks and then throws a TypeError.
+  const promptShapeError =
+    embReq.prompt !== undefined && typeof embReq.prompt !== "string"
+      ? "prompt field must be a string"
+      : embReq.input !== undefined &&
+          typeof embReq.input !== "string" &&
+          !(Array.isArray(embReq.input) && embReq.input.every((el) => typeof el === "string"))
+        ? "input field must be a string or an array of strings"
+        : null;
+  if (promptShapeError) {
+    journal.add({
+      method: req.method ?? "POST",
+      path: urlPath,
+      headers: flattenHeaders(req.headers),
+      body: null,
+      response: { status: 400, fixture: null },
+    });
+    writeErrorResponse(
+      res,
+      400,
+      JSON.stringify({
+        error: {
+          message: `Invalid request: ${promptShapeError}`,
           type: "invalid_request_error",
         },
       }),
