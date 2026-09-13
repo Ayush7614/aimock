@@ -549,10 +549,11 @@ export interface ChaosConfig {
  * shipped topology — one shared `aimock` process serving a parallel suite — a
  * purely global switch would mean one test's chaos failing every other test.
  *
- * Scoping is by the `X-Test-Id` HEADER only, on BOTH sides: the traffic being
- * evaluated and the control request that installed the override. A client that
- * cannot set headers therefore reads and writes the same `base` on both sides,
- * so the two can never silently disagree.
+ * Scoping is by testId on BOTH sides: the traffic being evaluated and the
+ * control request that installed the override. Both resolve the tag the way
+ * `getTestId` does — the `X-Test-Id` header, else `?testId=` in the query
+ * string — so a harness that can only tag one of those two ways still lands in
+ * the same scope on both sides, and the two can never silently disagree.
  */
 export interface ChaosScope {
   /** Server-wide baseline: the construction config, or the untagged override. */
