@@ -257,6 +257,7 @@ export class AGUIMock implements Mountable {
         if (!handled && !res.headersSent) {
           res.writeHead(404, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ error: "Not found" }));
+          this.journalRequest(req, url.pathname, 404);
         }
       });
 

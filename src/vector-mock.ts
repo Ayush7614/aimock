@@ -122,6 +122,26 @@ export class VectorMock implements Mountable {
       });
     }
 
+    // When mounted, an unmatched path is answered by the parent server, not
+    // here, so journal it once the response is out and only if it really was
+    // a 404 — otherwise a path this wrapper declines but the server rewrites
+    // and serves would be journaled twice. Keeps mounted mode in step with
+    // the standalone 404 journaling below.
+    if (!handled && this.journal) {
+      const journal = this.journal;
+      res.once("finish", () => {
+        if (res.statusCode !== 404) return;
+        journal.add({
+          method: req.method ?? "GET",
+          path: req.url ?? "/",
+          headers: flattenHeaders(req.headers),
+          body: null,
+          service: "vector",
+          response: { status: 404, fixture: null },
+        });
+      });
+    }
+
     return handled;
   }
 

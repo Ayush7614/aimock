@@ -87,8 +87,11 @@ export class A2AMock implements Mountable {
   private journalRequest(req: http.IncomingMessage, pathname: string, status: number): void {
     if (this.journal) {
       this.journal.add({
+        // req.url keeps the mount prefix and the query string, which pathname
+        // (the mount-relative sub-path) drops; the journal's ?path= and
+        // ?testId= filters both read this field.
         method: req.method ?? "POST",
-        path: pathname,
+        path: req.url ?? pathname,
         headers: flattenHeaders(req.headers),
         body: null,
         service: "a2a",
@@ -162,16 +165,7 @@ export class A2AMock implements Mountable {
       await this.dispatcher(req, res, body);
 
       // Journal the request after the handler completes
-      if (this.journal) {
-        this.journal.add({
-          method: req.method ?? "POST",
-          path: pathname,
-          headers: flattenHeaders(req.headers),
-          body: null,
-          service: "a2a",
-          response: { status: res.statusCode, fixture: null },
-        });
-      }
+      this.journalRequest(req, pathname, res.statusCode);
 
       return true;
     }
@@ -216,6 +210,7 @@ export class A2AMock implements Mountable {
           } else if (!res.writableEnded) {
             res.end();
           }
+          this.journalRequest(req, url.pathname, res.statusCode);
         });
       });
 
@@ -288,16 +283,7 @@ export class A2AMock implements Mountable {
           error: { code: -32000, message: "No matching pattern for message" },
         }),
       );
-      if (this.journal) {
-        this.journal.add({
-          method: "POST",
-          path: "/",
-          headers: flattenHeaders(req.headers),
-          body: null,
-          service: "a2a",
-          response: { status: res.statusCode, fixture: null },
-        });
-      }
+      this.journalRequest(req, "/", res.statusCode);
       return;
     }
 

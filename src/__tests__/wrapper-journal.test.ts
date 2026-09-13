@@ -12,7 +12,8 @@ import { Journal } from "../journal.js";
  * a journal entry. These paths previously skipped journaling: vector
  * malformed-JSON 400s (mountable + standalone) and standalone 404s, the A2A
  * agent-card fetch, A2A JSON-RPC parse errors, unmatched A2A streaming
- * messages, and the MCP/AG-UI standalone 500 catch blocks.
+ * messages, the A2A/MCP/AG-UI standalone 500 catch blocks, and the AG-UI
+ * standalone 404.
  */
 
 function rawRequest(
@@ -20,7 +21,7 @@ function rawRequest(
   path: string,
   method: string,
   rawBody?: string,
-): Promise<{ status: number; body: string }> {
+): Promise<{ status: number; body: string; headers: http.IncomingHttpHeaders }> {
   return new Promise((resolve, reject) => {
     const parsed = new URL(url);
     const headers: Record<string, string> =
@@ -36,7 +37,11 @@ function rawRequest(
         const chunks: Buffer[] = [];
         res.on("data", (c: Buffer) => chunks.push(c));
         res.on("end", () =>
-          resolve({ status: res.statusCode ?? 0, body: Buffer.concat(chunks).toString() }),
+          resolve({
+            status: res.statusCode ?? 0,
+            body: Buffer.concat(chunks).toString(),
+            headers: res.headers,
+          }),
         );
       },
     );
@@ -101,6 +106,27 @@ describe("vector wrapper journal coverage", () => {
         .getRequests()
         .filter((e) => e.service === "vector" && e.response.status === 400);
       expect(entries).toHaveLength(1);
+    } finally {
+      await llm.stop();
+    }
+  });
+
+  test("mountable unknown path journals the 404, matching standalone", async () => {
+    vector = new VectorMock();
+    vector.addCollection("default", { dimension: 3 });
+
+    const llm = new LLMock();
+    llm.mount("/vector", vector);
+    await llm.start();
+    try {
+      const res = await rawRequest(llm.url, "/vector/no-such-path", "GET");
+      expect(res.status).toBe(404);
+
+      const entries = llm
+        .getRequests()
+        .filter((e) => e.service === "vector" && e.response.status === 404);
+      expect(entries).toHaveLength(1);
+      expect(entries[0].path).toBe("/vector/no-such-path");
     } finally {
       await llm.stop();
     }
@@ -174,6 +200,57 @@ describe("a2a wrapper journal coverage", () => {
     expect(entries[0].service).toBe("a2a");
     expect(entries[0].response.status).toBe(200);
   });
+
+  test("standalone handler fault journals the 500", async () => {
+    a2a = new A2AMock();
+    a2a.registerAgent({ name: "fault-agent" });
+    const journal = new Journal();
+    a2a.setJournal(journal);
+    // Fault injection: the standalone catch only runs when handleRequest
+    // throws, which the validated paths never do.
+    vi.spyOn(a2a, "handleRequest").mockRejectedValueOnce(new Error("boom"));
+    const url = await a2a.start();
+
+    const res = await rawRequest(url, "/", "POST", JSON.stringify({ jsonrpc: "2.0" }));
+    expect(res.status).toBe(500);
+
+    const entries = journal.getAll();
+    expect(entries).toHaveLength(1);
+    expect(entries[0].service).toBe("a2a");
+    expect(entries[0].response.status).toBe(500);
+  });
+
+  test("entries record req.url, so the journal path/testId filters select them", async () => {
+    a2a = new A2AMock();
+    a2a.registerAgent({ name: "filter-agent" });
+
+    const llm = new LLMock();
+    llm.mount("/a2a", a2a);
+    await llm.start();
+    try {
+      const card = await rawRequest(llm.url, "/a2a/.well-known/agent-card.json?testId=t441", "GET");
+      expect(card.status).toBe(200);
+      const parse = await rawRequest(llm.url, "/a2a/?testId=t441", "POST", "{not valid");
+      expect(parse.status).toBe(200);
+
+      // One entry per request, and each carries the mount prefix + query string.
+      expect(llm.getRequests()).toHaveLength(2);
+      expect(llm.getRequests().map((e) => e.path)).toEqual([
+        "/a2a/.well-known/agent-card.json?testId=t441",
+        "/a2a/?testId=t441",
+      ]);
+
+      const byPath = await rawRequest(llm.url, "/__aimock/journal?path=/a2a", "GET");
+      expect(byPath.headers["x-total-count"]).toBe("2");
+      expect(JSON.parse(byPath.body)).toHaveLength(2);
+
+      const byTestId = await rawRequest(llm.url, "/__aimock/journal?testId=t441", "GET");
+      expect(byTestId.headers["x-total-count"]).toBe("2");
+      expect(JSON.parse(byTestId.body)).toHaveLength(2);
+    } finally {
+      await llm.stop();
+    }
+  });
 });
 
 describe("mcp/agui standalone 500 journal coverage", () => {
@@ -220,6 +297,26 @@ describe("mcp/agui standalone 500 journal coverage", () => {
       expect(entries).toHaveLength(1);
       expect(entries[0].service).toBe("agui");
       expect(entries[0].response.status).toBe(500);
+    } finally {
+      await agui.stop();
+    }
+  });
+
+  test("agui standalone unhandled request journals the 404", async () => {
+    const agui = new AGUIMock();
+    const journal = new Journal();
+    agui.setJournal(journal);
+    const url = await agui.start();
+    try {
+      const get = await rawRequest(url, "/", "GET");
+      expect(get.status).toBe(404);
+      const other = await rawRequest(url, "/other", "POST", JSON.stringify({}));
+      expect(other.status).toBe(404);
+
+      const entries = journal.getAll();
+      expect(entries).toHaveLength(2);
+      expect(entries.map((e) => e.response.status)).toEqual([404, 404]);
+      expect(entries.map((e) => e.service)).toEqual(["agui", "agui"]);
     } finally {
       await agui.stop();
     }
