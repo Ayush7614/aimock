@@ -178,6 +178,20 @@
 
         <div class="info-box">
           <p>
+            <strong>Accepted status codes: integers 200&ndash;999.</strong> The same range applies
+            to <code>nextRequestError()</code>, <code>POST /__aimock/error</code> and a
+            fixture&rsquo;s <code>response.status</code>. 600&ndash;999 is unassigned rather than
+            invalid &mdash; Node sends it and a client sees it &mdash; so it is allowed on purpose.
+            Outside the range the status could never reach the client: 1xx cannot terminate a
+            response and would hang the request until the client times out, and anything below 100,
+            above 999 or fractional makes Node throw, which loses the injected error and returns a
+            generic 500. <code>nextRequestError()</code> throws a <code>RangeError</code> at the
+            call site; the control API returns <code>400</code>; a fixture fails validation.
+          </p>
+        </div>
+
+        <div class="info-box">
+          <p>
             <strong>See also: <a href="/chaos-testing">Chaos Testing</a></strong> &mdash; for
             probabilistic failure injection. Chaos testing adds configurable rates for dropped
             requests (500), malformed JSON responses, and disconnects that trigger based on

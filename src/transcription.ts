@@ -23,23 +23,30 @@ import { createInterruptionSignal } from "./interruption.js";
 /**
  * Extract the multipart boundary string from a Content-Type header.
  *
- * Handles both bare (`boundary=abc123`) and RFC 2046 quoted-string
- * (`boundary="abc123"`) forms — browsers, `form-data`, and Python `requests`
- * commonly emit the quoted variant. Without unquoting, the `--"abc123"`
- * delimiter never matches and fields silently fall back to defaults.
+ * RFC 2046 §5.1.1 defines the boundary parameter as either a bare token
+ * (`boundary=abc123`) or a quoted-string (`boundary="abc123"`), and its
+ * `bchars` production INCLUDES a space — which is exactly the case the quoted
+ * form exists for, and the one a capture that stops at whitespace can never
+ * read. So the quotes are consumed BY the match rather than stripped after it:
+ * a post-strip runs on an already-truncated value and leaves `boundary="a b c"`
+ * as the useless `"a`, and the delimiter then never matches, so every form
+ * field silently falls back to its default (`whisper-1`, `dall-e-2`, …).
+ *
+ * Only DQUOTE quotes. An apostrophe is a legal RFC 2045 token character and a
+ * legal RFC 2046 `bchar`, so `boundary='abc'` is a BARE token whose value
+ * literally includes the quotes, and stripping them would break a working
+ * request.
+ *
+ * The `(?:^|[;\s])` prefix keeps a decoy parameter such as `myboundary=` from
+ * matching, and `\s*=\s*` tolerates the LWSP some clients put around the `=`.
  */
 export function extractBoundary(contentType: string | undefined): string | undefined {
   if (!contentType) return undefined;
-  const match = contentType.match(/boundary=([^\s;]+)/i);
-  if (!match?.[1]) return undefined;
-  let boundary = match[1].trim();
-  if (boundary.length >= 2) {
-    const first = boundary[0];
-    const last = boundary[boundary.length - 1];
-    if ((first === '"' && last === '"') || (first === "'" && last === "'")) {
-      boundary = boundary.slice(1, -1);
-    }
-  }
+  const match = contentType.match(/(?:^|[;\s])boundary\s*=\s*(?:"([^"]*)"|([^\s;]+))/i);
+  if (!match) return undefined;
+  // Group 1 is the quoted form (possibly the empty string), group 2 the bare
+  // token; an empty boundary is meaningless, so it reads as absent.
+  const boundary = match[1] !== undefined ? match[1] : match[2];
   return boundary || undefined;
 }
 

@@ -10,7 +10,12 @@ import type {
 } from "./types.js";
 import { Journal } from "./journal.js";
 import { matchFixtureDiagnostic, recordMatchOptions } from "./router.js";
-import { validateFixtures, entryToFixture } from "./fixture-loader.js";
+import {
+  validateFixtures,
+  entryToFixture,
+  isInjectableStatus,
+  INJECTED_STATUS_RANGE,
+} from "./fixture-loader.js";
 import { writeSSEStream, writeErrorResponse } from "./sse-writer.js";
 import { createInterruptionSignal } from "./interruption.js";
 import {
@@ -496,23 +501,19 @@ async function handleControlAPI(
 
     // Validate the payload — an unchecked `status` reaches
     // `res.writeHead(status)` on the next matched request and throws
-    // ERR_INVALID_HTTP_STATUS/RangeError for 99, 0, 1000, NaN, "500", etc.
+    // ERR_HTTP_INVALID_STATUS_CODE for 99, 0, 1000 or 99.5, losing the
+    // injected error and degrading to a generic 500.
     if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
       res.writeHead(400, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: "Invalid body: expected a JSON object" }));
       return true;
     }
-    const statusRaw = parsed.status;
-    // Undefined means "omitted" → default 500. Explicit null is invalid
-    // (it would otherwise fall through `??` and silently become 500).
-    const status = statusRaw === undefined ? 500 : statusRaw;
-    // 1xx is excluded: informational statuses can never terminate an HTTP
-    // response, so queueing one hangs the next request on writeHead(100).
-    if (typeof status !== "number" || !Number.isInteger(status) || status < 200 || status > 599) {
+    // Omitted — or an explicit null, which is how a serializer spells an absent
+    // optional — keeps the historic default of 500.
+    const status = parsed.status ?? 500;
+    if (!isInjectableStatus(status)) {
       res.writeHead(400, { "Content-Type": "application/json" });
-      res.end(
-        JSON.stringify({ error: "Invalid 'status': must be an integer between 200 and 599" }),
-      );
+      res.end(JSON.stringify({ error: `Invalid 'status': must be ${INJECTED_STATUS_RANGE}` }));
       return true;
     }
     const errorBody = parsed.body;
@@ -524,7 +525,10 @@ async function handleControlAPI(
       }
       for (const field of ["message", "type", "code"] as const) {
         const value = errorBody[field];
-        if (value !== undefined && typeof value !== "string") {
+        // null means absent, not invalid: aimock's own error envelope
+        // (`serializeErrorResponse`) emits `code: null`, and so does a real
+        // OpenAI error, so a captured body can be pasted back verbatim.
+        if (value !== undefined && value !== null && typeof value !== "string") {
           res.writeHead(400, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ error: `Invalid 'body.${field}': must be a string` }));
           return true;

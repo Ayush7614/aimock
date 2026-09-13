@@ -1051,7 +1051,7 @@ describe("validateFixtures", () => {
 
   it("error: error response with invalid status code", () => {
     const fixtures = [
-      makeFixture({ response: { error: { message: "err", type: "e" }, status: 999 } }),
+      makeFixture({ response: { error: { message: "err", type: "e" }, status: 1000 } }),
     ];
     const results = validateFixtures(fixtures);
     expect(
@@ -1059,15 +1059,27 @@ describe("validateFixtures", () => {
     ).toBe(true);
   });
 
-  it("accepts status code at lower boundary (100)", () => {
+  it("accepts status code at lower boundary (200)", () => {
     const fixtures = [
-      makeFixture({ response: { error: { message: "err", type: "e" }, status: 100 } }),
+      makeFixture({ response: { error: { message: "err", type: "e" }, status: 200 } }),
     ];
     const results = validateFixtures(fixtures);
     const statusErrors = results.filter(
       (r) => r.severity === "error" && r.message.includes("not a valid HTTP status"),
     );
     expect(statusErrors).toHaveLength(0);
+  });
+
+  it("rejects a 1xx status — it hangs the request instead of terminating it", () => {
+    // Node accepts 1xx at writeHead, but an informational status cannot end a
+    // response, so the client waits until it times out. Measured, not assumed.
+    const fixtures = [
+      makeFixture({ response: { error: { message: "err", type: "e" }, status: 100 } }),
+    ];
+    const results = validateFixtures(fixtures);
+    expect(
+      results.some((r) => r.severity === "error" && r.message.includes("not a valid HTTP status")),
+    ).toBe(true);
   });
 
   it("rejects status code below lower boundary (99)", () => {
@@ -1080,9 +1092,10 @@ describe("validateFixtures", () => {
     ).toBe(true);
   });
 
-  it("accepts status code at upper boundary (599)", () => {
+  it("accepts status code at upper boundary (999)", () => {
+    // 600-999 is unassigned, not invalid — Node sends it and a client sees it.
     const fixtures = [
-      makeFixture({ response: { error: { message: "err", type: "e" }, status: 599 } }),
+      makeFixture({ response: { error: { message: "err", type: "e" }, status: 999 } }),
     ];
     const results = validateFixtures(fixtures);
     const statusErrors = results.filter(

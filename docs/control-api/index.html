@@ -320,6 +320,25 @@
           <div class="code-block-header">Response <span class="lang-tag">json</span></div>
           <pre><code>{ <span class="prop">"queued"</span>: <span class="kw">true</span> }</code></pre>
         </div>
+        <p>
+          The payload is validated, and an invalid one is rejected with <code>400</code> and
+          <code>{ "error": "&hellip;" }</code> without queueing anything:
+        </p>
+        <ul>
+          <li>
+            <code>status</code> must be an integer from <strong>200 to 999</strong>. It may be
+            omitted or <code>null</code> (both mean 500). Outside that range the status could never
+            reach the client &mdash; 1xx cannot terminate a response and hangs the request, and
+            anything below 100, above 999 or fractional makes Node throw and degrade to a generic
+            500. A string such as <code>"500"</code> is rejected: send a number.
+          </li>
+          <li>
+            <code>body</code>, when present, must be an object; its <code>message</code>,
+            <code>type</code> and <code>code</code> must be strings. <code>null</code> is accepted
+            for any of them and means &ldquo;absent&rdquo;, so an error envelope captured from
+            aimock or from OpenAI (both emit <code>"code": null</code>) can be pasted back verbatim.
+          </li>
+        </ul>
       </main>
       <aside class="page-toc" id="page-toc"></aside>
     </div>
