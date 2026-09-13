@@ -7,7 +7,15 @@
  */
 
 import type * as http from "node:http";
-import { flattenHeaders, matchesPattern, normalizeTextInput } from "./helpers.js";
+import {
+  flattenHeaders,
+  matchesPattern,
+  normalizeTextInput,
+  resolveStrictMode,
+  strictNoMatchLogLine,
+  strictNoMatchMessage,
+  strictOverrideField,
+} from "./helpers.js";
 import type { Journal } from "./journal.js";
 import type { Logger } from "./logger.js";
 
@@ -33,7 +41,7 @@ export async function handleSearch(
   raw: string,
   fixtures: SearchFixture[],
   journal: Journal,
-  defaults: { logger: Logger },
+  defaults: { logger: Logger; strict?: boolean },
   setCorsHeaders: (res: http.ServerResponse) => void,
 ): Promise<void> {
   const { logger } = defaults;
@@ -110,6 +118,37 @@ export async function handleSearch(
     logger.debug(`No search fixture matched for query "${query.slice(0, 80)}" — returning empty`);
   }
 
+  // Strict mode turns the lenient default (empty results) into a no-match
+  // error, like every other fixture-matching handler. These fixtures carry no
+  // sequence/turn state, so the skipped count is always 0.
+  if (!matchedFixture && resolveStrictMode(defaults.strict, req.headers)) {
+    const strictMessage = strictNoMatchMessage(0);
+    logger.error(strictNoMatchLogLine(req.method ?? "POST", req.url ?? "/search", 0));
+    journal.add({
+      method: req.method ?? "POST",
+      path: req.url ?? "/search",
+      headers: flattenHeaders(req.headers),
+      body: null,
+      service: "search",
+      response: {
+        status: 503,
+        fixture: null,
+        ...strictOverrideField(defaults.strict, req.headers),
+      },
+    });
+    res.writeHead(503, { "Content-Type": "application/json" });
+    res.end(
+      JSON.stringify({
+        error: {
+          message: strictMessage,
+          type: "invalid_request_error",
+          code: "no_fixture_match",
+        },
+      }),
+    );
+    return;
+  }
+
   // Apply max_results limit
   if (maxResults !== undefined && maxResults > 0) {
     matchedResults = matchedResults.slice(0, maxResults);
@@ -121,7 +160,11 @@ export async function handleSearch(
     headers: flattenHeaders(req.headers),
     body: null,
     service: "search",
-    response: { status: 200, fixture: null },
+    response: {
+      status: 200,
+      fixture: null,
+      ...strictOverrideField(defaults.strict, req.headers),
+    },
   });
 
   res.writeHead(200, { "Content-Type": "application/json" });
