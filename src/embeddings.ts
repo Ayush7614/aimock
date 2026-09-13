@@ -131,7 +131,7 @@ export async function handleEmbeddings(
           message:
             "Invalid parameter: 'input' must be a string, an array of strings, or an array of tokens",
           type: "invalid_request_error",
-          param: "input",
+          param: null,
           code: null,
         },
       }),
@@ -328,7 +328,7 @@ export async function handleEmbeddings(
         error: {
           message: `Invalid parameter: 'dimensions' must be an integer between 1 and ${MAX_EMBEDDING_DIMENSIONS}`,
           type: "invalid_request_error",
-          param: "dimensions",
+          param: null,
           code: null,
         },
       }),

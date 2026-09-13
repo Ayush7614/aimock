@@ -93,9 +93,9 @@ describe("validateEmbeddingDimensions", () => {
     // Literal on purpose: referencing the constant alone lets the cap drift.
     //
     // The cap is a serialization budget, not an allocation bound. Measured on
-    // this tree, a response body costs 19.58 bytes per dimension (4096 ->
-    // 80,456 B; 1,000,000 -> 19,583,034 B), so 100,000 dimensions is a ~1.96 MB
-    // body, built in 7 ms at 83 MB RSS under a 1 GB heap. That leaves >12x the
+    // this tree, a response body costs 19.58 bytes per dimension (4096 →
+    // 80,456 B; 1,000,000 → 19,583,034 B), so 100,000 dimensions is a ~1.96 MB
+    // body, built in 7 ms at 83 MB RSS under a 1 GB heap. That leaves >12× the
     // widest width in circulation (3072 for text-embedding-3-large, 4096/8192
     // on the OpenAI-compatible servers this endpoint also serves) while keeping
     // every accepted request serviceable.
@@ -165,7 +165,7 @@ describe("POST /v1/embeddings strict validation", () => {
     });
     expect(res.status).toBe(400);
     expect(res.json).toMatchObject({
-      error: { type: "invalid_request_error", param: "input", code: null },
+      error: { type: "invalid_request_error", param: null, code: null },
     });
   });
 
@@ -198,7 +198,7 @@ describe("POST /v1/embeddings strict validation", () => {
       });
       expect(res.status).toBe(400);
       expect(res.json).toMatchObject({
-        error: { type: "invalid_request_error", param: "dimensions", code: null },
+        error: { type: "invalid_request_error", param: null, code: null },
       });
     }
   });
@@ -320,7 +320,7 @@ describe("POST /v1/moderations strict validation", () => {
       const res = await post(`${instance.url}/v1/moderations`, { input: bad });
       expect(res.status).toBe(400);
       expect(res.json).toMatchObject({
-        error: { type: "invalid_request_error", param: "input", code: null },
+        error: { type: "invalid_request_error", param: null, code: null },
       });
     }
   });
@@ -404,5 +404,37 @@ describe("POST /v2/rerank strict validation", () => {
     instance = await createServer([]);
     const res = await post(`${instance.url}/v2/rerank`, { query: "best pizza" });
     expect(res.status).toBe(200);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Error-envelope convention
+// ---------------------------------------------------------------------------
+
+describe("aimock-authored 400 envelopes", () => {
+  it("emits param: null and code: null, never an authored field name", async () => {
+    // `openai/error.js` reads `param`/`code` straight off `body.error`, so the
+    // keys must be present or consumers see `undefined`. The *values* are a
+    // different question: no real OpenAI 400 for these endpoints is recorded
+    // anywhere in `fixtures/`, so `param: "input"` would be a wire value aimock
+    // authored rather than observed. `src/server.ts` already answers this the
+    // honest way — its four aimock-authored 400s all emit `param: null,
+    // code: null` — and `src/byteplus-video.ts` states the rule: the mock never
+    // authors a wire value it did not observe.
+    instance = await createServer([]);
+    const cases: [string, unknown][] = [
+      ["/v1/embeddings", { model: "text-embedding-3-small", input: 123 }],
+      ["/v1/embeddings", { model: "text-embedding-3-small", input: "hi", dimensions: 4294967296 }],
+      ["/v1/moderations", { input: 123 }],
+    ];
+    for (const [path, body] of cases) {
+      const res = await post(`${instance.url}${path}`, body);
+      expect(res.status).toBe(400);
+      const error = (res.json as { error: Record<string, unknown> }).error;
+      expect(error).toHaveProperty("param");
+      expect(error).toHaveProperty("code");
+      expect(error.param).toBeNull();
+      expect(error.code).toBeNull();
+    }
   });
 });

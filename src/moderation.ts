@@ -120,7 +120,7 @@ export async function handleModeration(
           message:
             "Invalid parameter: 'input' must be a string, an array of strings, or an array of multimodal parts",
           type: "invalid_request_error",
-          param: "input",
+          param: null,
           code: null,
         },
       }),
