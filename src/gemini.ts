@@ -817,6 +817,7 @@ export async function handleGemini(
       fixture,
       defaults.chaos,
       req.headers,
+      req.url,
       journal,
       {
         method: req.method ?? "POST",

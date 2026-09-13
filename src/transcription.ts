@@ -152,6 +152,7 @@ export async function handleTranscription(
       fixture,
       defaults.chaos,
       req.headers,
+      req.url,
       journal,
       { method, path, headers: flattenHeaders(req.headers), body: syntheticReq },
       fixture ? "fixture" : "proxy",

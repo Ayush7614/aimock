@@ -18,6 +18,7 @@ import type {
   Fixture,
 } from "./types.js";
 import { writeErrorResponse } from "./sse-writer.js";
+import { resolveTestId } from "./helpers.js";
 import type { Journal } from "./journal.js";
 import type { Logger } from "./logger.js";
 import type { MetricsRegistry } from "./metrics.js";
@@ -32,22 +33,20 @@ export function isChaosScope(defaults: ChaosDefaults): defaults is ChaosScope {
 
 /**
  * Pick the server-level chaos config that applies to THIS request: the override
- * installed for its `X-Test-Id`, else the server-wide baseline. Scoping is by
- * header only — the same rule the control API applies when storing an override,
- * so the two sides cannot disagree.
+ * installed for its testId, else the server-wide baseline. The testId is
+ * resolved by `resolveTestId` — the same helper `getTestId` and the control API
+ * use — so a harness that tags by `?testId=` lands in the same scope its chaos
+ * override was stored under, and the two sides cannot disagree.
  */
 function resolveScopedDefaults(
   serverDefaults: ChaosDefaults | undefined,
   rawHeaders?: http.IncomingHttpHeaders,
+  url?: string,
 ): ChaosConfig | undefined {
   if (!serverDefaults) return undefined;
   if (!isChaosScope(serverDefaults)) return serverDefaults;
-  const headerValue = rawHeaders?.["x-test-id"];
-  const testId = Array.isArray(headerValue) ? headerValue[0] : headerValue;
-  if (testId) {
-    const scoped = serverDefaults.byTestId?.get(testId);
-    if (scoped) return scoped;
-  }
+  const scoped = serverDefaults.byTestId?.get(resolveTestId(rawHeaders ?? {}, url));
+  if (scoped) return scoped;
   return serverDefaults.base;
 }
 
@@ -61,8 +60,9 @@ function resolveChaosConfig(
   serverDefaults?: ChaosDefaults,
   rawHeaders?: http.IncomingHttpHeaders,
   logger?: Logger,
+  url?: string,
 ): ChaosConfig {
-  const base: ChaosConfig = { ...resolveScopedDefaults(serverDefaults, rawHeaders) };
+  const base: ChaosConfig = { ...resolveScopedDefaults(serverDefaults, rawHeaders, url) };
 
   // Fixture-level overrides server defaults
   if (fixture?.chaos) {
@@ -141,8 +141,9 @@ export function evaluateChaos(
   serverDefaults?: ChaosDefaults,
   rawHeaders?: http.IncomingHttpHeaders,
   logger?: Logger,
+  url?: string,
 ): ChaosAction | null {
-  const config = resolveChaosConfig(fixture, serverDefaults, rawHeaders, logger);
+  const config = resolveChaosConfig(fixture, serverDefaults, rawHeaders, logger, url);
 
   if (config.dropRate !== undefined && config.dropRate > 0 && Math.random() < config.dropRate) {
     return "drop";
@@ -176,6 +177,11 @@ interface ChaosJournalContext {
  * Apply chaos to a request. Returns true if chaos was applied (caller should
  * return early), false if the request should proceed normally.
  *
+ * `requestUrl` is the RAW `req.url` (query string included) — chaos scoping
+ * resolves the testId from it exactly as `getTestId` does, so `?testId=` tagged
+ * traffic is not silently unscoped. It is required, not optional, so a new
+ * handler cannot forget it.
+ *
  * `source` is required so the invariant "this handler only applies chaos in
  * the <X> phase" is enforced at the type level. A future handler that grows
  * a proxy path MUST pass `"proxy"` explicitly; the default can't drift silently.
@@ -185,13 +191,14 @@ export function applyChaos(
   fixture: Fixture | null,
   serverDefaults: ChaosDefaults | undefined,
   rawHeaders: http.IncomingHttpHeaders,
+  requestUrl: string | undefined,
   journal: Journal,
   context: ChaosJournalContext,
   source: "fixture" | "proxy" | "internal",
   registry?: MetricsRegistry,
   logger?: Logger,
 ): boolean {
-  const action = evaluateChaos(fixture, serverDefaults, rawHeaders, logger);
+  const action = evaluateChaos(fixture, serverDefaults, rawHeaders, logger, requestUrl);
   if (!action) return false;
   applyChaosAction(action, res, fixture, journal, context, source, registry);
   return true;

@@ -400,6 +400,7 @@ export async function handleGrokVideoCreate(
       fixture,
       defaults.chaos,
       req.headers,
+      req.url,
       journal,
       { method, path, headers: flattenHeaders(req.headers), body: syntheticReq },
       fixture
@@ -598,6 +599,7 @@ export async function handleGrokVideoStatus(
       null,
       defaults.chaos,
       req.headers,
+      req.url,
       journal,
       { method, path, headers: flattenHeaders(req.headers), body: null },
       "internal",

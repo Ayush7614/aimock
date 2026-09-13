@@ -2,6 +2,7 @@ import { describe, it, expect, afterEach } from "vitest";
 import * as http from "node:http";
 import type { Fixture, ChatCompletionRequest } from "../types.js";
 import { createServer, type ServerInstance } from "../server.js";
+import { LLMock } from "../llmock.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -556,5 +557,163 @@ describe("fixture dump responseKind", () => {
       userMessage: "a",
       systemMessage: ["alpha", "beta"],
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Chaos scoping: the cross-test-leak boundary
+// ---------------------------------------------------------------------------
+
+describe("chaos scope isolation", () => {
+  it("rejects a present-but-empty X-Test-Id instead of installing a server-wide baseline", async () => {
+    instance = await createServer([
+      { match: { userMessage: "hello" }, response: { content: "Hi" } },
+    ]);
+    // `String(testId ?? "")` in a harness sends this. Treating it as "untagged"
+    // would drop chaos on every other test running against the same server.
+    const res = await request(`${instance.url}/__aimock/chaos`, "POST", {
+      body: { dropRate: 1 },
+      headers: { "X-Test-Id": "" },
+    });
+    expect(res.status).toBe(400);
+
+    const foreign = await request(`${instance.url}/v1/chat/completions`, "POST", {
+      body: chatRequest("hello"),
+      headers: { "X-Test-Id": "t2" },
+    });
+    expect(foreign.status).toBe(200);
+    const untagged = await request(`${instance.url}/v1/chat/completions`, "POST", {
+      body: chatRequest("hello"),
+    });
+    expect(untagged.status).toBe(200);
+
+    // GET and DELETE reject it too — a blank tag is never a scope.
+    expect(
+      (await request(`${instance.url}/__aimock/chaos`, "GET", { headers: { "X-Test-Id": "" } }))
+        .status,
+    ).toBe(400);
+    expect(
+      (await request(`${instance.url}/__aimock/chaos`, "DELETE", { headers: { "X-Test-Id": "" } }))
+        .status,
+    ).toBe(400);
+  });
+
+  it("leaves per-testId overrides alone when an untagged DELETE drops the baseline", async () => {
+    instance = await createServer([
+      { match: { userMessage: "hello" }, response: { content: "Hi" } },
+    ]);
+    const installed = await request(`${instance.url}/__aimock/chaos`, "POST", {
+      body: { dropRate: 1 },
+      headers: { "X-Test-Id": "t1" },
+    });
+    expect(installed.status).toBe(200);
+    const before = await request(`${instance.url}/v1/chat/completions`, "POST", {
+      body: chatRequest("hello"),
+      headers: { "X-Test-Id": "t1" },
+    });
+    expect(before.status).toBe(500);
+
+    // Another test's cleanup. Untagged DELETE is symmetric with untagged POST:
+    // it drops the baseline only. Only POST /__aimock/reset clears everything.
+    const del = await request(`${instance.url}/__aimock/chaos`, "DELETE");
+    expect(del.status).toBe(200);
+
+    const after = await request(`${instance.url}/v1/chat/completions`, "POST", {
+      body: chatRequest("hello"),
+      headers: { "X-Test-Id": "t1" },
+    });
+    expect(after.status).toBe(500);
+
+    // ...and POST /__aimock/reset still is the full clear.
+    await request(`${instance.url}/__aimock/reset`, "POST");
+    const reset = await request(`${instance.url}/v1/chat/completions`, "POST", {
+      body: chatRequest("hello"),
+      headers: { "X-Test-Id": "t1" },
+    });
+    expect(reset.status).not.toBe(500);
+  });
+
+  it("scopes chaos by ?testId= exactly as it scopes by X-Test-Id", async () => {
+    instance = await createServer([
+      { match: { userMessage: "hello" }, response: { content: "Hi" } },
+    ]);
+    // Installed with a QUERY tag...
+    const installed = await request(`${instance.url}/__aimock/chaos?testId=q1`, "POST", {
+      body: { dropRate: 1 },
+    });
+    expect(installed.status).toBe(200);
+
+    // ...applies to query-tagged AND header-tagged traffic for q1...
+    const viaQuery = await request(`${instance.url}/v1/chat/completions?testId=q1`, "POST", {
+      body: chatRequest("hello"),
+    });
+    expect(viaQuery.status).toBe(500);
+    const viaHeader = await request(`${instance.url}/v1/chat/completions`, "POST", {
+      body: chatRequest("hello"),
+      headers: { "X-Test-Id": "q1" },
+    });
+    expect(viaHeader.status).toBe(500);
+
+    // ...and to nothing else. A query tag is a SCOPE, not a server-wide switch.
+    const untagged = await request(`${instance.url}/v1/chat/completions`, "POST", {
+      body: chatRequest("hello"),
+    });
+    expect(untagged.status).toBe(200);
+    const other = await request(`${instance.url}/v1/chat/completions?testId=q2`, "POST", {
+      body: chatRequest("hello"),
+    });
+    expect(other.status).toBe(200);
+  });
+
+  it("rejects unknown query params on GET /__aimock/fixtures", async () => {
+    instance = await createServer([
+      { match: { userMessage: "hello" }, response: { content: "Hi" } },
+    ]);
+    // `?incluide=fixtures` must not quietly return the count-only body and pass
+    // an assertion about a dump the caller never got — same rule as /journal.
+    for (const qs of ["?nope=1", "?incluide=fixtures", "?Include=fixtures"]) {
+      const res = await request(`${instance.url}/__aimock/fixtures${qs}`, "GET");
+      expect(res.status).toBe(400);
+    }
+    expect((await request(`${instance.url}/__aimock/fixtures`, "GET")).status).toBe(200);
+    expect(
+      (await request(`${instance.url}/__aimock/fixtures?include=fixtures`, "GET")).status,
+    ).toBe(200);
+  });
+});
+
+describe("LLMock.setChaos / clearChaos vs a runtime override", () => {
+  it("still takes effect after an untagged POST /__aimock/chaos has shadowed the options", async () => {
+    const mock = new LLMock({ chaos: { dropRate: 1 } });
+    mock.addFixture({ match: { userMessage: "hello" }, response: { content: "Hi" } });
+    const url = await mock.start();
+    try {
+      expect(
+        (await request(`${url}/v1/chat/completions`, "POST", { body: chatRequest("hello") }))
+          .status,
+      ).toBe(500);
+
+      // An untagged control call installs a baseline override over options.chaos.
+      expect((await request(`${url}/__aimock/chaos`, "POST", { body: {} })).status).toBe(200);
+      expect(
+        (await request(`${url}/v1/chat/completions`, "POST", { body: chatRequest("hello") }))
+          .status,
+      ).toBe(200);
+
+      // The in-process API must not silently no-op against it.
+      mock.setChaos({ dropRate: 1 });
+      expect(
+        (await request(`${url}/v1/chat/completions`, "POST", { body: chatRequest("hello") }))
+          .status,
+      ).toBe(500);
+
+      mock.clearChaos();
+      expect(
+        (await request(`${url}/v1/chat/completions`, "POST", { body: chatRequest("hello") }))
+          .status,
+      ).toBe(200);
+    } finally {
+      await mock.stop();
+    }
   });
 });

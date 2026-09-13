@@ -1289,23 +1289,33 @@ export function matchesPattern(text: string, pattern: string | RegExp): boolean 
   return result;
 }
 
-export function getTestId(req: http.IncomingMessage): string {
-  const headerValue = req.headers["x-test-id"];
+/**
+ * The ONE definition of "which test does this traffic belong to": the
+ * `X-Test-Id` header wins, then `?testId=` in the query string, then
+ * `DEFAULT_TEST_ID`. Every per-test axis (fixture match-counts, the journal
+ * filter, chaos scoping) resolves through this, so a caller that tags one way
+ * can never land in two different scopes.
+ */
+export function resolveTestId(headers: IncomingHttpHeaders, url: string | undefined): string {
+  const headerValue = headers["x-test-id"];
   if (Array.isArray(headerValue)) {
     if (headerValue.length > 0 && headerValue[0]) return headerValue[0];
   } else if (typeof headerValue === "string" && headerValue) {
     return headerValue;
   }
 
-  const url = req.url ?? "/";
-  const qIdx = url.indexOf("?");
+  const qIdx = (url ?? "/").indexOf("?");
   if (qIdx !== -1) {
-    const params = new URLSearchParams(url.slice(qIdx + 1));
+    const params = new URLSearchParams((url ?? "/").slice(qIdx + 1));
     const queryValue = params.get("testId");
     if (queryValue) return queryValue;
   }
 
   return DEFAULT_TEST_ID;
+}
+
+export function getTestId(req: http.IncomingMessage): string {
+  return resolveTestId(req.headers, req.url);
 }
 
 export function getContext(req: http.IncomingMessage): string | undefined {

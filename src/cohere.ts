@@ -1010,6 +1010,7 @@ export async function handleCohere(
       fixture,
       defaults.chaos,
       req.headers,
+      req.url,
       journal,
       {
         method: req.method ?? "POST",
@@ -1445,6 +1446,7 @@ export async function handleCohereEmbed(
       fixture,
       defaults.chaos,
       req.headers,
+      req.url,
       journal,
       {
         method: req.method ?? "POST",

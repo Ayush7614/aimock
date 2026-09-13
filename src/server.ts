@@ -298,6 +298,9 @@ function handleNotFound(res: http.ServerResponse, message: string): void {
 
 const CONTROL_PREFIX = "/__aimock";
 
+/** The complete `GET /__aimock/fixtures` query-param vocabulary; anything else 400s. */
+const FIXTURES_PARAMS: ReadonlySet<string> = new Set(["include"]);
+
 /** The complete `GET /__aimock/journal` query-param vocabulary; anything else 400s. */
 const JOURNAL_PARAMS: ReadonlySet<string> = new Set([
   "limit",
@@ -427,16 +430,30 @@ function journalEntryTestId(entry: JournalEntry): string {
 }
 
 /**
- * The testId a chaos override is stored under, and read back with. Uses the
- * `X-Test-Id` HEADER only — deliberately the same rule `resolveScopedDefaults`
- * applies to the traffic being evaluated, so a control call and the requests it
- * is meant to affect can never resolve to different scopes. `DEFAULT_TEST_ID`
- * (i.e. no header) means the server-wide baseline.
+ * The testId a chaos override is stored under, and read back with — resolved by
+ * `getTestId`, i.e. `X-Test-Id` header then `?testId=`, exactly as
+ * `resolveScopedDefaults` resolves the traffic being evaluated. A control call
+ * and the requests it is meant to affect can then never land in different
+ * scopes. `DEFAULT_TEST_ID` (neither header nor param) means the server-wide
+ * baseline.
+ *
+ * Returns `null` when `X-Test-Id` is PRESENT but blank. `String(testId ?? "")`
+ * in a harness produces that trivially, and silently treating it as "untagged"
+ * would install a server-wide baseline that fails every other test — the exact
+ * cross-test leak per-testId scoping exists to prevent. Callers must 400.
  */
-function chaosScopeId(req: http.IncomingMessage): string {
+function chaosScopeId(req: http.IncomingMessage): string | null {
   const headerValue = req.headers["x-test-id"];
-  const testId = Array.isArray(headerValue) ? headerValue[0] : headerValue;
-  return testId || DEFAULT_TEST_ID;
+  const raw = Array.isArray(headerValue) ? headerValue[0] : headerValue;
+  if (typeof raw === "string" && raw.trim() === "") return null;
+  return getTestId(req);
+}
+
+/** 400 for a control call whose `X-Test-Id` is present but blank. */
+function writeBlankTestId(res: http.ServerResponse): true {
+  res.writeHead(400, { "Content-Type": "application/json" });
+  res.end(JSON.stringify({ error: "Invalid 'X-Test-Id': header is present but empty" }));
+  return true;
 }
 
 /** The chaos config in effect for one testId: its override, else the baseline. */
@@ -556,6 +573,20 @@ async function handleControlAPI(
   // ?include=fixtures, also dump each fixture's (redacted) match criteria
   // and response kind so harnesses can assert what would match.
   if (subPath === "/fixtures" && req.method === "GET") {
+    // Unknown params 400 for the same reason `/journal` does: a typo like
+    // `?incluide=fixtures` must never quietly return the count-only body and
+    // pass an assertion against a dump the caller never received.
+    for (const key of searchParams.keys()) {
+      if (!FIXTURES_PARAMS.has(key)) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify({
+            error: `Unknown query parameter: '${key}'. Supported: ${[...FIXTURES_PARAMS].join(", ")}`,
+          }),
+        );
+        return true;
+      }
+    }
     const include = searchParams.get("include");
     if (include === null) {
       res.writeHead(200, { "Content-Type": "application/json" });
@@ -589,21 +620,25 @@ async function handleControlAPI(
   // testId: its own override if one is installed, else the server-wide
   // baseline (the construction config, or an untagged override).
   if (subPath === "/chaos" && req.method === "GET") {
+    const scopeId = chaosScopeId(req);
+    if (scopeId === null) return writeBlankTestId(res);
     res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ chaos: effectiveChaos(defaults, chaosScopeId(req)) }));
+    res.end(JSON.stringify({ chaos: effectiveChaos(defaults, scopeId) }));
     return true;
   }
 
   // DELETE /__aimock/chaos — drop the override for this caller's testId (or the
   // server-wide baseline when untagged), falling back to what it shadowed.
   // `POST {}` means "explicitly no chaos"; this means "forget I said anything".
+  //
+  // SYMMETRIC with POST: an untagged DELETE drops the untagged baseline ONLY.
+  // Dropping every per-testId override too would let one test's cleanup revoke
+  // a concurrently-running test's opt-out. `POST /__aimock/reset` is the one
+  // route that clears everything.
   if (subPath === "/chaos" && req.method === "DELETE") {
     const scopeId = chaosScopeId(req);
-    if (scopeId === DEFAULT_TEST_ID) {
-      defaults.chaos = undefined;
-    } else {
-      defaults.chaosByTestId?.delete(scopeId);
-    }
+    if (scopeId === null) return writeBlankTestId(res);
+    defaults.chaosByTestId?.delete(scopeId);
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ chaos: effectiveChaos(defaults, scopeId) }));
     return true;
@@ -614,12 +649,14 @@ async function handleControlAPI(
   // numbers in [0, 1]; `{}` means explicitly no chaos. Unknown fields and
   // out-of-range values are rejected with 400.
   //
-  // SCOPED to the caller's `X-Test-Id`, like every other mutable axis in the
-  // server (fixture match-counts, video job maps): an override installed by
-  // test `t1` applies only to traffic carrying `X-Test-Id: t1`. An untagged
-  // call sets the server-wide baseline. `POST /__aimock/reset` drops all of it,
-  // restoring the chaos config the server was STARTED with.
+  // SCOPED to the caller's testId (`X-Test-Id`, else `?testId=`), like every
+  // other mutable axis in the server (fixture match-counts, video job maps): an
+  // override installed by test `t1` applies only to traffic resolving to `t1`.
+  // An untagged call sets the server-wide baseline. `POST /__aimock/reset`
+  // drops all of it, restoring the chaos config the server was STARTED with.
   if (subPath === "/chaos" && req.method === "POST") {
+    const scopeId = chaosScopeId(req);
+    if (scopeId === null) return writeBlankTestId(res);
     let raw: string;
     try {
       raw = await readBody(req);
@@ -665,12 +702,7 @@ async function handleControlAPI(
       }
       next[key] = value;
     }
-    const scopeId = chaosScopeId(req);
-    if (scopeId === DEFAULT_TEST_ID) {
-      defaults.chaos = next;
-    } else {
-      defaults.chaosByTestId?.set(scopeId, next);
-    }
+    defaults.chaosByTestId?.set(scopeId, next);
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ chaos: effectiveChaos(defaults, scopeId) }));
     return true;
@@ -1151,7 +1183,7 @@ async function handleCompletions(
   //                            beforeWriteResponse hook (passed only when the
   //                            action is malformed, so the hook doesn't need
   //                            to re-check the action).
-  const chaosAction = evaluateChaos(fixture, defaults.chaos, req.headers, defaults.logger);
+  const chaosAction = evaluateChaos(fixture, defaults.chaos, req.headers, defaults.logger, req.url);
   const chaosContext = { method, path, headers: flatHeaders, body };
 
   if (chaosAction === "drop" || chaosAction === "disconnect") {
@@ -1729,8 +1761,10 @@ export async function createServerWithResolvedAuth(
   const serverOptions = options ?? {};
   // Runtime-mutable server chaos config. Reads fall through to the construction
   // options until POST /__aimock/chaos installs an override, which is scoped to
-  // the caller's X-Test-Id (untagged = the server-wide baseline).
-  let chaosBaseOverride: ChaosConfig | undefined;
+  // the caller's testId. The untagged baseline lives in the SAME map under
+  // DEFAULT_TEST_ID, so "drop the baseline" and "drop one test's override" are
+  // one operation and neither can accidentally take the other's overrides with
+  // it; only assigning `undefined` (a full reset) clears the map.
   const chaosByTestId = new Map<string, ChaosConfig>();
   const defaults = {
     latency: serverOptions.latency ?? 0,
@@ -1741,7 +1775,10 @@ export async function createServerWithResolvedAuth(
     // Handlers get a SCOPE, not a flat config: chaos.ts picks the override for
     // the request's X-Test-Id and falls back to the baseline.
     get chaos(): ChaosDefaults {
-      return { base: chaosBaseOverride ?? serverOptions.chaos, byTestId: chaosByTestId };
+      return {
+        base: chaosByTestId.get(DEFAULT_TEST_ID) ?? serverOptions.chaos,
+        byTestId: chaosByTestId,
+      };
     },
     // Assigning `undefined` drops EVERY runtime override instead of latching an
     // empty one, so the construction-time chaos config is always recoverable
@@ -1749,11 +1786,12 @@ export async function createServerWithResolvedAuth(
     // real, empty override: "explicitly no chaos".
     set chaos(value: ChaosDefaults | undefined) {
       if (value === undefined) {
-        chaosBaseOverride = undefined;
         chaosByTestId.clear();
         return;
       }
-      chaosBaseOverride = isChaosScope(value) ? value.base : value;
+      const base = isChaosScope(value) ? value.base : value;
+      if (base === undefined) chaosByTestId.delete(DEFAULT_TEST_ID);
+      else chaosByTestId.set(DEFAULT_TEST_ID, base);
     },
     registry,
     get record() {
@@ -3494,7 +3532,13 @@ export async function createServerWithResolvedAuth(
       try {
         falBody = req.method === "POST" || req.method === "PUT" ? await readBody(req) : "";
         const raw = falBody;
-        const chaosAction = evaluateChaos(null, defaults.chaos, req.headers, defaults.logger);
+        const chaosAction = evaluateChaos(
+          null,
+          defaults.chaos,
+          req.headers,
+          defaults.logger,
+          req.url,
+        );
         if (chaosAction) {
           applyChaosAction(
             chaosAction,
@@ -3562,7 +3606,13 @@ export async function createServerWithResolvedAuth(
       try {
         const raw =
           req.method === "POST" || req.method === "PUT" ? (falBody ?? (await readBody(req))) : "{}";
-        const chaosAction = evaluateChaos(null, defaults.chaos, req.headers, defaults.logger);
+        const chaosAction = evaluateChaos(
+          null,
+          defaults.chaos,
+          req.headers,
+          defaults.logger,
+          req.url,
+        );
         if (chaosAction) {
           applyChaosAction(
             chaosAction,

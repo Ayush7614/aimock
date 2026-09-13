@@ -145,6 +145,7 @@ export async function handleGeminiEmbedContent(
       fixture,
       defaults.chaos,
       req.headers,
+      req.url,
       journal,
       {
         method: req.method ?? "POST",

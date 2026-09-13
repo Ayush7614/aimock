@@ -311,6 +311,7 @@ export async function handleVeoVideoCreate(
       fixture,
       defaults.chaos,
       req.headers,
+      req.url,
       journal,
       { method, path, headers: flattenHeaders(req.headers), body: syntheticReq },
       fixture
@@ -493,6 +494,7 @@ export async function handleVeoVideoStatus(
       null,
       defaults.chaos,
       req.headers,
+      req.url,
       journal,
       { method, path, headers: flattenHeaders(req.headers), body: null },
       "internal",
