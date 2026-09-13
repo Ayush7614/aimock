@@ -219,3 +219,29 @@ describe("non-object JSON bodies are rejected with the same 400", () => {
     expect(message).toBe("Request body must be a JSON object");
   });
 });
+
+describe("the non-object-body 400 does not claim the JSON was malformed", () => {
+  test("omits `code` — `invalid_json` belongs to the parse-failure branch", async () => {
+    const base = await start();
+    const res = await fetch(`${base}/v1/embeddings`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "null",
+    });
+    expect(res.status).toBe(400);
+    const json = (await res.json()) as { error: Record<string, unknown> };
+    expect(json.error.message).toBe("Request body must be a JSON object");
+    expect(json.error).not.toHaveProperty("code");
+
+    // The adjacent malformed-JSON branch still carries it.
+    const bad = await fetch(`${base}/v1/embeddings`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{oops",
+    });
+    expect(bad.status).toBe(400);
+    const badJson = (await bad.json()) as { error: Record<string, unknown> };
+    expect(badJson.error.code).toBe("invalid_json");
+    expect(String(badJson.error.message)).toContain("Malformed JSON");
+  });
+});

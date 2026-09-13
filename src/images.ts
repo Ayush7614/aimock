@@ -102,7 +102,6 @@ export async function handleImages(
           error: {
             message: "Request body must be a JSON object",
             type: "invalid_request_error",
-            code: "invalid_json",
           },
         }),
       );
