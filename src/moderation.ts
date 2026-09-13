@@ -7,7 +7,16 @@
  */
 
 import type * as http from "node:http";
-import { flattenHeaders, generateId, matchesPattern, normalizeTextInput } from "./helpers.js";
+import {
+  flattenHeaders,
+  generateId,
+  matchesPattern,
+  normalizeTextInput,
+  resolveStrictMode,
+  strictNoMatchLogLine,
+  strictNoMatchMessage,
+  strictOverrideField,
+} from "./helpers.js";
 import type { Journal } from "./journal.js";
 import type { Logger } from "./logger.js";
 
@@ -68,7 +77,7 @@ export async function handleModeration(
   raw: string,
   fixtures: ModerationFixture[],
   journal: Journal,
-  defaults: { logger: Logger },
+  defaults: { logger: Logger; strict?: boolean },
   setCorsHeaders: (res: http.ServerResponse) => void,
 ): Promise<void> {
   const { logger } = defaults;
@@ -147,6 +156,37 @@ export async function handleModeration(
     logger.debug(
       `No moderation fixture matched for input "${inputText.slice(0, 80)}" — returning unflagged`,
     );
+  }
+
+  // Strict mode turns the lenient default (unflagged) into a no-match error,
+  // like every other fixture-matching handler. These fixtures carry no
+  // sequence/turn state, so the skipped count is always 0.
+  if (!matchedFixture && resolveStrictMode(defaults.strict, req.headers)) {
+    const strictMessage = strictNoMatchMessage(0);
+    logger.error(strictNoMatchLogLine(req.method ?? "POST", req.url ?? "/v1/moderations", 0));
+    journal.add({
+      method: req.method ?? "POST",
+      path: req.url ?? "/v1/moderations",
+      headers: flattenHeaders(req.headers),
+      body: null,
+      service: "moderation",
+      response: {
+        status: 503,
+        fixture: null,
+        ...strictOverrideField(defaults.strict, req.headers),
+      },
+    });
+    res.writeHead(503, { "Content-Type": "application/json" });
+    res.end(
+      JSON.stringify({
+        error: {
+          message: strictMessage,
+          type: "invalid_request_error",
+          code: "no_fixture_match",
+        },
+      }),
+    );
+    return;
   }
 
   journal.add({
