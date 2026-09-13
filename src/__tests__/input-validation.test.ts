@@ -3,7 +3,7 @@ import * as http from "node:http";
 import { createServer, type ServerInstance } from "../server.js";
 import {
   validateEmbeddingDimensions,
-  normalizeStringArrayInput,
+  normalizeEmbeddingInput,
   normalizeTextInput,
   MAX_EMBEDDING_DIMENSIONS,
 } from "../helpers.js";
@@ -67,8 +67,10 @@ afterEach(async () => {
 // ---------------------------------------------------------------------------
 
 describe("validateEmbeddingDimensions", () => {
-  it("defaults to 1536 when omitted", () => {
+  it("defaults to 1536 when omitted or null", () => {
     expect(validateEmbeddingDimensions(undefined)).toBe(1536);
+    // Regression: `main` did `dimensions ?? 1536`, so null meant "unset".
+    expect(validateEmbeddingDimensions(null)).toBe(1536);
   });
 
   it("accepts boundary values 1 and MAX", () => {
@@ -77,34 +79,43 @@ describe("validateEmbeddingDimensions", () => {
   });
 
   it("rejects zero, negatives, floats, NaN, strings, null", () => {
-    for (const bad of [0, -1, -1536, 1.5, Number.NaN, "1536", null, {}, []]) {
+    for (const bad of [0, -1, -1536, 1.5, Number.NaN, "1536", {}, []]) {
       expect(validateEmbeddingDimensions(bad)).toBeNull();
     }
   });
 
   it("rejects values above the cap", () => {
     expect(validateEmbeddingDimensions(MAX_EMBEDDING_DIMENSIONS + 1)).toBeNull();
-    expect(validateEmbeddingDimensions(100000)).toBeNull();
     expect(validateEmbeddingDimensions(Number.MAX_SAFE_INTEGER)).toBeNull();
+  });
+
+  it("pins the cap to the array-length bound, not an OpenAI model width", () => {
+    // Literal on purpose: referencing the constant alone lets the cap drift.
+    expect(MAX_EMBEDDING_DIMENSIONS).toBe(4294967295);
+    expect(() => new Array(MAX_EMBEDDING_DIMENSIONS + 1)).toThrow(RangeError);
   });
 });
 
-describe("normalizeStringArrayInput", () => {
+describe("normalizeEmbeddingInput", () => {
   it("wraps a single string", () => {
-    expect(normalizeStringArrayInput("hi")).toEqual(["hi"]);
+    expect(normalizeEmbeddingInput("hi")).toEqual(["hi"]);
   });
 
   it("passes through string arrays", () => {
-    expect(normalizeStringArrayInput(["a", "b"])).toEqual(["a", "b"]);
+    expect(normalizeEmbeddingInput(["a", "b"])).toEqual(["a", "b"]);
+  });
+
+  it("accepts token arrays — EmbeddingCreateParams.input allows number[]/number[][]", () => {
+    expect(normalizeEmbeddingInput([15339, 1917])).toEqual(["15339 1917"]);
+    expect(normalizeEmbeddingInput([[15339, 1917], [9906]])).toEqual(["15339 1917", "9906"]);
   });
 
   it("rejects numbers, objects, mixed arrays, null", () => {
-    expect(normalizeStringArrayInput(123)).toBeNull();
-    expect(normalizeStringArrayInput({})).toBeNull();
-    expect(normalizeStringArrayInput(null)).toBeNull();
-    expect(normalizeStringArrayInput([123])).toBeNull();
-    expect(normalizeStringArrayInput(["ok", 42])).toBeNull();
-    expect(normalizeStringArrayInput(undefined)).toBeNull();
+    expect(normalizeEmbeddingInput(123)).toBeNull();
+    expect(normalizeEmbeddingInput({})).toBeNull();
+    expect(normalizeEmbeddingInput(null)).toBeNull();
+    expect(normalizeEmbeddingInput(["ok", 42])).toBeNull();
+    expect(normalizeEmbeddingInput(undefined)).toBeNull();
   });
 });
 
@@ -114,11 +125,21 @@ describe("normalizeTextInput", () => {
     expect(normalizeTextInput(["a", "b"])).toBe("a b");
   });
 
-  it("rejects numbers, objects, mixed arrays", () => {
+  it("accepts multimodal parts and stringifies other array elements", () => {
+    // ModerationCreateParams.input allows Array<ModerationMultiModalInput>.
+    expect(
+      normalizeTextInput([
+        { type: "text", text: "hello" },
+        { type: "image_url", image_url: { url: "https://example.com/a.png" } },
+      ]),
+    ).toBe("hello ");
+    // `[123].join(" ")` was "123" and returned 200 — it must keep doing so.
+    expect(normalizeTextInput([123])).toBe("123");
+  });
+
+  it("rejects numbers and objects", () => {
     expect(normalizeTextInput(123)).toBeNull();
     expect(normalizeTextInput({})).toBeNull();
-    expect(normalizeTextInput([123])).toBeNull();
-    expect(normalizeTextInput(["ok", null])).toBeNull();
   });
 });
 
@@ -134,27 +155,20 @@ describe("POST /v1/embeddings strict validation", () => {
       input: 123,
     });
     expect(res.status).toBe(400);
-    expect(JSON.stringify(res.json)).toContain("invalid_request_error");
+    expect(res.json).toMatchObject({
+      error: { type: "invalid_request_error", param: "input", code: null },
+    });
   });
 
   it("returns 400 for object input and mixed arrays", async () => {
     instance = await createServer([]);
-    for (const bad of [{}, { text: "hi" }, [123], ["ok", 42], [null], true]) {
+    for (const bad of [{}, { text: "hi" }, ["ok", 42], [null], true]) {
       const res = await post(`${instance.url}/v1/embeddings`, {
         model: "text-embedding-3-small",
         input: bad,
       });
       expect(res.status).toBe(400);
     }
-  });
-
-  it("returns 400 for empty input arrays", async () => {
-    instance = await createServer([]);
-    const res = await post(`${instance.url}/v1/embeddings`, {
-      model: "text-embedding-3-small",
-      input: [],
-    });
-    expect(res.status).toBe(400);
   });
 
   it("returns 400 for missing input", async () => {
@@ -167,44 +181,84 @@ describe("POST /v1/embeddings strict validation", () => {
 
   it("returns 400 for invalid dimensions (was RangeError/OOM)", async () => {
     instance = await createServer([]);
-    for (const dimensions of [0, -1, 1.5, "1536", 100000, Number.NaN, null]) {
+    for (const dimensions of [0, -1, 1.5, "1536", 4294967296]) {
       const res = await post(`${instance.url}/v1/embeddings`, {
         model: "text-embedding-3-small",
         input: "hi",
         dimensions,
       });
       expect(res.status).toBe(400);
+      expect(res.json).toMatchObject({
+        error: { type: "invalid_request_error", param: "dimensions", code: null },
+      });
     }
   });
 
-  it("accepts boundary dimensions 1 and 3072", async () => {
+  it("accepts dimensions 1 and widths past any OpenAI model (3073, 4096)", async () => {
     instance = await createServer([]);
-    const res1 = await post(`${instance.url}/v1/embeddings`, {
-      model: "text-embedding-3-small",
-      input: "hi",
-      dimensions: 1,
-    });
-    expect(res1.status).toBe(200);
-    const resMax = await post(`${instance.url}/v1/embeddings`, {
-      model: "text-embedding-3-small",
-      input: "hi",
-      dimensions: MAX_EMBEDDING_DIMENSIONS,
-    });
-    expect(resMax.status).toBe(200);
+    for (const dimensions of [1, 3073, 4096]) {
+      const res = await post(`${instance.url}/v1/embeddings`, {
+        model: "text-embedding-3-small",
+        input: "hi",
+        dimensions,
+      });
+      expect(res.status).toBe(200);
+      expect((res.json as { data: { embedding: number[] }[] }).data[0].embedding).toHaveLength(
+        dimensions,
+      );
+    }
   });
 
-  it("still serves valid string and string-array inputs", async () => {
+  it("treats dimensions: null as unset", async () => {
     instance = await createServer([]);
-    const res1 = await post(`${instance.url}/v1/embeddings`, {
+    const res = await post(`${instance.url}/v1/embeddings`, {
       model: "text-embedding-3-small",
-      input: "hello world",
+      input: "hi",
+      dimensions: null,
     });
-    expect(res1.status).toBe(200);
-    const res2 = await post(`${instance.url}/v1/embeddings`, {
+    expect(res.status).toBe(200);
+    expect((res.json as { data: { embedding: number[] }[] }).data[0].embedding).toHaveLength(1536);
+  });
+
+  it("does not gate the fixture-replay path on dimensions", async () => {
+    // `dimensions` is read only by the deterministic fallback; a matched
+    // fixture (or a proxied/record request) must not be rejected over it.
+    instance = await createServer([
+      { match: { inputText: "hello" }, response: { embedding: [0.1, 0.2, 0.3] } },
+    ]);
+    const res = await post(`${instance.url}/v1/embeddings`, {
       model: "text-embedding-3-small",
-      input: ["hello", "world"],
+      input: "hello",
+      dimensions: 4096,
     });
-    expect(res2.status).toBe(200);
+    expect(res.status).toBe(200);
+  });
+
+  it("serves token-array input (was 500, then wrongly 400)", async () => {
+    instance = await createServer([]);
+    for (const input of [
+      [15339, 1917],
+      [[15339, 1917], [9906]],
+    ]) {
+      const res = await post(`${instance.url}/v1/embeddings`, {
+        model: "text-embedding-3-small",
+        input,
+      });
+      expect(res.status).toBe(200);
+    }
+  });
+
+  it("still serves valid string, string-array and empty-array inputs", async () => {
+    instance = await createServer([]);
+    // `input: []` returned 200 with `data: []` before this PR and crashed
+    // nothing, so it must keep doing so.
+    for (const input of ["hello world", ["hello", "world"], []]) {
+      const res = await post(`${instance.url}/v1/embeddings`, {
+        model: "text-embedding-3-small",
+        input,
+      });
+      expect(res.status).toBe(200);
+    }
   });
 
   it("journals invalid inputs as 400 entries", async () => {
@@ -230,16 +284,30 @@ describe("POST /v1/moderations strict validation", () => {
     for (const bad of [123, {}, { text: "hi" }, true]) {
       const res = await post(`${instance.url}/v1/moderations`, { input: bad });
       expect(res.status).toBe(400);
-      expect(JSON.stringify(res.json)).toContain("invalid_request_error");
+      expect(res.json).toMatchObject({
+        error: { type: "invalid_request_error", param: "input", code: null },
+      });
     }
   });
 
-  it("returns 400 for arrays containing non-strings", async () => {
+  it("still serves arrays containing non-strings, as join() used to", async () => {
     instance = await createServer([]);
-    for (const bad of [[123], ["ok", 42], [null]]) {
-      const res = await post(`${instance.url}/v1/moderations`, { input: bad });
-      expect(res.status).toBe(400);
+    for (const input of [[123], ["ok", 42], [null]]) {
+      const res = await post(`${instance.url}/v1/moderations`, { input });
+      expect(res.status).toBe(200);
     }
+  });
+
+  it("serves multimodal input (Array<ModerationMultiModalInput>)", async () => {
+    instance = await createServer([]);
+    const res = await post(`${instance.url}/v1/moderations`, {
+      model: "omni-moderation-latest",
+      input: [
+        { type: "text", text: "hello" },
+        { type: "image_url", image_url: { url: "https://example.com/a.png" } },
+      ],
+    });
+    expect(res.status).toBe(200);
   });
 
   it("still serves valid string, array, and missing inputs", async () => {
@@ -265,10 +333,13 @@ describe("POST /search strict validation", () => {
     }
   });
 
-  it("returns 400 for arrays containing non-strings", async () => {
+  it("still serves array queries and echoes them back unchanged", async () => {
     instance = await createServer([]);
-    const res = await post(`${instance.url}/search`, { query: [123] });
-    expect(res.status).toBe(400);
+    for (const query of [[123], ["a", "b"]]) {
+      const res = await post(`${instance.url}/search`, { query });
+      expect(res.status).toBe(200);
+      expect((res.json as { query: unknown }).query).toEqual(query);
+    }
   });
 
   it("still serves valid and missing queries", async () => {

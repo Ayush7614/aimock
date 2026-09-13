@@ -39,9 +39,9 @@ export async function handleSearch(
   const { logger } = defaults;
   setCorsHeaders(res);
 
-  let body: { query?: string; max_results?: number };
+  let body: { query?: unknown; max_results?: number };
   try {
-    body = JSON.parse(raw) as { query?: string; max_results?: number };
+    body = JSON.parse(raw) as { query?: unknown; max_results?: number };
   } catch (parseErr) {
     const detail = parseErr instanceof Error ? parseErr.message : "unknown";
     journal.add({
@@ -80,13 +80,15 @@ export async function handleSearch(
     res.end(
       JSON.stringify({
         error: {
-          message: "Invalid parameter: 'query' must be a string",
+          message: "Invalid parameter: 'query' must be a string or an array of strings",
           type: "invalid_request_error",
         },
       }),
     );
     return;
   }
+  // `query` is the normalized string used for matching; the response echoes
+  // `rawQuery` so an array payload round-trips exactly as it did before.
   const query = normalizedQuery;
   const maxResults = body.max_results;
 
@@ -125,7 +127,7 @@ export async function handleSearch(
   res.writeHead(200, { "Content-Type": "application/json" });
   res.end(
     JSON.stringify({
-      query,
+      query: rawQuery,
       results: matchedResults,
       images: [],
       response_time: 0,

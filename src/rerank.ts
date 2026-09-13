@@ -37,9 +37,9 @@ export async function handleRerank(
   const { logger } = defaults;
   setCorsHeaders(res);
 
-  let body: { query?: string; model?: string };
+  let body: { query?: unknown; model?: string };
   try {
-    body = JSON.parse(raw) as { query?: string; model?: string };
+    body = JSON.parse(raw) as { query?: unknown; model?: string };
   } catch (parseErr) {
     const detail = parseErr instanceof Error ? parseErr.message : "unknown";
     journal.add({
@@ -78,7 +78,7 @@ export async function handleRerank(
     res.end(
       JSON.stringify({
         error: {
-          message: "Invalid parameter: 'query' must be a string",
+          message: "Invalid parameter: 'query' must be a string or an array of strings",
           type: "invalid_request_error",
         },
       }),

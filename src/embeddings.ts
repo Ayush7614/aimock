@@ -28,7 +28,7 @@ import {
   strictNoMatchMessage,
   strictNoMatchLogLine,
   validateEmbeddingDimensions,
-  normalizeStringArrayInput,
+  normalizeEmbeddingInput,
   MAX_EMBEDDING_DIMENSIONS,
 } from "./helpers.js";
 import { matchFixtureDiagnostic } from "./router.js";
@@ -40,10 +40,12 @@ import { proxyAndRecord } from "./recorder.js";
 // ─── Embeddings API request types ──────────────────────────────────────────
 
 interface EmbeddingRequest {
-  input: string | string[];
+  // Validated at runtime — these arrive as arbitrary JSON, so the declared
+  // type must not claim a shape the parser cannot guarantee.
+  input: unknown;
   model: string;
   encoding_format?: "float" | "base64";
-  dimensions?: number;
+  dimensions?: unknown;
   [key: string]: unknown;
 }
 
@@ -112,7 +114,7 @@ export async function handleEmbeddings(
 
   // Normalize input to array of strings — reject non-string inputs with 400
   // instead of crashing downstream in createHash().update() (500).
-  const inputs = normalizeStringArrayInput(embeddingReq.input);
+  const inputs = normalizeEmbeddingInput(embeddingReq.input);
   if (inputs === null) {
     journal.add({
       method: req.method ?? "POST",
@@ -126,53 +128,11 @@ export async function handleEmbeddings(
       400,
       JSON.stringify({
         error: {
-          message: "Invalid parameter: 'input' must be a string or an array of strings",
+          message:
+            "Invalid parameter: 'input' must be a string, an array of strings, or an array of tokens",
           type: "invalid_request_error",
-        },
-      }),
-    );
-    return;
-  }
-
-  if (inputs.length === 0) {
-    journal.add({
-      method: req.method ?? "POST",
-      path: req.url ?? "/v1/embeddings",
-      headers: flattenHeaders(req.headers),
-      body: null,
-      response: { status: 400, fixture: null },
-    });
-    writeErrorResponse(
-      res,
-      400,
-      JSON.stringify({
-        error: {
-          message: "Invalid parameter: 'input' array must not be empty",
-          type: "invalid_request_error",
-        },
-      }),
-    );
-    return;
-  }
-
-  // Validate dimensions — reject non-integers, out-of-range, and huge values
-  // with 400 instead of throwing RangeError / OOMing in `new Array()`.
-  const dimensions = validateEmbeddingDimensions(embeddingReq.dimensions);
-  if (dimensions === null) {
-    journal.add({
-      method: req.method ?? "POST",
-      path: req.url ?? "/v1/embeddings",
-      headers: flattenHeaders(req.headers),
-      body: null,
-      response: { status: 400, fixture: null },
-    });
-    writeErrorResponse(
-      res,
-      400,
-      JSON.stringify({
-        error: {
-          message: `Invalid parameter: 'dimensions' must be an integer between 1 and ${MAX_EMBEDDING_DIMENSIONS}`,
-          type: "invalid_request_error",
+          param: "input",
+          code: null,
         },
       }),
     );
@@ -347,6 +307,33 @@ export async function handleEmbeddings(
   logger.warn(
     `No embedding fixture matched for "${combinedInput.slice(0, 80)}" — returning deterministic fallback`,
   );
+  // Validate dimensions here, on the only path that reads it: a bad value
+  // throws RangeError in `new Array()` below. The fixture-replay, chaos, strict
+  // and record/proxy branches above never touch it, so they must not be gated.
+  const dimensions = validateEmbeddingDimensions(embeddingReq.dimensions);
+  if (dimensions === null) {
+    journal.add({
+      method: req.method ?? "POST",
+      path: req.url ?? "/v1/embeddings",
+      headers: flattenHeaders(req.headers),
+      body: null,
+      response: { status: 400, fixture: null },
+    });
+    writeErrorResponse(
+      res,
+      400,
+      JSON.stringify({
+        error: {
+          message: `Invalid parameter: 'dimensions' must be an integer between 1 and ${MAX_EMBEDDING_DIMENSIONS}`,
+          type: "invalid_request_error",
+          param: "dimensions",
+          code: null,
+        },
+      }),
+    );
+    return;
+  }
+
   const embeddings = inputs.map((input) => generateDeterministicEmbedding(input, dimensions));
 
   journal.add({

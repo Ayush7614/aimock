@@ -1358,48 +1358,70 @@ const DEFAULT_EMBEDDING_DIMENSIONS = 1536;
 
 /**
  * Maximum embedding dimensions accepted by POST /v1/embeddings.
- * Matches the largest OpenAI embedding model (text-embedding-3-large: 3072).
- * Requests above this are rejected with 400 instead of attempting a huge
- * allocation (which would OOM the mock server).
+ * Deliberately not a model width: /v1/embeddings also serves Azure and every
+ * OpenAI-compatible server routed through COMPAT_SUFFIXES, where 4096-dimension
+ * models are ordinary. This is the ECMAScript array-length bound — an Array
+ * `length` must be a uint32 (ECMA-262, Array Exotic Objects) — which is exactly
+ * where `new Array(n)` throws RangeError.
  */
-export const MAX_EMBEDDING_DIMENSIONS = 3072;
+export const MAX_EMBEDDING_DIMENSIONS = 2 ** 32 - 1;
 
 /**
  * Validate an embeddings `dimensions` parameter.
  * Returns the effective dimensions (default 1536) or null when invalid.
- * Valid: undefined (→ default), integer in [1, MAX_EMBEDDING_DIMENSIONS].
+ * Valid: undefined/null (→ default), integer in [1, MAX_EMBEDDING_DIMENSIONS].
  */
 export function validateEmbeddingDimensions(raw: unknown): number | null {
-  if (raw === undefined) return 1536;
+  // null means "unset" too — the previous code was `dimensions ?? 1536`.
+  if (raw === undefined || raw === null) return 1536;
   if (typeof raw !== "number" || !Number.isInteger(raw)) return null;
   if (raw < 1 || raw > MAX_EMBEDDING_DIMENSIONS) return null;
   return raw;
 }
 
 /**
- * Normalize a `string | string[]` text input (embeddings/moderation).
- * Returns the array of strings, or null when `raw` is neither a string nor
- * an array consisting solely of strings.
+ * Normalize an embeddings `input` into the texts to embed.
+ * Accepts every shape EmbeddingCreateParams.input declares
+ * (openai/resources/embeddings.d.ts): `string | string[] | number[] | number[][]`,
+ * the last two being pre-tokenized input. Returns null for shapes the API
+ * rejects (non-string scalars, objects, mixed arrays).
  */
-export function normalizeStringArrayInput(raw: unknown): string[] | null {
+export function normalizeEmbeddingInput(raw: unknown): string[] | null {
   if (typeof raw === "string") return [raw];
   if (Array.isArray(raw)) {
-    if (!raw.every((el) => typeof el === "string")) return null;
-    return raw as string[];
+    if (raw.every((el) => typeof el === "string")) return raw as string[];
+    // number[] — one pre-tokenized input.
+    if (raw.every((el) => typeof el === "number")) return [raw.join(" ")];
+    // number[][] — a batch of pre-tokenized inputs.
+    if (raw.every((el) => Array.isArray(el) && el.every((t) => typeof t === "number"))) {
+      return (raw as number[][]).map((tokens) => tokens.join(" "));
+    }
+    return null;
   }
   return null;
 }
 
 /**
  * Normalize a free-text field (moderation input, search/rerank query).
- * Accepts a string or an array of strings (joined with " "); returns the
- * combined string, or null when `raw` is neither.
+ * Accepts a string, or any array — joined with " " as before, so no array that
+ * used to return 200 starts failing, and ModerationCreateParams' multimodal
+ * parts (openai/resources/moderations.d.ts) contribute their `.text`. Returns
+ * null only for non-string, non-array values, which used to 500.
  */
 export function normalizeTextInput(raw: unknown): string | null {
   if (typeof raw === "string") return raw;
   if (Array.isArray(raw)) {
-    if (!raw.every((el) => typeof el === "string")) return null;
-    return (raw as string[]).join(" ");
+    return raw
+      .map((el) => {
+        if (typeof el === "string") return el;
+        if (el === null || el === undefined) return "";
+        if (typeof el === "object") {
+          const part = el as { type?: unknown; text?: unknown };
+          return part.type === "text" && typeof part.text === "string" ? part.text : "";
+        }
+        return String(el);
+      })
+      .join(" ");
   }
   return null;
 }
