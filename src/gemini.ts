@@ -28,6 +28,7 @@ import {
   isErrorResponse,
   isAudioResponse,
   extractOverrides,
+  validateToolsField,
   formatToMime,
   flattenHeaders,
   getContext,
@@ -87,6 +88,44 @@ interface GeminiRequest {
 
 // ─── Input conversion: Gemini → ChatCompletions messages ────────────────────
 
+/**
+ * Validate the shape of a Gemini `generateContent` body.
+ *
+ * Returns an error detail string when the shape is wrong, or null when
+ * `geminiToCompletionRequest` can safely consume it. Wrong types here used
+ * to throw inside the converter (`parts.filter` on a missing `parts`,
+ * iterating the characters of a string `contents`, `.flatMap` on a string
+ * `tools`) and surface as 500s. A present-but-part-less content or
+ * systemInstruction is tolerated (treated as no text) rather than rejected.
+ */
+function validateGeminiBody(req: GeminiRequest): string | null {
+  if (req.contents !== undefined && req.contents !== null && !Array.isArray(req.contents)) {
+    return "contents must be an array";
+  }
+  if (Array.isArray(req.contents)) {
+    for (let i = 0; i < req.contents.length; i++) {
+      const content = req.contents[i] as unknown;
+      if (content === null || typeof content !== "object" || Array.isArray(content)) {
+        return `contents[${i}] must be an object`;
+      }
+      const parts = (content as { parts?: unknown }).parts;
+      if (parts !== undefined && parts !== null && !Array.isArray(parts)) {
+        return `contents[${i}].parts must be an array`;
+      }
+    }
+  }
+  if (req.systemInstruction !== undefined && req.systemInstruction !== null) {
+    if (typeof req.systemInstruction !== "object" || Array.isArray(req.systemInstruction)) {
+      return "systemInstruction must be an object";
+    }
+    const parts = req.systemInstruction.parts as unknown;
+    if (parts !== undefined && parts !== null && !Array.isArray(parts)) {
+      return "systemInstruction.parts must be an array";
+    }
+  }
+  return validateToolsField(req.tools);
+}
+
 export function geminiToCompletionRequest(
   req: GeminiRequest,
   model: string,
@@ -96,8 +135,8 @@ export function geminiToCompletionRequest(
 
   // systemInstruction → system message
   if (req.systemInstruction) {
-    const text = req.systemInstruction.parts
-      .filter((p) => p.text !== undefined)
+    const text = (req.systemInstruction.parts ?? [])
+      .filter((p) => p !== null && p !== undefined && p.text !== undefined)
       .map((p) => p.text!)
       .join("");
     if (text) {
@@ -112,8 +151,13 @@ export function geminiToCompletionRequest(
 
       if (role === "user") {
         // Check for functionResponse parts
-        const funcResponses = content.parts.filter((p) => p.functionResponse);
-        const textParts = content.parts.filter((p) => p.text !== undefined && !p.thought);
+        const parts = content.parts ?? [];
+        const funcResponses = parts.filter(
+          (p) => p !== null && p !== undefined && p.functionResponse,
+        );
+        const textParts = parts.filter(
+          (p) => p !== null && p !== undefined && p.text !== undefined && !p.thought,
+        );
 
         if (funcResponses.length > 0) {
           // functionResponse → tool message; match IDs from the preceding assistant's tool_calls
@@ -152,8 +196,11 @@ export function geminiToCompletionRequest(
         }
       } else if (role === "model") {
         // Check for functionCall parts
-        const funcCalls = content.parts.filter((p) => p.functionCall);
-        const textParts = content.parts.filter((p) => p.text !== undefined && !p.thought);
+        const parts = content.parts ?? [];
+        const funcCalls = parts.filter((p) => p !== null && p !== undefined && p.functionCall);
+        const textParts = parts.filter(
+          (p) => p !== null && p !== undefined && p.text !== undefined && !p.thought,
+        );
 
         if (funcCalls.length > 0) {
           const text = textParts.map((p) => p.text!).join("");
@@ -775,6 +822,55 @@ export async function handleGemini(
       JSON.stringify({
         error: {
           message: `Malformed JSON body: ${detail}`,
+          code: 400,
+          status: "INVALID_ARGUMENT",
+        },
+      }),
+    );
+    return;
+  }
+
+  // Reject non-object bodies (e.g. `null`) before touching fields —
+  // otherwise the converter dereference throws a TypeError that surfaces as
+  // a 500 instead of a 400.
+  if (geminiReq === null || typeof geminiReq !== "object" || Array.isArray(geminiReq)) {
+    journal.add({
+      method: req.method ?? "POST",
+      path: req.url ?? `/v1beta/models/${model}:generateContent`,
+      headers: flattenHeaders(req.headers),
+      body: null,
+      response: { status: 400, fixture: null },
+    });
+    writeErrorResponse(
+      res,
+      400,
+      JSON.stringify({
+        error: {
+          message: "Request body must be a JSON object",
+          code: 400,
+          status: "INVALID_ARGUMENT",
+        },
+      }),
+    );
+    return;
+  }
+
+  // Reject wrong-typed fields before the converter dereferences them.
+  const geminiShapeError = validateGeminiBody(geminiReq);
+  if (geminiShapeError) {
+    journal.add({
+      method: req.method ?? "POST",
+      path: req.url ?? `/v1beta/models/${model}:generateContent`,
+      headers: flattenHeaders(req.headers),
+      body: null,
+      response: { status: 400, fixture: null },
+    });
+    writeErrorResponse(
+      res,
+      400,
+      JSON.stringify({
+        error: {
+          message: `Invalid argument: ${geminiShapeError}`,
           code: 400,
           status: "INVALID_ARGUMENT",
         },

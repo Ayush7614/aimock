@@ -46,6 +46,8 @@ import {
   strictOverrideField,
   strictNoMatchMessage,
   strictNoMatchLogLine,
+  validateChatMessages,
+  validateToolsField,
 } from "./helpers.js";
 import { matchFixtureDiagnostic, recordMatchOptions } from "./router.js";
 import { writeErrorResponse } from "./sse-writer.js";
@@ -126,10 +128,11 @@ function bedrockUsage(overrides?: ResponseOverrides): {
 
 // ─── Input conversion: Bedrock → ChatCompletionRequest ──────────────────────
 
-function extractTextContent(content: string | BedrockContentBlock[]): string {
+function extractTextContent(content: string | BedrockContentBlock[] | null | undefined): string {
+  if (content === null || content === undefined) return "";
   if (typeof content === "string") return content;
   return content
-    .filter((b) => b.type === "text")
+    .filter((b) => b !== null && b !== undefined && b.type === "text")
     .map((b) => b.text ?? "")
     .join("");
 }
@@ -146,10 +149,12 @@ export function bedrockToCompletionRequest(
     const systemText =
       typeof req.system === "string"
         ? req.system
-        : req.system
-            .filter((b) => b.type === "text")
-            .map((b) => b.text ?? "")
-            .join("");
+        : Array.isArray(req.system)
+          ? req.system
+              .filter((b) => b !== null && b !== undefined && b.type === "text")
+              .map((b) => b.text ?? "")
+              .join("")
+          : "";
     if (systemText) {
       messages.push({ role: "system", content: systemText });
     }
@@ -161,7 +166,7 @@ export function bedrockToCompletionRequest(
       if (typeof msg.content !== "string" && Array.isArray(msg.content)) {
         // Warn about non-text content blocks that will be dropped (image, document, etc.)
         const unsupportedBlocks = msg.content.filter(
-          (b) => b.type !== "text" && b.type !== "tool_result",
+          (b) => b === null || b === undefined || (b.type !== "text" && b.type !== "tool_result"),
         );
         if (unsupportedBlocks.length > 0 && logger) {
           const types = [...new Set(unsupportedBlocks.map((b) => b.type))].join(", ");
@@ -170,8 +175,12 @@ export function bedrockToCompletionRequest(
           );
         }
 
-        const toolResults = msg.content.filter((b) => b.type === "tool_result");
-        const textBlocks = msg.content.filter((b) => b.type === "text");
+        const toolResults = msg.content.filter(
+          (b) => b !== null && b !== undefined && b.type === "tool_result",
+        );
+        const textBlocks = msg.content.filter(
+          (b) => b !== null && b !== undefined && b.type === "text",
+        );
 
         if (toolResults.length > 0) {
           for (const tr of toolResults) {
@@ -180,7 +189,7 @@ export function bedrockToCompletionRequest(
                 ? tr.content
                 : Array.isArray(tr.content)
                   ? tr.content
-                      .filter((b) => b.type === "text")
+                      .filter((b) => b !== null && b !== undefined && b.type === "text")
                       .map((b) => b.text ?? "")
                       .join("")
                   : "";
@@ -207,7 +216,9 @@ export function bedrockToCompletionRequest(
       if (typeof msg.content === "string") {
         messages.push({ role: "assistant", content: msg.content });
       } else if (Array.isArray(msg.content)) {
-        const toolUseBlocks = msg.content.filter((b) => b.type === "tool_use");
+        const toolUseBlocks = msg.content.filter(
+          (b) => b !== null && b !== undefined && b.type === "tool_use",
+        );
         const textContent = extractTextContent(msg.content);
 
         if (toolUseBlocks.length > 0) {
@@ -435,7 +446,10 @@ export async function handleBedrock(
     return;
   }
 
-  if (!bedrockReq.messages || !Array.isArray(bedrockReq.messages)) {
+  // Reject non-object bodies (e.g. `null`) before touching fields —
+  // otherwise `bedrockReq.messages` throws a TypeError that surfaces as a 500
+  // instead of a 400.
+  if (bedrockReq === null || typeof bedrockReq !== "object" || Array.isArray(bedrockReq)) {
     journal.add({
       method: req.method ?? "POST",
       path: urlPath,
@@ -448,7 +462,39 @@ export async function handleBedrock(
       400,
       JSON.stringify({
         error: {
-          message: "Invalid request: messages array is required",
+          message: "Request body must be a JSON object",
+          type: "invalid_request_error",
+        },
+      }),
+    );
+    return;
+  }
+
+  // Reject wrong-typed fields before the converter dereferences them. A
+  // missing/non-array `messages` keeps the historic message below.
+  const bedrockShapeError =
+    validateChatMessages(bedrockReq.messages, { checkToolCalls: false }) ??
+    validateToolsField(bedrockReq.tools) ??
+    (bedrockReq.system !== undefined &&
+    bedrockReq.system !== null &&
+    typeof bedrockReq.system !== "string" &&
+    !Array.isArray(bedrockReq.system)
+      ? "system must be a string or an array"
+      : null);
+  if (bedrockShapeError) {
+    journal.add({
+      method: req.method ?? "POST",
+      path: urlPath,
+      headers: flattenHeaders(req.headers),
+      body: null,
+      response: { status: 400, fixture: null },
+    });
+    writeErrorResponse(
+      res,
+      400,
+      JSON.stringify({
+        error: {
+          message: `Invalid request: ${bedrockShapeError}`,
           type: "invalid_request_error",
         },
       }),
@@ -1242,7 +1288,10 @@ export async function handleBedrockStream(
     return;
   }
 
-  if (!bedrockReq.messages || !Array.isArray(bedrockReq.messages)) {
+  // Reject non-object bodies (e.g. `null`) before touching fields —
+  // otherwise `bedrockReq.messages` throws a TypeError that surfaces as a 500
+  // instead of a 400.
+  if (bedrockReq === null || typeof bedrockReq !== "object" || Array.isArray(bedrockReq)) {
     journal.add({
       method: req.method ?? "POST",
       path: urlPath,
@@ -1255,7 +1304,39 @@ export async function handleBedrockStream(
       400,
       JSON.stringify({
         error: {
-          message: "Invalid request: messages array is required",
+          message: "Request body must be a JSON object",
+          type: "invalid_request_error",
+        },
+      }),
+    );
+    return;
+  }
+
+  // Reject wrong-typed fields before the converter dereferences them. A
+  // missing/non-array `messages` keeps the historic message below.
+  const bedrockShapeError =
+    validateChatMessages(bedrockReq.messages, { checkToolCalls: false }) ??
+    validateToolsField(bedrockReq.tools) ??
+    (bedrockReq.system !== undefined &&
+    bedrockReq.system !== null &&
+    typeof bedrockReq.system !== "string" &&
+    !Array.isArray(bedrockReq.system)
+      ? "system must be a string or an array"
+      : null);
+  if (bedrockShapeError) {
+    journal.add({
+      method: req.method ?? "POST",
+      path: urlPath,
+      headers: flattenHeaders(req.headers),
+      body: null,
+      response: { status: 400, fixture: null },
+    });
+    writeErrorResponse(
+      res,
+      400,
+      JSON.stringify({
+        error: {
+          message: `Invalid request: ${bedrockShapeError}`,
           type: "invalid_request_error",
         },
       }),

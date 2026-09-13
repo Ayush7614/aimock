@@ -33,6 +33,8 @@ import {
   isEmbeddingResponse,
   isErrorResponse,
   serializeErrorResponse,
+  validateChatMessages,
+  validateToolsField,
   flattenHeaders,
   getTestId,
   resolveFixtureBlocks,
@@ -149,10 +151,14 @@ function cohereUsage(overrides?: ResponseOverrides): typeof ZERO_USAGE {
 // ─── Input conversion: Cohere → ChatCompletionRequest ───────────────────────
 
 /** Extract plain text from structured content (array of { type, text } parts) or passthrough string. */
-function extractTextContent(content: string | CohereContentPart[]): string {
+function extractTextContent(content: string | CohereContentPart[] | null | undefined): string {
+  if (content === null || content === undefined) return "";
   if (typeof content === "string") return content;
   return content
-    .filter((part) => part.type === "text" && part.text !== undefined)
+    .filter(
+      (part) =>
+        part !== null && part !== undefined && part.type === "text" && part.text !== undefined,
+    )
     .map((part) => part.text!)
     .join("");
 }
@@ -937,6 +943,30 @@ export async function handleCohere(
     return;
   }
 
+  // Reject non-object bodies (e.g. `null`) before touching fields —
+  // otherwise `cohereReq.model` throws a TypeError that surfaces as a 500
+  // instead of a 400.
+  if (cohereReq === null || typeof cohereReq !== "object" || Array.isArray(cohereReq)) {
+    journal.add({
+      method: req.method ?? "POST",
+      path: req.url ?? "/v2/chat",
+      headers: flattenHeaders(req.headers),
+      body: null,
+      response: { status: 400, fixture: null },
+    });
+    writeErrorResponse(
+      res,
+      400,
+      JSON.stringify({
+        error: {
+          message: "Request body must be a JSON object",
+          type: "invalid_request_error",
+        },
+      }),
+    );
+    return;
+  }
+
   // Validate required model field
   if (!cohereReq.model) {
     journal.add({
@@ -959,7 +989,11 @@ export async function handleCohere(
     return;
   }
 
-  if (!cohereReq.messages || !Array.isArray(cohereReq.messages)) {
+  // Reject wrong-typed message/tool fields before the converter dereferences
+  // them — otherwise the TypeError surfaces as a 500 instead of a 400.
+  const shapeError =
+    validateChatMessages(cohereReq.messages) ?? validateToolsField(cohereReq.tools);
+  if (shapeError) {
     journal.add({
       method: req.method ?? "POST",
       path: req.url ?? "/v2/chat",
@@ -972,7 +1006,7 @@ export async function handleCohere(
       400,
       JSON.stringify({
         error: {
-          message: "Invalid request: messages array is required",
+          message: `Invalid request: ${shapeError}`,
           type: "invalid_request_error",
         },
       }),
@@ -1366,6 +1400,30 @@ export async function handleCohereEmbed(
     return;
   }
 
+  // Reject non-object bodies (e.g. `null`) before touching fields —
+  // otherwise `embedReq.model` throws a TypeError that surfaces as a 500
+  // instead of a 400.
+  if (embedReq === null || typeof embedReq !== "object" || Array.isArray(embedReq)) {
+    journal.add({
+      method: req.method ?? "POST",
+      path: req.url ?? "/v2/embed",
+      headers: flattenHeaders(req.headers),
+      body: null,
+      response: { status: 400, fixture: null },
+    });
+    writeErrorResponse(
+      res,
+      400,
+      JSON.stringify({
+        error: {
+          message: "Request body must be a JSON object",
+          type: "invalid_request_error",
+        },
+      }),
+    );
+    return;
+  }
+
   // Validate required fields
   if (!embedReq.model) {
     journal.add({
@@ -1402,6 +1460,29 @@ export async function handleCohereEmbed(
       JSON.stringify({
         error: {
           message: "Invalid request: texts array is required",
+          type: "invalid_request_error",
+        },
+      }),
+    );
+    return;
+  }
+
+  // Every text must be a string — a number reaches createHash().update() in
+  // the no-fixture fallback and throws a TypeError (500) instead of a 400.
+  if (!embedReq.texts.every((text) => typeof text === "string")) {
+    journal.add({
+      method: req.method ?? "POST",
+      path: req.url ?? "/v2/embed",
+      headers: flattenHeaders(req.headers),
+      body: null,
+      response: { status: 400, fixture: null },
+    });
+    writeErrorResponse(
+      res,
+      400,
+      JSON.stringify({
+        error: {
+          message: "Invalid request: texts must be an array of strings",
           type: "invalid_request_error",
         },
       }),
