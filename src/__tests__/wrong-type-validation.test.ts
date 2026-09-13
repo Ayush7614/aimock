@@ -336,3 +336,61 @@ describe("ollama embeddings input/prompt shapes (CR #439)", () => {
   });
 });
 
+describe("tool_calls validation is scoped to providers that read it (CR #439)", () => {
+  // Bedrock's native Anthropic body has no `tool_calls` field — tool calls are
+  // `tool_use` content blocks — so `bedrockToCompletionRequest` never reads it.
+  // Rejecting a stray `tool_calls` turned a fixture match (200) into a 400.
+  for (const path of [
+    "/model/anthropic.claude-3-sonnet/invoke",
+    "/model/anthropic.claude-3-sonnet/invoke-with-response-stream",
+  ]) {
+    test(`bedrock ${path} ignores a stray tool_calls and still matches a fixture`, async () => {
+      mock = new LLMock({ port: 0 });
+      mock.addFixtures([
+        { match: { userMessage: "hello" }, response: { content: "from fixture" } },
+      ]);
+      await mock.start();
+      for (const toolCalls of [[{ id: "1" }], "x", [null]]) {
+        const res = await fetch(`${mock.url}${path}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            anthropic_version: "bedrock-2023-05-31",
+            max_tokens: 512,
+            messages: [
+              { role: "assistant", content: "prior", tool_calls: toolCalls },
+              { role: "user", content: "hello" },
+            ],
+          }),
+        });
+        expect(res.status).toBe(200);
+      }
+    });
+  }
+
+  // Cohere and Ollama DO read msg.tool_calls[].function.name — the check is
+  // load-bearing there (both were 500s).
+  test.each([
+    ["/v2/chat", { model: "command-r" }],
+    ["/api/chat", { model: "llama3" }],
+  ])("%s still rejects a function-less tool_calls entry", async (path, extra) => {
+    const { status, message } = await postJson(`${await start()}${path}`, {
+      ...extra,
+      messages: [
+        { role: "assistant", content: "prior", tool_calls: [{ id: "1" }] },
+        { role: "user", content: "hello" },
+      ],
+    });
+    expect(status).toBe(400);
+    expect(message).toBe(
+      "Invalid request: messages[0].tool_calls entries must have a function object",
+    );
+  });
+
+  test("validateChatMessages skips tool_calls when checkToolCalls is false", () => {
+    const msgs = [{ role: "assistant", tool_calls: "x" }];
+    expect(validateChatMessages(msgs)).toBe("messages[0].tool_calls must be an array");
+    expect(validateChatMessages(msgs, { checkToolCalls: false })).toBeNull();
+  });
+});
+

@@ -1374,8 +1374,17 @@ export function slugifyContext(context: string): string {
  * `tools`, `msg.role` on a null entry) and surface as 500s. `null` content
  * is accepted — assistant messages legitimately carry `content: null`
  * alongside tool calls, and the converters coerce it to "".
+ *
+ * `checkToolCalls` must be false for providers whose converter never reads
+ * `msg.tool_calls` (Bedrock: tool calls are `tool_use` content blocks and
+ * `tool_calls` is not a field of the Anthropic Messages body at all). There a
+ * stray `tool_calls` is inert — rejecting it turns a request that used to
+ * match a fixture and return 200 into a 400.
  */
-export function validateChatMessages(messages: unknown): string | null {
+export function validateChatMessages(
+  messages: unknown,
+  { checkToolCalls = true }: { checkToolCalls?: boolean } = {},
+): string | null {
   // Matches the historic "messages array is required" detail so handlers can
   // compose the exact legacy message for a missing/non-array field.
   if (!Array.isArray(messages)) return "messages array is required";
@@ -1397,7 +1406,7 @@ export function validateChatMessages(messages: unknown): string | null {
       return `messages[${i}].content must be a string or an array`;
     }
     const toolCalls = msg.tool_calls;
-    if (toolCalls !== undefined && toolCalls !== null) {
+    if (checkToolCalls && toolCalls !== undefined && toolCalls !== null) {
       if (!Array.isArray(toolCalls)) {
         return `messages[${i}].tool_calls must be an array`;
       }

@@ -473,7 +473,7 @@ export async function handleBedrock(
   // Reject wrong-typed fields before the converter dereferences them. A
   // missing/non-array `messages` keeps the historic message below.
   const bedrockShapeError =
-    validateChatMessages(bedrockReq.messages) ??
+    validateChatMessages(bedrockReq.messages, { checkToolCalls: false }) ??
     validateToolsField(bedrockReq.tools) ??
     (bedrockReq.system !== undefined &&
     bedrockReq.system !== null &&
@@ -1315,7 +1315,7 @@ export async function handleBedrockStream(
   // Reject wrong-typed fields before the converter dereferences them. A
   // missing/non-array `messages` keeps the historic message below.
   const bedrockShapeError =
-    validateChatMessages(bedrockReq.messages) ??
+    validateChatMessages(bedrockReq.messages, { checkToolCalls: false }) ??
     validateToolsField(bedrockReq.tools) ??
     (bedrockReq.system !== undefined &&
     bedrockReq.system !== null &&
