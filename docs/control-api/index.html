@@ -339,6 +339,10 @@
           test harness actually loaded its tape before it starts making requests, without having to
           send a probe request and infer the answer from the reply. Returns the count only by
           default.
+          <strong
+            >Any query parameter other than <code>include</code> is rejected with
+            <code>400</code></strong
+          >, so a typo can never quietly return the count-only body.
         </p>
         <div class="code-block">
           <div class="code-block-header">Count fixtures <span class="lang-tag">shell</span></div>
@@ -461,14 +465,16 @@
         >
           <strong style="color: var(--warning)">Send your <code>X-Test-Id</code></strong> &mdash;
           chaos overrides are scoped to it, like fixture match-counts and video job state. An
-          override installed with <code>X-Test-Id: t1</code> applies only to traffic carrying that
-          same header, so one test turning chaos on cannot fail the tests running beside it on a
-          shared <code>aimock</code> process. A call with <em>no</em> <code>X-Test-Id</code> sets
-          the server-wide baseline, which applies to every test that has no override of its own.
-          Scoping is by header on both sides &mdash; the control call and the traffic it affects.
-          For chaos on a single request, the <code>X-AIMock-Chaos-Drop</code>,
-          <code>X-AIMock-Chaos-Malformed</code> and <code>X-AIMock-Chaos-Disconnect</code> request
-          headers still override everything.
+          override installed with <code>X-Test-Id: t1</code> applies only to traffic tagged
+          <code>t1</code>, so one test turning chaos on cannot fail the tests running beside it on a
+          shared <code>aimock</code> process. A call with <em>no</em> tag sets the server-wide
+          baseline, which applies to every test that has no override of its own. Both sides &mdash;
+          the control call and the traffic it affects &mdash; resolve the tag the same way the rest
+          of the server does: the <code>X-Test-Id</code> header, else <code>?testId=</code> in the
+          query string. An <code>X-Test-Id</code> that is present but <em>empty</em> is rejected
+          with <code>400</code> rather than silently treated as untagged. For chaos on a single
+          request, the <code>X-AIMock-Chaos-Drop</code>, <code>X-AIMock-Chaos-Malformed</code> and
+          <code>X-AIMock-Chaos-Disconnect</code> request headers still override everything.
         </div>
 
         <h3>GET /__aimock/chaos</h3>
@@ -509,7 +515,9 @@
         <h3>DELETE /__aimock/chaos</h3>
         <p>
           Drops the override for the caller's <code>X-Test-Id</code> (or the server-wide baseline
-          when untagged), falling back to whatever it was shadowing.
+          when untagged), falling back to whatever it was shadowing. Symmetric with
+          <code>POST</code>: an untagged <code>DELETE</code> touches the baseline only and leaves
+          every per-test override in place, so one test's cleanup cannot revoke another's.
           <code>POST /__aimock/reset</code> drops <em>every</em> override at once, restoring the
           config the server was started with.
         </p>
