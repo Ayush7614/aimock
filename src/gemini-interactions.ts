@@ -28,6 +28,7 @@ import {
   extractOverrides,
   generateToolCallId,
   flattenHeaders,
+  isJsonObject,
   getTestId,
   getContext,
   resolveResponse,
@@ -839,6 +840,27 @@ export async function handleGeminiInteractions(
       400,
       JSON.stringify(
         buildInteractionsErrorResponse(`Malformed JSON body: ${detail}`, "INVALID_ARGUMENT"),
+      ),
+    );
+    return;
+  }
+
+  // Reject bodies that parsed but are not a JSON object (e.g. `null`) before
+  // touching fields — otherwise `interactionsReq.stream` throws a TypeError that
+  // surfaces as a 500 instead of a 400.
+  if (!isJsonObject(interactionsReq)) {
+    journal.add({
+      method: req.method ?? "POST",
+      path: urlPath,
+      headers: flattenHeaders(req.headers),
+      body: null,
+      response: { status: 400, fixture: null },
+    });
+    writeErrorResponse(
+      res,
+      400,
+      JSON.stringify(
+        buildInteractionsErrorResponse("Request body must be a JSON object", "INVALID_ARGUMENT"),
       ),
     );
     return;

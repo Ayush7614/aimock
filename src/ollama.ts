@@ -36,6 +36,7 @@ import {
   serializeErrorResponse,
   generateDeterministicEmbedding,
   flattenHeaders,
+  isJsonObject,
   getTestId,
   resolveResponse,
   resolveStrictMode,
@@ -671,7 +672,7 @@ export async function handleOllama(
   // Reject non-object bodies (e.g. `null`) before touching fields —
   // otherwise `ollamaReq.messages` throws a TypeError that surfaces as a 500
   // instead of a 400.
-  if (ollamaReq === null || typeof ollamaReq !== "object" || Array.isArray(ollamaReq)) {
+  if (!isJsonObject(ollamaReq)) {
     journal.add({
       method: req.method ?? "POST",
       path: urlPath,
@@ -1090,7 +1091,7 @@ export async function handleOllamaGenerate(
   // Reject non-object bodies (e.g. `null`) before touching fields —
   // otherwise `generateReq.prompt` throws a TypeError that surfaces as a 500
   // instead of a 400.
-  if (generateReq === null || typeof generateReq !== "object" || Array.isArray(generateReq)) {
+  if (!isJsonObject(generateReq)) {
     journal.add({
       method: req.method ?? "POST",
       path: urlPath,
@@ -1423,7 +1424,7 @@ export async function handleOllamaEmbeddings(
   // Reject non-object bodies (e.g. `null`) before touching fields —
   // otherwise `embReq.prompt` throws a TypeError that surfaces as a 500
   // instead of a 400.
-  if (embReq === null || typeof embReq !== "object" || Array.isArray(embReq)) {
+  if (!isJsonObject(embReq)) {
     journal.add({
       method: req.method ?? "POST",
       path: urlPath,

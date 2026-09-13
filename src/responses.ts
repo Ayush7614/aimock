@@ -29,6 +29,7 @@ import {
   isErrorResponse,
   serializeErrorResponse,
   flattenHeaders,
+  isJsonObject,
   getTestId,
   resolveResponse,
   resolveStrictMode,
@@ -1274,6 +1275,30 @@ export async function handleResponses(
           message: `Malformed JSON: ${detail}`,
           type: "invalid_request_error",
           code: "invalid_json",
+        },
+      }),
+    );
+    return;
+  }
+
+  // Reject bodies that parsed but are not a JSON object (e.g. `null`) before
+  // touching fields — otherwise `responsesReq.model` throws a TypeError that
+  // surfaces as a 500 instead of a 400.
+  if (!isJsonObject(responsesReq)) {
+    journal.add({
+      method: req.method ?? "POST",
+      path: req.url ?? "/v1/responses",
+      headers: flattenHeaders(req.headers),
+      body: null,
+      response: { status: 400, fixture: null },
+    });
+    writeErrorResponse(
+      res,
+      400,
+      JSON.stringify({
+        error: {
+          message: "Request body must be a JSON object",
+          type: "invalid_request_error",
         },
       }),
     );

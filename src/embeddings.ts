@@ -28,6 +28,7 @@ import {
   strictNoMatchMessage,
   strictNoMatchLogLine,
   validateEmbeddingDimensions,
+  isJsonObject,
   normalizeEmbeddingInput,
   MAX_EMBEDDING_DIMENSIONS,
 } from "./helpers.js";
@@ -84,6 +85,30 @@ export async function handleEmbeddings(
           message: `Malformed JSON body: ${detail}`,
           type: "invalid_request_error",
           code: "invalid_json",
+        },
+      }),
+    );
+    return;
+  }
+
+  // Reject bodies that parsed but are not a JSON object (e.g. `null`) before
+  // touching fields — otherwise `embeddingReq.input` throws a TypeError that
+  // surfaces as a 500 instead of a 400.
+  if (!isJsonObject(embeddingReq)) {
+    journal.add({
+      method: req.method ?? "POST",
+      path: req.url ?? "/v1/embeddings",
+      headers: flattenHeaders(req.headers),
+      body: null,
+      response: { status: 400, fixture: null },
+    });
+    writeErrorResponse(
+      res,
+      400,
+      JSON.stringify({
+        error: {
+          message: "Request body must be a JSON object",
+          type: "invalid_request_error",
         },
       }),
     );

@@ -11,6 +11,7 @@ import {
   isAudioResponse,
   isErrorResponse,
   isJSONResponse,
+  isJsonObject,
   serializeErrorResponse,
   flattenHeaders,
   FORMAT_TO_CONTENT_TYPE,
@@ -296,6 +297,27 @@ async function handleQueueSubmit(
       );
       return;
     }
+  }
+
+  // Reject bodies that parsed but are not a JSON object (e.g. `null`) before
+  // touching fields — otherwise `parsed.prompt` throws a TypeError that
+  // surfaces as a 500 instead of a 400. An empty body keeps the historical
+  // `{}` default above and is unaffected.
+  if (!isJsonObject(parsed)) {
+    journal.add({
+      method: req.method ?? "POST",
+      path: pathname,
+      headers: flattenHeaders(req.headers),
+      body: null,
+      response: { status: 400, fixture: null },
+    });
+    res.writeHead(400, { "Content-Type": "application/json" });
+    res.end(
+      JSON.stringify({
+        error: { message: "Request body must be a JSON object", type: "invalid_request_error" },
+      }),
+    );
+    return;
   }
 
   const prompt =
@@ -860,6 +882,27 @@ async function handleSyncRun(
       );
       return;
     }
+  }
+
+  // Reject bodies that parsed but are not a JSON object (e.g. `null`) before
+  // touching fields — otherwise `parsed.prompt` throws a TypeError that
+  // surfaces as a 500 instead of a 400. An empty body keeps the historical
+  // `{}` default above and is unaffected.
+  if (!isJsonObject(parsed)) {
+    journal.add({
+      method: req.method ?? "POST",
+      path: pathname,
+      headers: flattenHeaders(req.headers),
+      body: null,
+      response: { status: 400, fixture: null },
+    });
+    res.writeHead(400, { "Content-Type": "application/json" });
+    res.end(
+      JSON.stringify({
+        error: { message: "Request body must be a JSON object", type: "invalid_request_error" },
+      }),
+    );
+    return;
   }
 
   const prompt =

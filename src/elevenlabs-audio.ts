@@ -4,6 +4,7 @@ import {
   isAudioResponse,
   isTextResponse,
   isErrorResponse,
+  isJsonObject,
   serializeErrorResponse,
   flattenHeaders,
   FORMAT_TO_CONTENT_TYPE,
@@ -54,6 +55,30 @@ export async function handleElevenLabsTTS(
           message: `Malformed JSON: ${detail}`,
           type: "invalid_request_error",
           code: "invalid_json",
+        },
+      }),
+    );
+    return;
+  }
+
+  // Reject bodies that parsed but are not a JSON object (e.g. `null`) before
+  // touching fields — otherwise `parsed.text` throws a TypeError that surfaces
+  // as a 500 instead of a 400.
+  if (!isJsonObject(parsed)) {
+    journal.add({
+      method,
+      path,
+      headers: flattenHeaders(req.headers),
+      body: null,
+      response: { status: 400, fixture: null },
+    });
+    writeErrorResponse(
+      res,
+      400,
+      JSON.stringify({
+        error: {
+          message: "Request body must be a JSON object",
+          type: "invalid_request_error",
         },
       }),
     );
@@ -297,6 +322,30 @@ export async function handleElevenLabsAudio(
           message: `Malformed JSON: ${detail}`,
           type: "invalid_request_error",
           code: "invalid_json",
+        },
+      }),
+    );
+    return;
+  }
+
+  // Reject bodies that parsed but are not a JSON object (e.g. `null`) before
+  // touching fields — otherwise `parsed.text` throws a TypeError that surfaces
+  // as a 500 instead of a 400.
+  if (!isJsonObject(parsed)) {
+    journal.add({
+      method,
+      path,
+      headers: flattenHeaders(req.headers),
+      body: null,
+      response: { status: 400, fixture: null },
+    });
+    writeErrorResponse(
+      res,
+      400,
+      JSON.stringify({
+        error: {
+          message: "Request body must be a JSON object",
+          type: "invalid_request_error",
         },
       }),
     );

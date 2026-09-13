@@ -9,6 +9,7 @@
 import type * as http from "node:http";
 import {
   flattenHeaders,
+  isJsonObject,
   matchesPattern,
   normalizeTextInput,
   resolveStrictMode,
@@ -67,6 +68,30 @@ export async function handleSearch(
           message: `Malformed JSON: ${detail}`,
           type: "invalid_request_error",
           code: "invalid_json",
+        },
+      }),
+    );
+    return;
+  }
+
+  // Reject bodies that parsed but are not a JSON object (e.g. `null`) before
+  // touching fields — otherwise `body.query` throws a TypeError that surfaces
+  // as a 500 instead of a 400.
+  if (!isJsonObject(body)) {
+    journal.add({
+      method: req.method ?? "POST",
+      path: req.url ?? "/search",
+      headers: flattenHeaders(req.headers),
+      body: null,
+      service: "search",
+      response: { status: 400, fixture: null },
+    });
+    res.writeHead(400, { "Content-Type": "application/json" });
+    res.end(
+      JSON.stringify({
+        error: {
+          message: "Request body must be a JSON object",
+          type: "invalid_request_error",
         },
       }),
     );

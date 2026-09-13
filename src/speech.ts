@@ -3,6 +3,7 @@ import type { ChatCompletionRequest, Fixture, HandlerDefaults } from "./types.js
 import {
   isAudioResponse,
   isErrorResponse,
+  isJsonObject,
   serializeErrorResponse,
   flattenHeaders,
   getTestId,
@@ -62,6 +63,30 @@ export async function handleSpeech(
           message: `Malformed JSON: ${detail}`,
           type: "invalid_request_error",
           code: "invalid_json",
+        },
+      }),
+    );
+    return;
+  }
+
+  // Reject bodies that parsed but are not a JSON object (e.g. `null`) before
+  // touching fields — otherwise `speechReq.input` throws a TypeError that
+  // surfaces as a 500 instead of a 400.
+  if (!isJsonObject(speechReq)) {
+    journal.add({
+      method,
+      path,
+      headers: flattenHeaders(req.headers),
+      body: null,
+      response: { status: 400, fixture: null },
+    });
+    writeErrorResponse(
+      res,
+      400,
+      JSON.stringify({
+        error: {
+          message: "Request body must be a JSON object",
+          type: "invalid_request_error",
         },
       }),
     );

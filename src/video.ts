@@ -3,6 +3,7 @@ import type { ChatCompletionRequest, Fixture, HandlerDefaults, VideoResponse } f
 import {
   isVideoResponse,
   isErrorResponse,
+  isJsonObject,
   serializeErrorResponse,
   flattenHeaders,
   getTestId,
@@ -171,6 +172,31 @@ export async function handleVideoCreate(
       );
       return;
     }
+  }
+
+  // Reject bodies that parsed but are not a JSON object (e.g. `null`) before
+  // touching fields — otherwise `videoReq.prompt` throws a TypeError that
+  // surfaces as a 500 instead of a 400. The multipart branch above builds its
+  // own object and needs no guard.
+  if (!isJsonObject(videoReq)) {
+    journal.add({
+      method,
+      path,
+      headers: flattenHeaders(req.headers),
+      body: null,
+      response: { status: 400, fixture: null },
+    });
+    writeErrorResponse(
+      res,
+      400,
+      JSON.stringify({
+        error: {
+          message: "Request body must be a JSON object",
+          type: "invalid_request_error",
+        },
+      }),
+    );
+    return;
   }
 
   if (!videoReq.prompt) {

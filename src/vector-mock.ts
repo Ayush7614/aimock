@@ -11,7 +11,7 @@ import type {
   QueryHandler,
 } from "./vector-types.js";
 import { createVectorRequestHandler, type VectorState } from "./vector-handler.js";
-import { flattenHeaders, readBody } from "./helpers.js";
+import { flattenHeaders, isJsonObject, readBody } from "./helpers.js";
 
 export class VectorMock implements Mountable {
   private collections: Map<string, VectorCollection> = new Map();
@@ -98,6 +98,36 @@ export class VectorMock implements Mountable {
         }
         res.writeHead(400, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: `Malformed JSON body: ${detail}` }));
+        return true;
+      }
+
+      // Reject bodies that parsed but are not a JSON object (e.g. `null`)
+      // before the route handlers touch fields — `body.ids`, `body.vectors`,
+      // `body.points` and friends throw a TypeError on `null` that nothing
+      // catches, killing the process rather than answering the request.
+      // Arrays and scalars are rejected for the same reason the JSON handlers
+      // reject them: every field reads as `undefined` and the handler answers
+      // a misleading `200` on a degenerate empty result.
+      if (!isJsonObject(parsed)) {
+        if (this.journal) {
+          this.journal.add({
+            method: req.method ?? "GET",
+            path: req.url ?? "/",
+            headers: flattenHeaders(req.headers),
+            body: null,
+            service: "vector",
+            response: { status: 400, fixture: null },
+          });
+        }
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify({
+            error: {
+              message: "Request body must be a JSON object",
+              type: "invalid_request_error",
+            },
+          }),
+        );
         return true;
       }
     }
@@ -196,6 +226,32 @@ export class VectorMock implements Mountable {
               res.end(JSON.stringify({ error: `Malformed JSON body: ${detail}` }));
               return;
             }
+          }
+
+          // Same non-object rejection as the mounted path above — a `null`
+          // body otherwise reaches the route handlers and throws an uncaught
+          // TypeError that takes the standalone server's process down.
+          if (req.method !== "GET" && !isJsonObject(parsed)) {
+            if (this.journal) {
+              this.journal.add({
+                method: req.method ?? "GET",
+                path: req.url ?? "/",
+                headers: flattenHeaders(req.headers),
+                body: null,
+                service: "vector",
+                response: { status: 400, fixture: null },
+              });
+            }
+            res.writeHead(400, { "Content-Type": "application/json" });
+            res.end(
+              JSON.stringify({
+                error: {
+                  message: "Request body must be a JSON object",
+                  type: "invalid_request_error",
+                },
+              }),
+            );
+            return;
           }
 
           const url = new URL(req.url ?? "/", `http://${host}`);
