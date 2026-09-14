@@ -345,6 +345,14 @@ export const ADOPTER_DISPLAY: Record<string, AdopterDisplay> = {
   "liveloveapp/hashbrown": { name: "Hashbrown", url: "https://www.hashbrown.dev" },
   "octelium/octelium": { name: "Octelium", url: "https://octelium.com" },
   "supabitapp/supaterm": { name: "Supaterm", url: "https://supaterm.com" },
+  "tercumantanumut/selene": { name: "Selene", url: "https://selene.engineer" },
+  // The repo declares no homepage; the EmberAGI org does (emberai.xyz), and the
+  // README links "Ember AI" there, so that is the company behind the repo.
+  "EmberAGI/arbitrum-vibekit": { name: "Ember AI", url: "https://www.emberai.xyz" },
+  "agentskillexchange/skills": {
+    name: "Agent Skill Exchange",
+    url: "https://agentskillexchange.com",
+  },
 };
 
 /**
@@ -1444,6 +1452,20 @@ export function classify(input: ClassifyInput): {
 
   if (input.next) {
     const nextRepos = new Set(input.next.map((e) => repoKey(e.repo)));
+
+    // An UNMAPPED tile renders a raw GitHub org login and a repo URL on the
+    // homepage in place of a company name and homepage. The summary has always
+    // listed these as a maintenance queue, but a queue nobody is forced to read
+    // is not a gate: the weekly routine auto-pushes a SAFE wall straight to the
+    // default branch, so a newly-discovered adopter shipped its org login to a
+    // public page unattended and left `main` red on the round-trip test that
+    // asserts the shipped wall is fully curated. NEEDS-REVIEW routes exactly
+    // this case to a review PR instead, which is where a human adds the pair.
+    for (const e of input.next.filter((x) => !x.mapped)) {
+      reasons.push(
+        `${e.repo} has no ADOPTER_DISPLAY entry and would render as the raw org login "${e.name}".`,
+      );
+    }
 
     const floor = input.minWallSize ?? MIN_WALL_SIZE;
     if (input.next.length < floor) {
