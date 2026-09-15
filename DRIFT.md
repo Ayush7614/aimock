@@ -38,6 +38,19 @@ Each provider's tests skip independently if its key is not set. You can run drif
 
 ## Reading Results
 
+### Live coverage vs offline conformance — a green run is NOT "everything checked"
+
+Every surface in `src/__tests__/drift/surface-registry.ts` declares `liveCoverage`, and there is deliberately no default:
+
+- **`"live"`** — at least one `*.drift.ts` leg issues a request to the real vendor (directly, or through `providers.ts` / `ws-providers.ts`). A vendor-side change turns that leg red. This is drift detection.
+- **`"none"`** — every emitting leg only drives the LOCAL aimock server and grades its output against a hand-written SDK-shape fixture in this repo. That catches an aimock builder regression; it can **not** catch the vendor changing its wire format. This is offline conformance, not drift detection, and the surface must say why in `coverageNote`.
+
+`drift-report.json` carries an **`unverifiedSurfaces`** array on every run listing the `"none"` surfaces, and the collector prints them. It is written even when empty, so a missing field means "an old report", never "everything was verified". Read a clean run as _"no drift on the surfaces that were actually checked"_ — the `unverifiedSurfaces` list is the rest.
+
+This exists because an omitted declaration used to read as coverage. Four Bedrock surfaces and Vertex AI sat behind `describe.skipIf(!AWS_ACCESS_KEY_ID …)` / `describe.skipIf(!GOOGLE_APPLICATION_CREDENTIALS …)` gates on bodies that make no vendor call at all, and no drift workflow sets those variables — so the cases had never executed while the four surfaces reported as covered and green. The gates are gone (those cases now run unconditionally as offline conformance, and two of them failed the first time they were allowed to run), and `drift-collector.test.ts` re-derives live-capability from the emitting sources, so a `liveCoverage` claim that contradicts the code fails CI in both directions.
+
+Currently offline-only: `bedrock-invoke`, `bedrock-invoke-stream`, `bedrock-converse`, `bedrock-converse-stream`, `vertex-ai`, `images`, `video`, `moderation`, `fal-sync`.
+
 ### Severity levels
 
 - **critical** — Test fails. aimock produces a different shape than the real API for a field that both the SDK and real API agree on. This means aimock needs an update.
