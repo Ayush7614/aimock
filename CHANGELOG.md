@@ -1,5 +1,19 @@
 # @copilotkit/aimock
 
+## [Unreleased]
+
+### Added
+
+- `X-Request-Id` echoed or minted on every response; `?requestId=` filters the journal (#450)
+
+### Changed
+
+- Journal `headers` now ALWAYS carry `x-request-id` — exact `toEqual` asserts break (#450)
+
+### Fixed
+
+- A MINTED `x-request-id` is no longer forwarded upstream in record/proxy mode (#450)
+
 ## [1.42.0] - 2026-09-13
 
 ### Added

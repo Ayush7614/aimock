@@ -49,6 +49,7 @@ import {
   getTestId,
   readBody,
   resolveRequestId,
+  markMintedRequestId,
   resolveResponse,
   resolveStrictMode,
   resolveReasoningForModel,
@@ -1999,9 +2000,13 @@ export async function createServerWithResolvedAuth(
     // Request-id propagation: echo a well-formed caller id, else mint one.
     // Normalized back onto `req.headers` so every downstream
     // `flattenHeaders` journal snapshot carries it with zero per-handler
-    // edits, and echoed on the response for trace correlation.
-    const { id: requestId } = resolveRequestId(req.headers);
+    // edits, and echoed on the response for trace correlation. A MINTED id is
+    // aimock's own invention and must never reach a real provider, so the
+    // provenance is marked for `buildForwardHeaders` to strip on egress; a
+    // caller-supplied id is the caller's header and forwards untouched.
+    const { id: requestId, generated: requestIdMinted } = resolveRequestId(req.headers);
     req.headers["x-request-id"] = requestId;
+    markMintedRequestId(req, requestIdMinted);
     res.setHeader("X-Request-Id", requestId);
 
     // Parse the URL pathname (strip query string)

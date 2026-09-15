@@ -276,10 +276,13 @@ export function generateId(prefix = "chatcmpl"): string {
  *   `req-…` id is generated — never trust an attacker-controlled correlation
  *   value to be a valid log key.
  *
- * Returns `{ id, generated }` so access logs can distinguish echoes from
- * minted ids. The server normalizes `req.headers["x-request-id"]` to the
- * resolved value, so every downstream `flattenHeaders` journal snapshot
- * carries it with zero per-handler edits.
+ * Returns `{ id, generated }`. The server normalizes
+ * `req.headers["x-request-id"]` to the resolved value, so every downstream
+ * `flattenHeaders` journal snapshot carries it with zero per-handler edits —
+ * which also means a MINTED id would otherwise ride the egress header set to
+ * a real provider. The server therefore passes `generated` to
+ * `markMintedRequestId` so `buildForwardHeaders` can drop it; a caller's own
+ * id still forwards verbatim.
  */
 export function resolveRequestId(rawHeaders: http.IncomingHttpHeaders): {
   id: string;
@@ -294,6 +297,28 @@ export function resolveRequestId(rawHeaders: http.IncomingHttpHeaders): {
     }
   }
   return { id: generateId("req"), generated: true };
+}
+
+/**
+ * Requests whose `x-request-id` aimock MINTED (the caller sent none, or sent
+ * an unusable one). The normalized header is indistinguishable from a
+ * caller-supplied one by inspection, so the provenance is tracked out-of-band
+ * and keyed on the request object, exactly like the egress auth marker.
+ */
+const mintedRequestIds = new WeakSet<http.IncomingMessage>();
+
+/** @internal Record that this request's `x-request-id` is aimock's own. */
+export function markMintedRequestId(req: http.IncomingMessage, generated: boolean): void {
+  if (generated) mintedRequestIds.add(req);
+}
+
+/**
+ * @internal True when `x-request-id` on this request was minted by aimock.
+ * Egress paths use it to avoid transmitting an invented correlation id to a
+ * real provider.
+ */
+export function hasMintedRequestId(req: http.IncomingMessage): boolean {
+  return mintedRequestIds.has(req);
 }
 
 export function generateToolCallId(): string {
