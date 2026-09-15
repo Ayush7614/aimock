@@ -26,6 +26,15 @@ import { applyChaos } from "./chaos.js";
 import { proxyAndRecord } from "./recorder.js";
 import { extractBoundary, extractFormField } from "./transcription.js";
 
+/**
+ * Model used for fixture matching when the caller sends no `model`.
+ *
+ * `dall-e-2`/`dall-e-3` were removed from the OpenAI API on 2026-05-12;
+ * `gpt-image-1` is OpenAI's documented replacement for both. A request that
+ * names a model still has that model echoed through unchanged.
+ */
+const DEFAULT_IMAGE_MODEL = "gpt-image-1";
+
 interface OpenAIImageRequest {
   model?: string;
   prompt: string;
@@ -114,7 +123,7 @@ export async function handleImages(
     } else {
       const openaiReq = body as OpenAIImageRequest;
       prompt = openaiReq.prompt ?? "";
-      model = openaiReq.model ?? "dall-e-3";
+      model = openaiReq.model ?? DEFAULT_IMAGE_MODEL;
     }
   } catch (parseErr) {
     const detail = parseErr instanceof Error ? parseErr.message : "unknown";
@@ -372,7 +381,7 @@ export async function handleImageEdit(
   const boundary = extractBoundary(contentType);
 
   const prompt = extractFormField(raw, "prompt", boundary) ?? "";
-  const model = extractFormField(raw, "model", boundary) ?? "dall-e-2";
+  const model = extractFormField(raw, "model", boundary) ?? DEFAULT_IMAGE_MODEL;
 
   if (!prompt) {
     journal.add({
@@ -576,7 +585,7 @@ export async function handleImageVariations(
     : req.headers["content-type"];
   const boundary = extractBoundary(contentType);
 
-  const model = extractFormField(raw, "model", boundary) ?? "dall-e-2";
+  const model = extractFormField(raw, "model", boundary) ?? DEFAULT_IMAGE_MODEL;
 
   // Variations don't have a prompt — use a synthetic placeholder for fixture matching
   const syntheticReq = buildSyntheticRequest(model, "[variation]", getContext(req));

@@ -4,6 +4,8 @@
 
 ### Fixed
 
+- Moderations echoes the request's `model`; default is now `omni-moderation-latest` (#459)
+- Image endpoints default to `gpt-image-1` — `dall-e-2`/`dall-e-3` were removed (#459)
 - AG-UI record/proxy mode forwards the caller's headers and the raw request body to the upstream agent, instead of rebuilding the request from an `Authorization` / `x-api-key` allowlist and a re-serialized payload. An agent whose runtime contract travels in headers — session affinity, per-request agent configuration, a request signature over the body — now keeps it across the hop. `Accept` is forced to `text/event-stream` (AG-UI is an SSE protocol and the recorder can only parse an event stream); `Content-Type` is only defaulted, since the caller owns it and a signature may cover it (#455)
 - The AG-UI recorder refuses to write a fixture when a 2xx upstream answers with something other than an event stream, or with a stream holding no parseable events, instead of persisting `"events": []` — a fixture that matched on replay and streamed nothing, silently (#455)
 

@@ -120,7 +120,7 @@
 
 <span class="kw">const</span> <span class="op">body</span> = <span class="kw">await</span> <span class="op">res</span>.<span class="fn">json</span>();
 <span class="fn">expect</span>(<span class="op">body</span>.<span class="prop">results</span>[<span class="num">0</span>].<span class="prop">flagged</span>).<span class="fn">toBe</span>(<span class="kw">true</span>);
-<span class="fn">expect</span>(<span class="op">body</span>.<span class="prop">model</span>).<span class="fn">toBe</span>(<span class="str">"text-moderation-latest"</span>);</code></pre>
+<span class="fn">expect</span>(<span class="op">body</span>.<span class="prop">model</span>).<span class="fn">toBe</span>(<span class="str">"omni-moderation-latest"</span>);</code></pre>
         </div>
 
         <h2>Response Format</h2>
@@ -130,7 +130,7 @@
           <div class="code-block-header">Response shape <span class="lang-tag">json</span></div>
           <pre><code>{
   <span class="key">"id"</span>: <span class="str">"modr-..."</span>,
-  <span class="key">"model"</span>: <span class="str">"text-moderation-latest"</span>,
+  <span class="key">"model"</span>: <span class="str">"omni-moderation-latest"</span>,
   <span class="key">"results"</span>: [
     {
       <span class="key">"flagged"</span>: <span class="kw">true</span>,

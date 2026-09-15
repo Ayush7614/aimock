@@ -170,7 +170,7 @@ export function openaiChatCompletionReasoningChunkShape(): ShapeNode {
 export function openaiModerationResponseShape(): ShapeNode {
   return extractShape({
     id: "modr-abc123",
-    model: "text-moderation-latest",
+    model: "omni-moderation-latest",
     results: [
       {
         flagged: false,
