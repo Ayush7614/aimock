@@ -154,15 +154,25 @@ Uses `describe.skipIf(!GOOGLE_API_KEY)` like other Gemini tests. The Interaction
 | ---------------------- | ---- | --------- | ------------------------------------------------------------------- | ---------- |
 | OpenAI Responses WS    | ✓    | ✓         | `wss://api.openai.com/v1/responses`                                 | Verified   |
 | OpenAI Realtime (GA)   | ✓    | ✓         | `wss://api.openai.com/v1/realtime`                                  | Verified   |
-| OpenAI Realtime (Beta) | ✓    | ✓         | `wss://api.openai.com/v1/realtime` + `OpenAI-Beta: realtime=v1`     | Verified   |
+| OpenAI Realtime (Beta) | —    | —         | `wss://api.openai.com/v1/realtime` + `OpenAI-Beta: realtime=v1`     | Excluded¹  |
 | Gemini Live            | —    | —         | `wss://generativelanguage.googleapis.com/ws/...BidiGenerateContent` | Unverified |
+
+¹ **OpenAI Realtime (Beta) — excluded from drift, not covered by it.** OpenAI removed the
+Beta shape: a live Beta handshake returns
+`{"code":"beta_api_shape_disabled","message":"The Realtime Beta API is no longer supported. Please
+use /v1/realtime for the GA API."}` and closes with `4000
+invalid_request_error.beta_api_shape_disabled`. There is no live Beta endpoint to compare against,
+so the probe is GA-only (see `ab8db68`) and this row must never read "Verified" again. aimock still
+answers the Beta shape — with that same sunset rejection, not a handshake — per the
+[deprecation policy](https://aimock.copilotkit.dev/deprecation-policy/); it is pinned by
+`ws-realtime.test.ts` and `ws-api-conformance.test.ts`, not by drift.
 
 **Models**: `gpt-4o-mini` for Responses WS, `gpt-realtime-2` for Realtime GA (was `gpt-4o-mini-realtime-preview`).
 
 **GA Realtime Drift Tests**:
 
 - **Model canary** — Verifies GA models exist (`gpt-realtime`, `gpt-realtime-2`, `gpt-realtime-1.5`, `gpt-realtime-mini` and dated snapshots) and flags unknown realtime models
-- **Protocol probe** — Connects with both GA and Beta protocol, normalizes event sequences, and verifies consistency
+- **Protocol probe** — Connects with the GA protocol only (the Beta shape is retired upstream) and grades the event sequence
 - **Event shape validation** — GA event names (`response.output_text.delta`, `conversation.item.added`, `conversation.item.done`) and nested session config (`session.audio.*`, `session.type`, `session.reasoning`)
 
 **Auth**: Uses the same `OPENAI_API_KEY` and `GOOGLE_API_KEY` environment variables as HTTP tests. No new secrets needed.

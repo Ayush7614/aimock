@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Realtime `OpenAI-Beta: realtime=v1` now returns the real sunset rejection, not a session (#461)
+
 ### Fixed
 
 - Moderations echoes the request's `model`; default is now `omni-moderation-latest` (#459)
