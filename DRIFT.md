@@ -126,16 +126,27 @@ Alongside the 23 core drift tests (20 HTTP response-shape + 3 model deprecation)
 
 ### Additional Endpoint Drift Coverage
 
-| Endpoint                                 | Provider      | Type              | Status  |
-| ---------------------------------------- | ------------- | ----------------- | ------- |
-| POST /v1beta/models/{model}:embedContent | Gemini        | HTTP              | Covered |
-| POST /v1/images/edits                    | OpenAI        | HTTP (multipart)  | Covered |
-| POST /v1/audio/translations              | OpenAI        | HTTP (multipart)  | Covered |
-| POST /api/embed, /api/embeddings         | Ollama        | HTTP              | Covered |
-| POST /v2/embed                           | Cohere        | HTTP              | Covered |
-| POST /v1/text-to-speech/{voice_id}       | ElevenLabs    | HTTP              | Covered |
-| stream_options.include_usage             | OpenAI        | Streaming feature | Covered |
-| x-ratelimit-\* / Retry-After 429         | All providers | Response headers  | Covered |
+| Endpoint                                 | Provider      | Type              | Status    |
+| ---------------------------------------- | ------------- | ----------------- | --------- |
+| POST /v1beta/models/{model}:embedContent | Gemini        | HTTP              | Covered   |
+| POST /v1/images/edits                    | OpenAI        | HTTP (multipart)  | Covered   |
+| POST /v1/audio/translations              | OpenAI        | HTTP (multipart)  | Covered   |
+| POST /v1/images/variations               | OpenAI        | HTTP (multipart)  | Excluded² |
+| POST /api/embed, /api/embeddings         | Ollama        | HTTP              | Covered   |
+| POST /v2/embed                           | Cohere        | HTTP              | Covered   |
+| POST /v1/text-to-speech/{voice_id}       | ElevenLabs    | HTTP              | Covered   |
+| stream_options.include_usage             | OpenAI        | Streaming feature | Covered   |
+| x-ratelimit-\* / Retry-After 429         | All providers | Response headers  | Covered   |
+
+² **POST /v1/images/variations — excluded from drift, not covered by it.** The endpoint is REMOVED
+upstream. It only ever served `dall-e-2`, which OpenAI removed on 2026-05-12, and the path went with
+it: `POST https://api.openai.com/v1/images/variations` returns a bare `404` with a zero-byte body and
+no `content-type`, keyless and authenticated alike — the 404 lands at the CDN edge before auth, byte
+for byte what a made-up path returns, while `/v1/images/generations` and `/v1/images/edits` still
+reach the API (observed 2026-09-15). There is no live endpoint left to drift against, so this row
+must never read "Covered". aimock still answers the path — with that same removal 404, not an image
+envelope — per the [deprecation policy](https://aimock.copilotkit.dev/deprecation-policy/); it is
+pinned by `image-edits.test.ts`, not by drift.
 
 WebSocket drift tests cover aimock's WS protocols (6 verified + 2 canary = 8 WS tests):
 

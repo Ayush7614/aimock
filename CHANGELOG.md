@@ -5,6 +5,7 @@
 ### Changed
 
 - Realtime `OpenAI-Beta: realtime=v1` now returns the real sunset rejection, not a session (#461)
+- `POST /v1/images/variations` now replays the real removal 404; OpenAI deleted it (#462)
 
 ### Fixed
 
