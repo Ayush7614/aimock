@@ -3214,6 +3214,95 @@ function collectEmittedSurfaceSlugs(): { slugs: Set<string>; scannedFiles: strin
   return { slugs, scannedFiles: files };
 }
 
+/**
+ * Re-derive, from the emitting SOURCES, whether each surface has a leg that
+ * ever reaches the real provider.
+ *
+ * Independent derivation on purpose: `SURFACE_REGISTRY.liveCoverage` is a claim
+ * the registry makes, and a claim nothing checks is how four Bedrock surfaces
+ * and Vertex AI reported as covered for months while no AWS or Google request
+ * has ever left this repo. This scans the `*.drift.ts` files that emit each
+ * slug and decides live-capability from what they actually do.
+ *
+ * A file is live-capable when either:
+ *   1. it imports from `./providers.js` or `./ws-providers.js` — those modules
+ *      are, by construction, the raw fetch/WS clients for REAL provider APIs; or
+ *   2. it issues a request whose target is not the local mock server: a literal
+ *      `http(s)://` / `ws(s)://` URL, or an identifier naming a base URL/host
+ *      (`*_URL`, `*_HOST`). Targets built from `instance.url` / `mock.url` are
+ *      the local aimock server and do NOT count.
+ *
+ * Fixture payloads that merely CONTAIN a URL (`images.drift.ts` seeds
+ * `https://example.com/image.png` as generated-image output) are not request
+ * targets and are correctly ignored — only the first argument of a request call
+ * is inspected.
+ */
+function deriveLiveCapableSurfaces(): {
+  /** slug → true when at least one emitting file can reach the vendor. */
+  liveBySlug: Map<string, boolean>;
+  scannedFiles: string[];
+} {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const ts = require("typescript") as typeof import("typescript");
+  const driftDir = resolve(__dirname, "drift");
+  const files = readdirSync(driftDir).filter((f) => f.endsWith(".drift.ts"));
+  const liveBySlug = new Map<string, boolean>();
+
+  const REQUEST_CALLEES = new Set([
+    "fetch",
+    "httpGet",
+    "httpPost",
+    "httpPostBinary",
+    "httpPostForm",
+    "httpRequest",
+  ]);
+  const LIVE_CLIENT_MODULES = ["./providers.js", "./ws-providers.js"];
+
+  for (const file of files) {
+    const abs = resolve(driftDir, file);
+    const source = readFileSync(abs, "utf8");
+    const sf = ts.createSourceFile(abs, source, ts.ScriptTarget.Latest, true);
+
+    const fileSlugs = new Set<string>();
+    let live = false;
+
+    const visit = (node: import("typescript").Node): void => {
+      if (
+        ts.isImportDeclaration(node) &&
+        ts.isStringLiteral(node.moduleSpecifier) &&
+        LIVE_CLIENT_MODULES.includes(node.moduleSpecifier.text)
+      ) {
+        live = true;
+      }
+      if (ts.isCallExpression(node) && ts.isIdentifier(node.expression)) {
+        if (node.expression.text === "formatDriftReport" && node.arguments.length >= 3) {
+          const third = node.arguments[2];
+          if (ts.isStringLiteral(third) || ts.isNoSubstitutionTemplateLiteral(third)) {
+            fileSlugs.add(third.text);
+          }
+        }
+        if (REQUEST_CALLEES.has(node.expression.text) && node.arguments[0]) {
+          const target = node.arguments[0].getText();
+          if (
+            /\bhttps?:\/\/|\bwss?:\/\//.test(target) ||
+            /\b[A-Z][A-Z0-9_]*_(URL|HOST)\b/.test(target)
+          ) {
+            live = true;
+          }
+        }
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(sf);
+
+    for (const slug of fileSlugs) {
+      liveBySlug.set(slug, (liveBySlug.get(slug) ?? false) || live);
+    }
+  }
+
+  return { liveBySlug, scannedFiles: files };
+}
+
 describe("WS-5 — SURFACE_REGISTRY coverage & integrity", () => {
   it("every slug an emitter passes to formatDriftReport is a registered surface", () => {
     // Independent derivation (F2/F3): scan the ACTUAL emitter call sites rather
@@ -3259,6 +3348,64 @@ describe("WS-5 — SURFACE_REGISTRY coverage & integrity", () => {
         ).toBe(true);
       }
     }
+  });
+
+  it("every registry entry declares liveCoverage, and the declaration matches the source", () => {
+    // The honesty gate. `liveCoverage` has NO default — omission used to mean
+    // "covered" by implication, which is the exact defect this locks shut. Both
+    // directions fail:
+    //   - declared "live" but no emitting file can reach the vendor  → the
+    //     registry is claiming coverage that does not exist (the Bedrock/Vertex
+    //     bug);
+    //   - declared "none" but a live leg exists → a stale pessimistic note that
+    //     would put a genuinely-verified surface on the unverified list.
+    const { liveBySlug, scannedFiles } = deriveLiveCapableSurfaces();
+    expect(scannedFiles.length, "found *.drift.ts files to scan").toBeGreaterThan(0);
+
+    const mismatches: string[] = [];
+    for (const [slug, mapping] of Object.entries(SURFACE_REGISTRY)) {
+      const derived = liveBySlug.get(slug);
+      expect(derived, `${slug} is emitted by some *.drift.ts file`).toBeDefined();
+      const declared = mapping.liveCoverage === "live";
+      if (declared !== derived) {
+        mismatches.push(
+          `${slug}: declared liveCoverage="${mapping.liveCoverage}" but the emitting ` +
+            `source(s) are ${derived ? "live-capable" : "mock-only"}`,
+        );
+      }
+      if (mapping.liveCoverage === "none") {
+        expect(
+          (mapping.coverageNote ?? "").length,
+          `${slug} declares liveCoverage "none" and must explain why in coverageNote`,
+        ).toBeGreaterThan(0);
+      }
+    }
+    expect(
+      mismatches,
+      `liveCoverage declaration(s) contradict the source:\n${mismatches.join("\n")}`,
+    ).toEqual([]);
+  });
+
+  it("the offline-only surfaces are named explicitly (no silent shrink of the unverified list)", () => {
+    // A positive control on the list itself: if a future edit flips one of these
+    // to "live" without a live leg actually being added, the test above catches
+    // the contradiction — but if someone DELETES a surface from the registry to
+    // make the unverified list shorter, only this explicit roster notices.
+    const offline = Object.entries(SURFACE_REGISTRY)
+      .filter(([, m]) => m.liveCoverage === "none")
+      .map(([slug]) => slug)
+      .sort();
+    expect(offline).toEqual([
+      "bedrock-converse",
+      "bedrock-converse-stream",
+      "bedrock-invoke",
+      "bedrock-invoke-stream",
+      "fal-sync",
+      "images",
+      "moderation",
+      "vertex-ai",
+      "video",
+    ]);
   });
 
   it("provider labels are unique (legacy fallback reverse-index has no collisions)", () => {

@@ -127,6 +127,26 @@ export interface DriftEntry {
   diffs: ParsedDiff[];
 }
 
+/**
+ * A registry surface that NO live provider leg grades.
+ *
+ * Emitted so a reader of `drift-report.json` can tell "this surface was checked
+ * against the vendor and matched" apart from "this surface was never put in
+ * front of the vendor at all". A clean run used to be indistinguishable between
+ * the two, which is how the four Bedrock surfaces and Vertex AI read as green
+ * while nothing had ever called AWS or Google from this repo.
+ *
+ * Mirrors `liveCoverage: "none"` entries in `src/__tests__/drift/surface-registry.ts`.
+ */
+export interface UnverifiedSurface {
+  /** Stable surface slug, e.g. `"bedrock-converse"`. */
+  surface: string;
+  /** Human-readable label, e.g. `"Bedrock Converse"`. */
+  provider: string;
+  /** Why there is no live leg, and what it would take to get one. */
+  note: string;
+}
+
 export interface DriftReport {
   timestamp: string;
   /**
@@ -156,4 +176,11 @@ export interface DriftReport {
    * legacy consumers that ignore this field are unaffected.
    */
   timeouts?: TimeoutEntry[];
+  /**
+   * Surfaces the run did NOT verify against a live provider (see
+   * `UnverifiedSurface`). Always written, including when empty, so "the field
+   * is missing" means "an old report", never "everything was verified".
+   * Absent on legacy reports.
+   */
+  unverifiedSurfaces?: UnverifiedSurface[];
 }
