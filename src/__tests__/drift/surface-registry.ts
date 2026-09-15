@@ -278,9 +278,12 @@ export const SURFACE_REGISTRY: Record<string, SurfaceMapping> = {
     provider: "OpenAI Images",
     liveCoverage: "none",
     coverageNote:
-      "No live OpenAI Images leg: `images.drift.ts` only drives the local mock. Offline conformance only.",
+      "No live OpenAI Images leg: `images.drift.ts` only drives the local mock. Offline conformance only. " +
+      "`/v1/images/variations` is out of scope entirely — the endpoint is REMOVED upstream (404, zero-byte " +
+      "body, observed 2026-09-15) and `handleImageVariations` now replays that removal, so it is not a " +
+      "response builder and must not be steered at as one; it is pinned by `image-edits.test.ts`.",
     builderFile: "src/images.ts",
-    builderFunctions: ["handleImages", "handleImageEdit", "handleImageVariations"],
+    builderFunctions: ["handleImages", "handleImageEdit"],
     typesFile: null,
   },
   video: {
