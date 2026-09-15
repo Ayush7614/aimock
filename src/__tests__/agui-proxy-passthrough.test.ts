@@ -1,6 +1,10 @@
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import * as http from "node:http";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import { AGUIMock } from "../agui-mock.js";
+import { Logger } from "../logger.js";
 
 // ---------------------------------------------------------------------------
 // AG-UI proxy/record passthrough fidelity.
@@ -16,6 +20,7 @@ import { AGUIMock } from "../agui-mock.js";
 
 let upstream: http.Server | undefined;
 let agui: AGUIMock | undefined;
+let tmpDir: string | undefined;
 
 afterEach(async () => {
   if (agui) {
@@ -30,6 +35,11 @@ afterEach(async () => {
     await new Promise<void>((resolve) => upstream!.close(() => resolve()));
     upstream = undefined;
   }
+  if (tmpDir) {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+    tmpDir = undefined;
+  }
+  vi.restoreAllMocks();
 });
 
 interface Captured {
@@ -149,19 +159,31 @@ describe("AG-UI proxy passthrough", () => {
     expect(captured[0].headers["content-length"]).toBe(String(Buffer.byteLength(body)));
   });
 
-  it("does not override content negotiation headers the caller set", async () => {
+  it("does not override the Content-Type the caller set", async () => {
     const captured: Captured[] = [];
     const upstreamUrl = await createEchoUpstream(captured);
     agui = await startProxy(upstreamUrl);
 
     const body = JSON.stringify({ threadId: "t1", runId: "r1", messages: [] });
-    await post(agui.url, body, {
-      "Content-Type": "application/json; charset=utf-8",
-      Accept: "text/event-stream, application/json",
-    });
+    await post(agui.url, body, { "Content-Type": "application/json; charset=utf-8" });
 
     expect(captured[0].headers["content-type"]).toBe("application/json; charset=utf-8");
-    expect(captured[0].headers["accept"]).toBe("text/event-stream, application/json");
+  });
+
+  it("forces Accept to text/event-stream even when the caller sent a generic one", async () => {
+    const captured: Captured[] = [];
+    const upstreamUrl = await createEchoUpstream(captured);
+    agui = await startProxy(upstreamUrl);
+
+    const body = JSON.stringify({ threadId: "t1", runId: "r1", messages: [] });
+    // curl's and axios's defaults. Forwarding either lets a content-negotiating
+    // upstream answer with JSON, which relays mislabelled and records empty.
+    await post(agui.url, body, {
+      "Content-Type": "application/json",
+      Accept: "application/json, text/plain, */*",
+    });
+
+    expect(captured[0].headers["accept"]).toBe("text/event-stream");
   });
 
   it("supplies content negotiation defaults when the caller omits them", async () => {
@@ -185,15 +207,95 @@ describe("AG-UI proxy passthrough", () => {
     await post(agui.url, body, {
       "Content-Type": "application/json",
       "x-test-id": "internal-only",
+      "x-aimock-strict": "1",
+      "x-aimock-context": "suite-a",
+      "x-aimock-chaos-latency-ms": "250",
       "accept-encoding": "gzip",
       cookie: "session=nope",
     });
 
     const received = captured[0].headers;
     expect(received["x-test-id"]).toBeUndefined();
+    expect(received["x-aimock-strict"]).toBeUndefined();
+    expect(received["x-aimock-context"]).toBeUndefined();
+    expect(received["x-aimock-chaos-latency-ms"]).toBeUndefined();
     expect(received["accept-encoding"]).toBeUndefined();
     expect(received["cookie"]).toBeUndefined();
     // The upstream host is the proxy target's, never the inbound one.
     expect(received["host"]).toBe(new URL(upstreamUrl).host);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Recording refusal.
+//
+// The recorder can only build a fixture from an event stream. A 2xx upstream
+// that answered with something else — or with a stream holding no parseable
+// AG-UI events — used to be written to disk as `"events": []`. That fixture
+// MATCHES on replay and streams nothing, with no fixture-miss log and no parse
+// warning, so the failure surfaces as a silently empty agent turn. Both cases
+// must relay to the client and refuse the recording, loudly.
+// ---------------------------------------------------------------------------
+
+/** An upstream that answers 200 with the given content type and body. */
+function createNonSSEUpstream(contentType: string, body: string): Promise<string> {
+  return new Promise((resolve) => {
+    upstream = http.createServer((req, res) => {
+      req.resume();
+      req.on("end", () => {
+        res.writeHead(200, { "Content-Type": contentType });
+        res.end(body);
+      });
+    });
+    upstream.listen(0, "127.0.0.1", () => {
+      const { port } = upstream!.address() as { port: number };
+      resolve(`http://127.0.0.1:${port}`);
+    });
+  });
+}
+
+describe("AG-UI proxy recording refusal", () => {
+  async function runAgainst(upstreamUrl: string): Promise<{ errors: string[]; files: string[] }> {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "agui-refusal-"));
+    const errors: string[] = [];
+    vi.spyOn(Logger.prototype, "error").mockImplementation((...args: unknown[]) => {
+      errors.push(args.map(String).join(" "));
+    });
+
+    agui = new AGUIMock({ port: 0, logLevel: "error" });
+    agui.enableRecording({ upstream: upstreamUrl, proxyOnly: false, fixturePath: tmpDir });
+    await agui.start();
+
+    const body = JSON.stringify({
+      threadId: "t1",
+      runId: "r1",
+      messages: [{ id: "u1", role: "user", content: "hi" }],
+    });
+    const resp = await post(agui.url, body, { "Content-Type": "application/json" });
+    expect(resp.status).toBe(200);
+
+    return { errors, files: fs.readdirSync(tmpDir).filter((f) => f.endsWith(".json")) };
+  }
+
+  it("refuses to record a 2xx upstream that did not answer with an event stream", async () => {
+    const upstreamUrl = await createNonSSEUpstream(
+      "application/json",
+      JSON.stringify({ message: "negotiated down to JSON" }),
+    );
+
+    const { errors, files } = await runAgainst(upstreamUrl);
+
+    expect(files).toHaveLength(0);
+    expect(errors.some((e) => /not text\/event-stream/i.test(e))).toBe(true);
+  });
+
+  it("refuses to record an event stream that yielded no parseable events", async () => {
+    // Correct content type, but nothing the SSE parser can turn into an event.
+    const upstreamUrl = await createNonSSEUpstream("text/event-stream", ": keep-alive\n\n");
+
+    const { errors, files } = await runAgainst(upstreamUrl);
+
+    expect(files).toHaveLength(0);
+    expect(errors.some((e) => /no parseable AG-UI events/i.test(e))).toBe(true);
   });
 });
