@@ -23,7 +23,7 @@ import {
 import { matchFixtureDiagnostic } from "./router.js";
 import { writeErrorResponse } from "./sse-writer.js";
 import type { Journal } from "./journal.js";
-import { applyChaos } from "./chaos.js";
+import { applyChaosAsync } from "./chaos.js";
 import { resolveProgression } from "./fal.js";
 import {
   buildFixtureMatch,
@@ -395,7 +395,7 @@ export async function handleGrokVideoCreate(
   }
 
   if (
-    applyChaos(
+    await applyChaosAsync(
       res,
       fixture,
       defaults.chaos,
@@ -583,7 +583,7 @@ export async function handleGrokVideoStatus(
   if (!job) {
     // Grok miss → Sora status, UNCHANGED (byte-for-byte; it sets CORS + rolls
     // chaos itself). Disjoint id namespaces make this unambiguous.
-    handleVideoStatus(req, res, id, journal, defaults, setCorsHeaders, videoStates);
+    await handleVideoStatus(req, res, id, journal, defaults, setCorsHeaders, videoStates);
     return;
   }
 
@@ -594,7 +594,7 @@ export async function handleGrokVideoStatus(
   const method = req.method ?? "GET";
 
   if (
-    applyChaos(
+    await applyChaosAsync(
       res,
       null,
       defaults.chaos,

@@ -23,7 +23,7 @@ import {
 import { matchFixtureDiagnostic } from "./router.js";
 import { writeErrorResponse } from "./sse-writer.js";
 import type { Journal } from "./journal.js";
-import { applyChaos } from "./chaos.js";
+import { applyChaosAsync } from "./chaos.js";
 import { resolveProgression } from "./fal.js";
 import {
   buildFixtureMatch,
@@ -306,7 +306,7 @@ export async function handleVeoVideoCreate(
   // OpenRouter submit). An unmatched submit is proxied upstream when record
   // mode has a veo provider AND strict would not win — label that roll "proxy".
   if (
-    applyChaos(
+    await applyChaosAsync(
       res,
       fixture,
       defaults.chaos,
@@ -489,7 +489,7 @@ export async function handleVeoVideoStatus(
   // Chaos rolls BEFORE the job lookup — the label stays "internal" even in
   // record mode, and a chaos-dropped poll never reaches the upstream.
   if (
-    applyChaos(
+    await applyChaosAsync(
       res,
       null,
       defaults.chaos,

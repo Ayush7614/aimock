@@ -34,7 +34,7 @@ import {
 import { matchFixtureDiagnostic } from "./router.js";
 import { writeErrorResponse } from "./sse-writer.js";
 import type { Journal } from "./journal.js";
-import { applyChaos } from "./chaos.js";
+import { applyChaosAsync } from "./chaos.js";
 import { proxyAndRecord } from "./recorder.js";
 
 // ─── Gemini embedContent request types ────────────────────────────────────
@@ -166,7 +166,7 @@ export async function handleGeminiEmbedContent(
   }
 
   if (
-    applyChaos(
+    await applyChaosAsync(
       res,
       fixture,
       defaults.chaos,

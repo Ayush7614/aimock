@@ -20,7 +20,7 @@ import { matchFixtureDiagnostic } from "./router.js";
 import { writeErrorResponse } from "./sse-writer.js";
 import { proxyAndRecord } from "./recorder.js";
 import type { Journal } from "./journal.js";
-import { applyChaos } from "./chaos.js";
+import { applyChaosAsync } from "./chaos.js";
 
 export async function handleElevenLabsTTS(
   req: http.IncomingMessage,
@@ -133,7 +133,7 @@ export async function handleElevenLabsTTS(
   }
 
   if (
-    applyChaos(
+    await applyChaosAsync(
       res,
       fixture,
       defaults.chaos,
@@ -418,7 +418,7 @@ export async function handleElevenLabsAudio(
   }
 
   if (
-    applyChaos(
+    await applyChaosAsync(
       res,
       fixture,
       defaults.chaos,

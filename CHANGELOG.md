@@ -2,10 +2,16 @@
 
 ## [Unreleased]
 
+### Added
+
+- Chaos `rateLimitRate` / `--chaos-ratelimit`: deterministic 429 with `Retry-After` (#449)
+- Chaos `latencyMs` / `--chaos-latency` now actually delays responses on every path (#449)
+
 ### Changed
 
 - Realtime `OpenAI-Beta: realtime=v1` now returns the real sunset rejection, not a session (#461)
 - `POST /v1/images/variations` now replays the real removal 404; OpenAI deleted it (#462)
+- `ChaosAction` gains `"rateLimit"` — an exhaustive switch over it needs a case (#449)
 
 ### Fixed
 

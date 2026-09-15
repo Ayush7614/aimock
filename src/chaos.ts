@@ -185,6 +185,26 @@ export function resolveChaosLatencyMs(
 }
 
 /**
+ * Await the deterministic latency delay configured for this request, if any.
+ * Fixed (never randomised or jittered) so replay stays deterministic. Returns
+ * immediately when no latency is configured. Handlers that roll the chaos dice
+ * themselves (branching on the action before dispatching) call this first;
+ * handlers that just need "delay, then maybe fail" use `applyChaosAsync`.
+ */
+export async function awaitChaosLatency(
+  fixture: Fixture | null,
+  serverDefaults?: ChaosDefaults,
+  rawHeaders?: http.IncomingHttpHeaders,
+  logger?: Logger,
+  url?: string,
+): Promise<void> {
+  const delayMs = resolveChaosLatencyMs(fixture, serverDefaults, rawHeaders, logger, url);
+  if (delayMs > 0) {
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
+  }
+}
+
+/**
  * Evaluate chaos config and return the triggered action, or null if none.
  * Checks in order: drop, malformed, rateLimit, disconnect — first hit wins.
  */
@@ -243,10 +263,7 @@ export async function applyChaosAsync(
   registry?: MetricsRegistry,
   logger?: Logger,
 ): Promise<boolean> {
-  const delayMs = resolveChaosLatencyMs(fixture, serverDefaults, rawHeaders, logger, requestUrl);
-  if (delayMs > 0) {
-    await new Promise((resolve) => setTimeout(resolve, delayMs));
-  }
+  await awaitChaosLatency(fixture, serverDefaults, rawHeaders, logger, requestUrl);
   return applyChaos(
     res,
     fixture,

@@ -119,7 +119,7 @@ import { handleWebSocketResponses } from "./ws-responses.js";
 import { handleWebSocketRealtime } from "./ws-realtime.js";
 import { handleWebSocketGeminiLive } from "./ws-gemini-live.js";
 import { Logger } from "./logger.js";
-import { applyChaosAction, evaluateChaos, isChaosScope } from "./chaos.js";
+import { applyChaosAction, awaitChaosLatency, evaluateChaos, isChaosScope } from "./chaos.js";
 import {
   createMetricsRegistry,
   normalizePathLabel,
@@ -1228,6 +1228,12 @@ async function handleCompletions(
   //                            beforeWriteResponse hook (passed only when the
   //                            action is malformed, so the hook doesn't need
   //                            to re-check the action).
+  // Deterministic latency is injected BEFORE the terminal actions are rolled,
+  // so a configured delay applies to every outcome (served fixture, proxied
+  // response, streamed response, and each chaos failure alike) — and, being
+  // resolved from the same per-testId scope as the rates, never leaks into a
+  // concurrently-running test that did not configure it.
+  await awaitChaosLatency(fixture, defaults.chaos, req.headers, defaults.logger, req.url);
   const chaosAction = evaluateChaos(fixture, defaults.chaos, req.headers, defaults.logger, req.url);
   const chaosContext = { method, path, headers: flatHeaders, body };
 
