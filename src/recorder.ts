@@ -166,6 +166,26 @@ export function removeForwardHeader(headers: Record<string, string>, name: strin
 }
 
 /**
+ * Set a header on an egress map ONLY if the inbound request did not already
+ * supply it (in any casing). Used for content-negotiation defaults the mock
+ * wants when the caller was not explicit. Never overwrites: a caller-sent
+ * header may be covered by a request signature (AWS SigV4 and friends sign a
+ * named subset of headers), so replacing one silently invalidates the request
+ * upstream.
+ */
+export function setForwardHeaderDefault(
+  headers: Record<string, string>,
+  name: string,
+  value: string,
+): void {
+  const lowerName = name.toLowerCase();
+  for (const key of Object.keys(headers)) {
+    if (key.toLowerCase() === lowerName) return;
+  }
+  headers[name] = value;
+}
+
+/**
  * Construct the only safe egress map when inbound access control is enabled.
  * Test credentials are always removed; a static configured provider credential
  * is mandatory so an accepted test credential can never become an upstream one.

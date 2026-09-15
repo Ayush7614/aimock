@@ -13,6 +13,7 @@ import type {
 import { extractLastUserMessage, getLastMessageIfToolResult } from "./agui-handler.js";
 import type { Logger } from "./logger.js";
 import { isAuthenticatedRequest } from "./api-key-auth.js";
+import { buildForwardHeaders, setForwardHeaderDefault } from "./recorder.js";
 
 /**
  * Sentinel `match.message` value written to disk when the request had no
@@ -75,6 +76,13 @@ function resolveAGUIRecordBufferCap(configured: number | undefined): number {
  * SSE event stream as a fixture on disk and in memory, and relay the
  * response back to the original client in real time.
  *
+ * `rawBody` is the exact request payload as it arrived on the wire. It is
+ * forwarded byte-for-byte rather than re-serialized from the parsed `input`,
+ * because re-serialization changes key order and whitespace and therefore
+ * invalidates any signature the caller computed over the body (AWS SigV4 signs
+ * a hash of the payload). `input` remains the parsed view used for fixture
+ * matching only.
+ *
  * Returns the HTTP status code written to the client if the request was proxied,
  * or `false` if no upstream is configured.
  */
@@ -82,6 +90,7 @@ export async function proxyAndRecordAGUI(
   req: http.IncomingMessage,
   res: http.ServerResponse,
   input: AGUIRunAgentInput,
+  rawBody: string,
   fixtures: AGUIFixture[],
   config: AGUIRecordConfig,
   logger: Logger,
@@ -112,31 +121,24 @@ export async function proxyAndRecordAGUI(
 
   logger.warn(`NO AG-UI FIXTURE MATCH — proxying to ${config.upstream}`);
 
-  // Build upstream request headers
-  const forwardHeaders: Record<string, string> = {
-    "Content-Type": "application/json",
-    Accept: "text/event-stream",
-  };
-  // Forward auth headers if present
-  const authorization = req.headers["authorization"];
-  if (authorization) {
-    forwardHeaders["Authorization"] = Array.isArray(authorization)
-      ? authorization.join(", ")
-      : authorization;
-  }
-  const apiKey = req.headers["x-api-key"];
-  if (apiKey) {
-    forwardHeaders["x-api-key"] = Array.isArray(apiKey) ? apiKey.join(", ") : apiKey;
-  }
-
-  const requestBody = JSON.stringify(input);
+  // Forward the inbound headers to the upstream agent, minus hop-by-hop,
+  // client-set, and mock-internal ones — the same egress rule the generic
+  // proxy path applies. An agent runtime's contract frequently lives in
+  // headers (session affinity, per-request agent configuration, request
+  // signatures), so the proxy strips a known-unsafe set rather than keeping a
+  // hand-picked allowlist that silently drops everything it has not heard of.
+  const forwardHeaders = buildForwardHeaders(req);
+  // Content-negotiation defaults for callers that were not explicit. These are
+  // defaults, never overrides — see setForwardHeaderDefault.
+  setForwardHeaderDefault(forwardHeaders, "Content-Type", "application/json");
+  setForwardHeaderDefault(forwardHeaders, "Accept", "text/event-stream");
 
   let status: number;
   try {
     status = await teeUpstreamStream(
       target,
       forwardHeaders,
-      requestBody,
+      rawBody,
       res,
       input,
       fixtures,

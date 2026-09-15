@@ -238,6 +238,17 @@ agui.<span class="fn">enableRecording</span>({
   proxyOnly: <span class="kw">true</span>, <span class="cm">// false to save fixtures</span>
 });</code></pre>
         </div>
+        <p>
+          The proxy is transparent: inbound request headers are forwarded to the upstream agent, and
+          the request body is relayed byte-for-byte. Hop-by-hop headers (<code>connection</code>,
+          <code>transfer-encoding</code>, &hellip;), headers the proxy must own (<code>host</code>,
+          <code>content-length</code>, <code>accept-encoding</code>), <code>cookie</code>, and
+          aimock's own control headers are stripped. <code>Content-Type</code> and
+          <code>Accept</code> are supplied only when the caller did not set them. This keeps runtime
+          contracts that live in headers &mdash; session affinity, per-request agent configuration
+          &mdash; and request signatures computed over the payload (AWS SigV4) intact across the
+          hop.
+        </p>
 
         <h2>CLI Usage</h2>
         <div class="code-block">
