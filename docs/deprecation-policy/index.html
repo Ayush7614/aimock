@@ -87,9 +87,11 @@
         </p>
         <p>
           Finally, the decision is asymmetric. Declining to <em>add</em> a surface costs a
-          contributor a pull request and nothing else. <em>Removing</em> a surface aimock has
-          already shipped is a breaking change for everyone who depends on it. So the bar runs in
-          one direction: be quick to decline, slow to delete.
+          contributor a pull request and nothing else. <em>Deleting</em> a surface aimock already
+          ships takes a route out from under everyone whose tests are wired to it. So the bar runs
+          in one direction: be quick to decline, slow to delete. That asymmetry governs deletion,
+          not honesty — when upstream kills an endpoint, the route stays and starts telling the
+          truth about it.
         </p>
 
         <h2>Why a Removed API Is Different</h2>
@@ -104,6 +106,23 @@
           That is strictly worse than having no mock at all. With no mock, the test fails loudly in
           CI, where failures are cheap and someone is watching. With a lying mock, the failure moves
           to deploy, where it is expensive and nobody expected it.
+        </p>
+        <p>
+          The same reasoning reaches a surface aimock already ships. Once upstream pulls the
+          endpoint, the shipped mock is the one doing the lying, and correcting it is not our
+          breaking change — upstream's removal is. The endpoint is gone whether or not aimock
+          reflects it. The user's code is already broken; the only thing still in our hands is
+          whether they find that out in CI or in production.
+        </p>
+        <p>
+          A major version is not the instrument for it either. A major protects
+          <strong>aimock's own interface</strong> — the CLI, the configuration, the way you start it
+          and point a client at it. Fidelity to upstream is not our interface, it is our job, and
+          correcting a mock to match reality is not us breaking a promise. Treating it as one would
+          also be unworkable: providers retire things constantly, and tying every upstream removal
+          to a major bump makes majors either meaningless or perpetual. The conversion ships in a
+          normal release. It is consumer-visible and earns a loud <code>CHANGELOG</code> entry, but
+          it is not a major-version event.
         </p>
         <div class="info-box">
           <p>
@@ -151,7 +170,7 @@
             <tr>
               <td><strong>Removed / sunset</strong></td>
               <td>Decline the success-path mock</td>
-              <td>Keep serving, warn, delete only on a major</td>
+              <td>Convert to the sunset behaviour in a normal release</td>
             </tr>
           </tbody>
         </table>
@@ -160,12 +179,14 @@
         <ol>
           <li>
             <strong>Never mock success for an endpoint that no longer serves.</strong> Faithfulness
-            is the product.
+            is the product, and it binds a surface aimock already ships exactly as it binds one
+            being proposed.
           </li>
           <li>
             <strong>A sunset mock is legitimate if it mocks the sunset.</strong> Returning the
             <code>404</code> or <code>410</code> the real API now returns is a faithful mock, and a
-            useful one — it lets users test that their code handles the removal.
+            useful one — it lets users test that their code handles the removal. For a surface
+            aimock already ships, that conversion is not merely permitted; it is the required path.
           </li>
           <li>
             <strong>Dead surfaces are explicitly excluded from drift</strong>, never left to pass
@@ -189,10 +210,12 @@
           helps users, because handling the removal is the only thing left to test.
         </p>
         <p>
-          If a surface aimock already ships gets removed upstream, it does not vanish from your next
-          patch release. It keeps serving, it gains a warning, it leaves the drift pipeline, and it
-          is deleted only on a major version. Removal from aimock is a breaking change, and it is
-          treated like one.
+          If a surface aimock already ships gets removed upstream, the route does not vanish from
+          your next release — what it returns changes. It starts serving the rejection the real API
+          now serves, it leaves the drift pipeline, and it stays there so you can still test that
+          your code handles the shutdown. That change is consumer-visible and the
+          <code>CHANGELOG</code> says so plainly, but it rides a normal release: matching upstream
+          reality is aimock doing its job, not aimock breaking its interface.
         </p>
       </main>
       <aside class="page-toc" id="page-toc"></aside>
