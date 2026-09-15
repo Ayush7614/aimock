@@ -207,6 +207,10 @@ Step-by-step migration guides: [MSW](https://aimock.copilotkit.dev/migrate-from-
 
 [AG-UI](https://github.com/ag-ui-protocol/ag-ui) uses aimock for its [end-to-end test suite](https://github.com/ag-ui-protocol/ag-ui/tree/main/apps/dojo/e2e), verifying AI agent behavior across LLM providers with [fixture-driven responses](https://github.com/ag-ui-protocol/ag-ui/tree/main/apps/dojo/e2e/fixtures/openai).
 
+## Deprecated & removed APIs
+
+aimock keeps mocking provider surfaces that upstream has deprecated — that is when test scaffolding matters most, since your code still calls them while you migrate. It declines to mock the success path of APIs that have actually been removed: a mock that answers `200` where the real endpoint is gone manufactures a passing test for code that cannot work. Full policy: [Deprecated & Removed APIs](https://aimock.copilotkit.dev/deprecation-policy).
+
 ## License
 
 MIT

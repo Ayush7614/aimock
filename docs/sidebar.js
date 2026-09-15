@@ -94,6 +94,7 @@
         { label: "GitHub Action", href: "/github-action" },
         { label: "Test Plugins", href: "/test-plugins" },
         { label: "Drift Detection", href: "/drift-detection" },
+        { label: "Deprecated & Removed APIs", href: "/deprecation-policy" },
       ],
     },
     {
