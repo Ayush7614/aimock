@@ -3400,6 +3400,7 @@ describe("WS-5 — SURFACE_REGISTRY coverage & integrity", () => {
       "bedrock-converse-stream",
       "bedrock-invoke",
       "bedrock-invoke-stream",
+      "elevenlabs-voice",
       "fal-sync",
       "images",
       "moderation",

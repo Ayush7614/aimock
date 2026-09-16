@@ -6,14 +6,23 @@
  * - /v1/music — binary audio with song-id header
  * - /v1/music/stream — chunked binary audio
  * - /v1/music/plan — JSON composition plan
- * - /v1/text-to-voice/design — JSON voice previews
- * - /v1/text-to-voice — save a generated preview as a voice
  *
  * Since ElevenLabs returns binary audio (not JSON), drift testing focuses on
  * Content-Type headers, binary payload presence, and JSON plan structure
  * rather than three-way JSON shape comparison.
  *
- * Requires: ELEVENLABS_API_KEY (for real API comparison; tests run mock-only otherwise)
+ * LIVE COVERAGE: the /v1/sound-generation case below fetches the real
+ * `api.elevenlabs.io` when ELEVENLABS_API_KEY is set, which is what earns this
+ * surface `liveCoverage: "live"`. Every other case here is offline conformance
+ * against the local mock. Without the key the live case skips and the run
+ * proves nothing about the vendor.
+ *
+ * The Voice Design routes (`/v1/text-to-voice/design`, `/v1/text-to-voice`) are
+ * NOT covered here — they have no live leg at all and live in
+ * `elevenlabs-voice.drift.ts` as the separately-declared, offline-only
+ * `elevenlabs-voice` surface.
+ *
+ * Requires: ELEVENLABS_API_KEY (for the one real-API case; omitted → it skips)
  */
 
 import http from "node:http";
@@ -48,24 +57,6 @@ const PLAN_FIXTURE: Fixture = {
   response: { content: JSON.stringify({ sections: ["intro", "verse", "chorus"], bpm: 120 }) },
 };
 
-const VOICE_DESIGN_FIXTURE: Fixture = {
-  match: { userMessage: "sea captain", endpoint: "elevenlabs-voice-design" },
-  response: {
-    json: {
-      previews: [
-        {
-          generated_voice_id: "preview_captain",
-          audio_base_64: "SGVsbG8=",
-          media_type: "audio/mpeg",
-          duration_secs: 1.2,
-          language: "en",
-        },
-      ],
-      text: "Ahoy there.",
-    },
-  },
-};
-
 // ---------------------------------------------------------------------------
 // Server lifecycle
 // ---------------------------------------------------------------------------
@@ -73,13 +64,10 @@ const VOICE_DESIGN_FIXTURE: Fixture = {
 let instance: ServerInstance;
 
 beforeAll(async () => {
-  instance = await createServer(
-    [SOUND_FIXTURE, MUSIC_FIXTURE, PLAN_FIXTURE, VOICE_DESIGN_FIXTURE],
-    {
-      port: 0,
-      chunkSize: 100,
-    },
-  );
+  instance = await createServer([SOUND_FIXTURE, MUSIC_FIXTURE, PLAN_FIXTURE], {
+    port: 0,
+    chunkSize: 100,
+  });
 });
 
 afterAll(async () => {
@@ -104,9 +92,14 @@ function httpPostBinary(
       (res) => {
         const chunks: Buffer[] = [];
         res.on("data", (c) => chunks.push(c));
+        // A socket error or an abort AFTER the headers arrive settles nothing
+        // on `req`, so without these two the promise stays pending and the
+        // failure surfaces as a 60s testTimeout with no cause named.
+        res.on("error", reject);
+        res.on("aborted", () => reject(new Error("response aborted before end")));
         res.on("end", () =>
           resolve({
-            status: res.statusCode!,
+            status: res.statusCode ?? 0,
             headers: res.headers,
             bodyBuffer: Buffer.concat(chunks),
           }),
@@ -308,96 +301,5 @@ describe("ElevenLabs drift — music endpoints", () => {
     expect(mockRes.status).toBe(200);
     // Plan endpoint should NOT set song-id header
     expect(mockRes.headers["song-id"]).toBeUndefined();
-  });
-});
-
-describe("ElevenLabs drift — voice design", () => {
-  it("/v1/text-to-voice/design returns JSON previews", async () => {
-    const mockRes = await httpPostBinary(`${instance.url}/v1/text-to-voice/design`, {
-      voice_description: "A weathered sea captain in his sixties, gravelly, unhurried",
-    });
-
-    expect(mockRes.status).toBe(200);
-    expect(mockRes.headers["content-type"]).toContain("application/json");
-
-    const body = JSON.parse(mockRes.bodyBuffer.toString("utf8"));
-    const sdkShape = extractShape({
-      previews: [
-        {
-          generated_voice_id: "preview_captain",
-          audio_base_64: "SGVsbG8=",
-          media_type: "audio/mpeg",
-          duration_secs: 1.2,
-          language: "en",
-        },
-      ],
-      text: "Ahoy there.",
-    });
-    const mockShape = extractShape(body);
-    const diffs = triangulate(sdkShape, sdkShape, mockShape);
-    const report = formatDriftReport("ElevenLabs /v1/text-to-voice/design", diffs, "elevenlabs");
-
-    expect(
-      diffs.filter((d) => d.severity === "critical"),
-      report,
-    ).toEqual([]);
-  });
-
-  it("/v1/text-to-voice/design missing voice_description returns 400", async () => {
-    const mockRes = await httpPostBinary(`${instance.url}/v1/text-to-voice/design`, {});
-
-    expect(mockRes.status).toBe(400);
-    const body = JSON.parse(mockRes.bodyBuffer.toString("utf8"));
-    const expectedShape = extractShape({
-      error: {
-        message: "Missing required parameter: 'voice_description'",
-        type: "invalid_request_error",
-      },
-    });
-    const mockShape = extractShape(body);
-    const diffs = triangulate(expectedShape, expectedShape, mockShape);
-    const report = formatDriftReport(
-      "ElevenLabs /v1/text-to-voice/design 400 error",
-      diffs,
-      "elevenlabs",
-    );
-
-    expect(
-      diffs.filter((d) => d.severity === "critical"),
-      report,
-    ).toEqual([]);
-  });
-
-  it("/v1/text-to-voice save returns a voice object with voice_id", async () => {
-    const mockRes = await httpPostBinary(`${instance.url}/v1/text-to-voice`, {
-      voice_name: "Captain",
-      voice_description: "A weathered sea captain in his sixties, gravelly, unhurried",
-      generated_voice_id: "preview_captain",
-    });
-
-    expect(mockRes.status).toBe(200);
-    const body = JSON.parse(mockRes.bodyBuffer.toString("utf8"));
-    expect(body.voice_id).toBe("preview_captain");
-    expect(body.name).toBe("Captain");
-
-    const sdkShape = extractShape({
-      voice_id: "preview_captain",
-      name: "Captain",
-      category: "generated",
-      description: "A weathered sea captain in his sixties, gravelly, unhurried",
-    });
-    const mockShape = extractShape({
-      voice_id: body.voice_id,
-      name: body.name,
-      category: body.category,
-      description: body.description,
-    });
-    const diffs = triangulate(sdkShape, sdkShape, mockShape);
-    const report = formatDriftReport("ElevenLabs /v1/text-to-voice", diffs, "elevenlabs");
-
-    expect(
-      diffs.filter((d) => d.severity === "critical"),
-      report,
-    ).toEqual([]);
   });
 });
