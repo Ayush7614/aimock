@@ -484,6 +484,149 @@ describe("normalizePathLabel", () => {
     );
     expect(normalizePathLabel("/contents/generations/tasks")).toBe("/contents/generations/tasks");
   });
+
+  // Fine-tuning job ids are minted per create, so an un-normalized id-bearing
+  // path mints one Prometheus label per job. Two ids per assertion: a single id
+  // would still pass against a rule that echoed the path back unchanged for
+  // one specific input, and the point is that DIFFERENT ids share one label.
+  it("normalizes fine-tuning routes this server implements", () => {
+    expect(normalizePathLabel("/v1/fine_tuning/jobs/ftjob-aaa")).toBe("/v1/fine_tuning/jobs/{id}");
+    expect(normalizePathLabel("/v1/fine_tuning/jobs/ftjob-bbb")).toBe("/v1/fine_tuning/jobs/{id}");
+    expect(normalizePathLabel("/v1/fine_tuning/jobs/ftjob-aaa/cancel")).toBe(
+      "/v1/fine_tuning/jobs/{id}/cancel",
+    );
+    expect(normalizePathLabel("/v1/fine_tuning/jobs/ftjob-bbb/cancel")).toBe(
+      "/v1/fine_tuning/jobs/{id}/cancel",
+    );
+    expect(normalizePathLabel("/v1/fine_tuning/jobs/ftjob-aaa/events")).toBe(
+      "/v1/fine_tuning/jobs/{id}/events",
+    );
+    expect(normalizePathLabel("/v1/fine_tuning/jobs/ftjob-bbb/events")).toBe(
+      "/v1/fine_tuning/jobs/{id}/events",
+    );
+  });
+
+  // pause/resume/checkpoints have no handler and take the generic 404 — but
+  // server.ts records metrics from `res.on("finish")` for every response, 404s
+  // included, and the `openai` SDK calls all three. Un-normalized, each
+  // `jobs.pause()` against a fresh job would mint a new label pair.
+  it("normalizes the fine-tuning sub-resources the openai SDK calls but this server 404s", () => {
+    for (const action of ["pause", "resume", "checkpoints"]) {
+      expect(normalizePathLabel(`/v1/fine_tuning/jobs/ftjob-aaa/${action}`)).toBe(
+        `/v1/fine_tuning/jobs/{id}/${action}`,
+      );
+      expect(normalizePathLabel(`/v1/fine_tuning/jobs/ftjob-bbb/${action}`)).toBe(
+        `/v1/fine_tuning/jobs/{id}/${action}`,
+      );
+    }
+  });
+
+  // The action segment is caller-controlled, so an allowlist miss must collapse
+  // too: echoing it back would leave the cardinality hole open to anything a
+  // typo or a fuzzer sends.
+  it("collapses an unknown fine-tuning sub-resource to a single {action} label", () => {
+    expect(normalizePathLabel("/v1/fine_tuning/jobs/ftjob-aaa/bogus")).toBe(
+      "/v1/fine_tuning/jobs/{id}/{action}",
+    );
+    expect(normalizePathLabel("/v1/fine_tuning/jobs/ftjob-bbb/also-bogus")).toBe(
+      "/v1/fine_tuning/jobs/{id}/{action}",
+    );
+  });
+
+  // The collection path is static and must not collapse into the {id} bucket.
+  // It cannot: the id RE requires a trailing `/<segment>`. This pins that, so
+  // the guard deleted from the cascade stays deleted.
+  it("leaves the fine-tuning collection path unchanged", () => {
+    expect(normalizePathLabel("/v1/fine_tuning/jobs")).toBe("/v1/fine_tuning/jobs");
+  });
+
+  // `openai@4.104.0` calls the checkpoint-permission routes from
+  // resources/fine-tuning/checkpoints/permissions.js. Checkpoint ids are minted
+  // per checkpoint exactly as job ids are per job, so the same label hazard
+  // applies — and aimock implements none of these routes, which makes no
+  // difference: the 404 is still recorded.
+  it("normalizes the checkpoint-permission routes the openai SDK calls", () => {
+    expect(normalizePathLabel("/v1/fine_tuning/checkpoints/ftckpt-aaa/permissions")).toBe(
+      "/v1/fine_tuning/checkpoints/{ckpt}/permissions",
+    );
+    expect(normalizePathLabel("/v1/fine_tuning/checkpoints/ftckpt-bbb/permissions")).toBe(
+      "/v1/fine_tuning/checkpoints/{ckpt}/permissions",
+    );
+    expect(normalizePathLabel("/v1/fine_tuning/checkpoints/ftckpt-aaa/permissions/cp-1")).toBe(
+      "/v1/fine_tuning/checkpoints/{ckpt}/permissions/{id}",
+    );
+    expect(normalizePathLabel("/v1/fine_tuning/checkpoints/ftckpt-bbb/permissions/cp-2")).toBe(
+      "/v1/fine_tuning/checkpoints/{ckpt}/permissions/{id}",
+    );
+  });
+
+  // Both checkpoint segments are caller-controlled, so both collapse: an
+  // unknown sub-resource to `{action}`, a bare checkpoint id to `{ckpt}`.
+  it("collapses a bare checkpoint id and an unknown checkpoint sub-resource", () => {
+    expect(normalizePathLabel("/v1/fine_tuning/checkpoints/ftckpt-aaa")).toBe(
+      "/v1/fine_tuning/checkpoints/{ckpt}",
+    );
+    expect(normalizePathLabel("/v1/fine_tuning/checkpoints/ftckpt-bbb")).toBe(
+      "/v1/fine_tuning/checkpoints/{ckpt}",
+    );
+    expect(normalizePathLabel("/v1/fine_tuning/checkpoints/ftckpt-aaa/bogus")).toBe(
+      "/v1/fine_tuning/checkpoints/{ckpt}/{action}",
+    );
+    expect(normalizePathLabel("/v1/fine_tuning/checkpoints/ftckpt-bbb/also-bogus")).toBe(
+      "/v1/fine_tuning/checkpoints/{ckpt}/{action}",
+    );
+  });
+
+  // The alpha grader routes (resources/fine-tuning/alpha/graders.js) carry no
+  // ids, so they must survive the namespace catch-all verbatim — collapsing
+  // them would throw away the only labels that distinguish them.
+  it("keeps the id-free alpha grader routes verbatim", () => {
+    expect(normalizePathLabel("/v1/fine_tuning/alpha/graders/run")).toBe(
+      "/v1/fine_tuning/alpha/graders/run",
+    );
+    expect(normalizePathLabel("/v1/fine_tuning/alpha/graders/validate")).toBe(
+      "/v1/fine_tuning/alpha/graders/validate",
+    );
+  });
+
+  // Depth is caller-controlled too. Anything in the namespace that matches no
+  // rule lands in one bucket, so the label set is finite for every input — not
+  // just for the shapes enumerated above.
+  it("collapses any unmatched fine-tuning path into a single bucket", () => {
+    expect(normalizePathLabel("/v1/fine_tuning/jobs/ftjob-aaa/checkpoints/ftckpt-1")).toBe(
+      "/v1/fine_tuning/{other}",
+    );
+    expect(normalizePathLabel("/v1/fine_tuning/jobs/ftjob-bbb/checkpoints/ftckpt-2")).toBe(
+      "/v1/fine_tuning/{other}",
+    );
+    expect(normalizePathLabel("/v1/fine_tuning/checkpoints/ftckpt-aaa/permissions/cp-1/deep")).toBe(
+      "/v1/fine_tuning/{other}",
+    );
+    expect(normalizePathLabel("/v1/fine_tuning/whatever-a")).toBe("/v1/fine_tuning/{other}");
+    expect(normalizePathLabel("/v1/fine_tuning/whatever-b")).toBe("/v1/fine_tuning/{other}");
+  });
+
+  // The cardinality property the rules exist for, asserted directly: a hundred
+  // distinct ids across every enumerated shape must not mint a hundred labels.
+  it("keeps the fine-tuning label set finite across many distinct ids", () => {
+    const labels = new Set<string>();
+    for (let i = 0; i < 100; i++) {
+      labels.add(normalizePathLabel(`/v1/fine_tuning/jobs/ftjob-${i}`));
+      labels.add(normalizePathLabel(`/v1/fine_tuning/jobs/ftjob-${i}/cancel`));
+      labels.add(normalizePathLabel(`/v1/fine_tuning/checkpoints/ftckpt-${i}`));
+      labels.add(normalizePathLabel(`/v1/fine_tuning/checkpoints/ftckpt-${i}/permissions`));
+      labels.add(normalizePathLabel(`/v1/fine_tuning/checkpoints/ftckpt-${i}/permissions/cp-${i}`));
+      labels.add(normalizePathLabel(`/v1/fine_tuning/jobs/ftjob-${i}/checkpoints/ftckpt-${i}`));
+    }
+    expect([...labels].sort()).toEqual([
+      "/v1/fine_tuning/checkpoints/{ckpt}",
+      "/v1/fine_tuning/checkpoints/{ckpt}/permissions",
+      "/v1/fine_tuning/checkpoints/{ckpt}/permissions/{id}",
+      "/v1/fine_tuning/jobs/{id}",
+      "/v1/fine_tuning/jobs/{id}/cancel",
+      "/v1/fine_tuning/{other}",
+    ]);
+  });
 });
 
 describe("MetricsRegistry: all three types serialized together", () => {

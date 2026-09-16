@@ -126,6 +126,14 @@ import {
   FILES_BODY_MAX_BYTES,
   FILES_BODY_OVERSIZED,
 } from "./files.js";
+import {
+  handleFineTuningCreate,
+  handleFineTuningList,
+  handleFineTuningRetrieve,
+  handleFineTuningCancel,
+  handleFineTuningEvents,
+  clearFineTuningStore,
+} from "./fine-tuning.js";
 import { upgradeToWebSocket, type WebSocketConnection } from "./ws-framing.js";
 import { handleWebSocketResponses } from "./ws-responses.js";
 import { handleWebSocketRealtime } from "./ws-realtime.js";
@@ -287,6 +295,10 @@ const FILES_PATH = "/v1/files";
 // They used to be declared in BOTH files: two copies of a route regex drift,
 // and a dispatch regex that disagrees with the metrics path-label regex means
 // a route serves traffic that the metrics label as something else.
+const FINE_TUNING_JOBS_PATH = "/v1/fine_tuning/jobs";
+const FINE_TUNING_ID_RE = /^\/v1\/fine_tuning\/jobs\/([^/]+)$/;
+const FINE_TUNING_CANCEL_RE = /^\/v1\/fine_tuning\/jobs\/([^/]+)\/cancel$/;
+const FINE_TUNING_EVENTS_RE = /^\/v1\/fine_tuning\/jobs\/([^/]+)\/events$/;
 
 const DEFAULT_MODELS = [
   "gpt-4",
@@ -363,9 +375,11 @@ export interface FullResetTargets {
 /**
  * Perform a full reset: clear the fixtures array, the journal (entries *and*
  * per-test fixture match-counts, i.e. sequence position), the video and fal.ai
- * job/queue state, the Gemini interaction/event-id counters, and any runtime
- * chaos override (reverting to the construction-time chaos config), then
- * re-zero the `aimock_fixtures_loaded` gauge.
+ * job/queue state, the fine-tuning store (jobs, their append-only event logs,
+ * their poll counts, the create-time suffixes their model names are built from,
+ * and the module's monotonic clock), the Gemini interaction/event-id
+ * counters, and any runtime chaos override (reverting to the construction-time
+ * chaos config), then re-zero the `aimock_fixtures_loaded` gauge.
  *
  * `targets` is `null` when no server is running (an in-process `reset()` before
  * `start()`). The process-global generation state is reset either way, since it
@@ -379,6 +393,7 @@ export function performFullReset(fixtures: Fixture[], targets: FullResetTargets 
   falJobs.clear();
   falQueueStates.clear();
   clearFileStore();
+  clearFineTuningStore();
   resetInteractionCounter();
   resetEventIdCounter();
   if (!targets) return;
@@ -2770,6 +2785,66 @@ export async function createServerWithResolvedAuth(
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : "Internal error";
         defaults.logger.error(`POST /v1/files: failed to read body: ${msg}`);
+        if (!res.headersSent) {
+          writeErrorResponse(
+            res,
+            500,
+            JSON.stringify({ error: { message: msg, type: "server_error" } }),
+          );
+        } else if (!res.writableEnded) {
+          res.destroy();
+        }
+      }
+      return;
+    }
+
+    // Fine-tuning jobs — cancel/events REs before id RE.
+    // Cancel takes no payload — the `openai` SDK posts an empty body — but the
+    // body is still read, and discarded, before the handler runs. Reading it is
+    // what applies `readBody`'s 10 MB ceiling: a POST route that never touches
+    // the stream lets node quietly dump whatever the client sends, so this one
+    // route would accept an unbounded upload while the create route beside it
+    // (the sibling pattern followed here, down to the error arm) rejects the
+    // same bytes.
+    const ftCancelMatch = pathname.match(FINE_TUNING_CANCEL_RE);
+    if (ftCancelMatch && req.method === "POST") {
+      try {
+        await readBody(req);
+        await handleFineTuningCancel(req, res, ftCancelMatch[1], journal, defaults, setCorsHeaders);
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : "Internal error";
+        if (!res.headersSent) {
+          writeErrorResponse(
+            res,
+            500,
+            JSON.stringify({ error: { message: msg, type: "server_error" } }),
+          );
+        } else if (!res.writableEnded) {
+          res.destroy();
+        }
+      }
+      return;
+    }
+    const ftEventsMatch = pathname.match(FINE_TUNING_EVENTS_RE);
+    if (ftEventsMatch && req.method === "GET") {
+      await handleFineTuningEvents(req, res, ftEventsMatch[1], journal, defaults, setCorsHeaders);
+      return;
+    }
+    const ftIdMatch = pathname.match(FINE_TUNING_ID_RE);
+    if (ftIdMatch && req.method === "GET") {
+      await handleFineTuningRetrieve(req, res, ftIdMatch[1], journal, defaults, setCorsHeaders);
+      return;
+    }
+    if (pathname === FINE_TUNING_JOBS_PATH && req.method === "GET") {
+      await handleFineTuningList(req, res, journal, defaults, setCorsHeaders);
+      return;
+    }
+    if (pathname === FINE_TUNING_JOBS_PATH && req.method === "POST") {
+      try {
+        const raw = await readBody(req);
+        await handleFineTuningCreate(req, res, raw, journal, defaults, setCorsHeaders);
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : "Internal error";
         if (!res.headersSent) {
           writeErrorResponse(
             res,
