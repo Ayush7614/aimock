@@ -278,9 +278,11 @@ export const SURFACE_REGISTRY: Record<string, SurfaceMapping> = {
     provider: "ElevenLabs Voice Design",
     liveCoverage: "none",
     coverageNote:
-      "No live ElevenLabs Voice Design leg: `elevenlabs-voice.drift.ts` only drives the local mock. No " +
-      "ElevenLabs API key is reachable from this repo (1Password holds an elevenlabs.io web login, not a " +
-      "key), so no SUCCESSFUL response from any of these routes has ever been observed here — the shapes " +
+      "No live ElevenLabs Voice Design leg: `elevenlabs-voice.drift.ts` only drives the local mock. A key " +
+      "is WIRED into CI (test-drift.yml and fix-drift.yml pass `secrets.ELEVENLABS_API_KEY`), but no case in that " +
+      "file fetches the vendor with it, and no key is resolvable locally (1Password holds an elevenlabs.io " +
+      "web login, not a key), so no SUCCESSFUL response from any of these routes has ever been observed " +
+      "here — the shapes " +
       "come from `@elevenlabs/elevenlabs-js@2.68.0` serialization types, a secondary source. Offline " +
       "conformance only: it reds when aimock's own serializer changes shape, never when the vendor does. " +
       "Retiring this needs a funded key and one recorded design + create round-trip; the `elevenlabs` " +
