@@ -872,14 +872,16 @@ export async function proxyAndRecord(
         `Upstream response is not valid JSON (${msg}) — saving as error fixture`,
       );
     }
-    // fal.ai and ElevenLabs Voice Design/create return arbitrary JSON shapes
+    // fal.ai and ElevenLabs Voice Design/create/get/delete return arbitrary JSON shapes
     // (previews with embedded base64 audio, voice objects). Round-trip the
     // payload verbatim instead of letting buildFixtureResponse mis-classify
     // them as ImageResponse / VideoResponse / TranscriptionResponse.
     if (
       (request._endpointType === "fal" ||
         request._endpointType === "elevenlabs-voice-design" ||
-        request._endpointType === "elevenlabs-voice") &&
+        request._endpointType === "elevenlabs-voice" ||
+        request._endpointType === "elevenlabs-voice-get" ||
+        request._endpointType === "elevenlabs-voice-delete") &&
       parsedResponse !== null
     ) {
       const obj = parsedResponse as Record<string, unknown>;

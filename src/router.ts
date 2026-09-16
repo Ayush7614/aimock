@@ -368,6 +368,9 @@ export function matchFixtureDiagnostic(
           (reqEndpoint === "elevenlabs-voice-design" &&
             (isJSONResponse(r) || isErrorResponse(r))) ||
           (reqEndpoint === "elevenlabs-voice" && (isJSONResponse(r) || isErrorResponse(r))) ||
+          (reqEndpoint === "elevenlabs-voice-get" && (isJSONResponse(r) || isErrorResponse(r))) ||
+          (reqEndpoint === "elevenlabs-voice-delete" &&
+            (isJSONResponse(r) || isErrorResponse(r))) ||
           (reqEndpoint === "transcription" && isTranscriptionResponse(r)) ||
           (reqEndpoint === "translation" && isTranscriptionResponse(r)) ||
           (reqEndpoint === "video" && isVideoResponse(r));

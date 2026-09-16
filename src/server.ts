@@ -3591,12 +3591,33 @@ export async function createServerWithResolvedAuth(
     const elevenLabsVoiceMatch = pathname.match(ELEVENLABS_VOICE_RE);
     if (elevenLabsVoiceMatch && (req.method === "GET" || req.method === "DELETE")) {
       setCorsHeaders(res);
-      const voiceId = elevenLabsVoiceMatch[1];
+      // The id arrives percent-encoded on the wire while the voice store is
+      // keyed by the id exactly as it appears in JSON, so the raw path segment
+      // made any id carrying a space or a slash permanently unreachable.
+      // `decodeURIComponent` throws `URIError` on a malformed escape — that is
+      // a bad request, not a server fault, so it is answered 400 rather than
+      // falling into the 500 handler below.
+      let voiceId: string;
+      try {
+        voiceId = decodeURIComponent(elevenLabsVoiceMatch[1]);
+      } catch {
+        writeErrorResponse(
+          res,
+          400,
+          JSON.stringify({
+            error: {
+              message: `Invalid voice id '${elevenLabsVoiceMatch[1]}': malformed percent-encoding`,
+              type: "invalid_request_error",
+            },
+          }),
+        );
+        return;
+      }
       try {
         if (req.method === "GET") {
-          await handleElevenLabsVoiceGet(req, res, voiceId, defaults, journal);
+          await handleElevenLabsVoiceGet(req, res, voiceId, fixtures, defaults, journal);
         } else {
-          await handleElevenLabsVoiceDelete(req, res, voiceId, journal);
+          await handleElevenLabsVoiceDelete(req, res, voiceId, fixtures, defaults, journal);
         }
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : "Internal error";

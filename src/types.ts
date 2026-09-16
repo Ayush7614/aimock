@@ -158,6 +158,8 @@ export interface FixtureMatch {
     | "elevenlabs-tts"
     | "elevenlabs-voice-design"
     | "elevenlabs-voice"
+    | "elevenlabs-voice-get"
+    | "elevenlabs-voice-delete"
     | "fal-audio"
     | "fal"
     | "realtime"
@@ -409,7 +411,10 @@ export interface ImageResponse {
 // satisfy those guards otherwise).
 export interface VoiceDesignPreview {
   generated_voice_id: string;
-  audio_base_64: string;
+  // Optional like its siblings below: `voiceDesignToJson` substitutes `""`
+  // when it is absent, so requiring it here made that documented fallback
+  // unreachable from TypeScript.
+  audio_base_64?: string;
   media_type?: string;
   duration_secs?: number;
   language?: string | null;
@@ -781,6 +786,8 @@ export interface FixtureFileEntry {
       | "elevenlabs-tts"
       | "elevenlabs-voice-design"
       | "elevenlabs-voice"
+      | "elevenlabs-voice-get"
+      | "elevenlabs-voice-delete"
       | "fal-audio"
       | "fal"
       | "realtime"
