@@ -33,6 +33,7 @@ Required environment variables:
 - `OPENAI_API_KEY` — OpenAI API key
 - `ANTHROPIC_API_KEY` — Anthropic API key
 - `GOOGLE_API_KEY` — Google AI API key
+- `ELEVENLABS_API_KEY` — ElevenLabs API key (the one live `/v1/sound-generation` case; every other ElevenLabs case is offline conformance and runs without it)
 
 Each provider's tests skip independently if its key is not set. You can run drift tests for just one provider.
 
@@ -49,7 +50,7 @@ Every surface in `src/__tests__/drift/surface-registry.ts` declares `liveCoverag
 
 This exists because an omitted declaration used to read as coverage. Four Bedrock surfaces and Vertex AI sat behind `describe.skipIf(!AWS_ACCESS_KEY_ID …)` / `describe.skipIf(!GOOGLE_APPLICATION_CREDENTIALS …)` gates on bodies that make no vendor call at all, and no drift workflow sets those variables — so the cases had never executed while the four surfaces reported as covered and green. The gates are gone (those cases now run unconditionally as offline conformance, and two of them failed the first time they were allowed to run), and `drift-collector.test.ts` re-derives live-capability from the emitting sources, so a `liveCoverage` claim that contradicts the code fails CI in both directions.
 
-Currently offline-only: `bedrock-invoke`, `bedrock-invoke-stream`, `bedrock-converse`, `bedrock-converse-stream`, `vertex-ai`, `images`, `video`, `moderation`, `fal-sync`.
+Currently offline-only: `bedrock-invoke`, `bedrock-invoke-stream`, `bedrock-converse`, `bedrock-converse-stream`, `vertex-ai`, `images`, `video`, `moderation`, `fal-sync`, `elevenlabs-voice`.
 
 ### Severity levels
 
@@ -97,7 +98,7 @@ When a `critical` drift is detected:
    - Ollama Embeddings → `src/ollama.ts` (`/api/embed` + legacy `/api/embeddings` response builder)
    - Cohere Embed → `src/cohere.ts` (`/v2/embed` response builder)
    - ElevenLabs TTS → `src/elevenlabs-audio.ts` (`/v1/text-to-speech/{voice_id}` response builder)
-   - ElevenLabs Voice Design → `src/elevenlabs-voice.ts` (`/v1/text-to-voice/design`, `/v1/text-to-voice`)
+   - ElevenLabs Voice Design → `src/elevenlabs-voice.ts` (`/v1/text-to-voice/design`, `/v1/text-to-voice`, `GET /v1/voices/{id}`, `DELETE /v1/voices/{id}`)
 
 2. **Update the builder** — add or modify the field to match the real API shape.
 
@@ -135,9 +136,11 @@ Alongside the 23 core drift tests (20 HTTP response-shape + 3 model deprecation)
 | POST /v1/images/variations               | OpenAI        | HTTP (multipart)  | Excluded² |
 | POST /api/embed, /api/embeddings         | Ollama        | HTTP              | Covered   |
 | POST /v2/embed                           | Cohere        | HTTP              | Covered   |
-| POST /v1/text-to-speech/{voice_id}       | ElevenLabs    | HTTP              | Covered   |
-| POST /v1/text-to-voice/design            | ElevenLabs    | HTTP              | Covered   |
-| POST /v1/text-to-voice                   | ElevenLabs    | HTTP              | Covered   |
+| POST /v1/text-to-speech/{voice_id}       | ElevenLabs    | HTTP              | None³     |
+| POST /v1/text-to-voice/design            | ElevenLabs    | HTTP              | Offline⁴  |
+| POST /v1/text-to-voice                   | ElevenLabs    | HTTP              | Offline⁴  |
+| GET /v1/voices/{id}                      | ElevenLabs    | HTTP              | None⁵     |
+| DELETE /v1/voices/{id}                   | ElevenLabs    | HTTP              | None⁵     |
 | stream_options.include_usage             | OpenAI        | Streaming feature | Covered   |
 | x-ratelimit-\* / Retry-After 429         | All providers | Response headers  | Covered   |
 
@@ -150,6 +153,29 @@ reach the API (observed 2026-09-15). There is no live endpoint left to drift aga
 must never read "Covered". aimock still answers the path — with that same removal 404, not an image
 envelope — per the [deprecation policy](https://aimock.copilotkit.dev/deprecation-policy/); it is
 pinned by `image-edits.test.ts`, not by drift.
+
+³ **POST /v1/text-to-speech/{voice_id} — no drift test at all.** This row read "Covered" while no
+case in `src/__tests__/drift/` ever requests the route, live or offline. The `elevenlabs` surface's
+live leg is `/v1/sound-generation`; it does not touch text-to-speech. `src/elevenlabs-audio.ts` is
+exercised by the unit suite only. Adding a case belongs in `elevenlabs.drift.ts`.
+
+⁴ **Voice Design — offline conformance, NOT drift.** `elevenlabs-voice.drift.ts` drives only the
+local aimock server and grades it against shapes read off `@elevenlabs/elevenlabs-js@2.68.0`
+serialization types. No ElevenLabs key is reachable from this repo, so no successful response from
+either route has ever been observed here and nothing in the loop can see the vendor. The surface is
+declared `liveCoverage: "none"` and appears in `unverifiedSurfaces` on every run. A funded key plus
+one recorded design + create round-trip is what would move it to "Covered".
+
+⁵ **GET / DELETE /v1/voices/{id} — no drift or conformance case at all.** Both routes are
+implemented in `src/elevenlabs-voice.ts` (record, replay, strict and chaos all reach them) and both
+are part of the `elevenlabs-voice` surface, which is declared `liveCoverage: "none"`. Unlike the two
+`Offline⁴` rows, they are not covered offline either: no case in `src/__tests__/drift/` requests
+either path — `grep -rn "/v1/voices" src/__tests__/drift/` returns nothing. They are exercised by
+the unit suite (`src/__tests__/elevenlabs-voice.test.ts`) only. This is the ³ situation, recorded
+before a row can claim otherwise: the honest first step is an offline conformance case in
+`elevenlabs-voice.drift.ts` graded against the same SDK-derived shapes the two `Offline⁴` rows use,
+which moves these rows to `Offline⁴`; a funded key is what would move the whole surface to
+"Covered".
 
 WebSocket drift tests cover aimock's WS protocols (6 verified + 2 canary = 8 WS tests):
 
