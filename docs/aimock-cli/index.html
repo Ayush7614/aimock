@@ -66,12 +66,15 @@
           <div class="tab-docker">
             <div class="code-block">
               <div class="code-block-header">Run aimock <span class="lang-tag">shell</span></div>
-              <pre><code><span class="cm"># --config is an aimock-CLI feature, not available in the published image.</span>
-<span class="cm"># Run aimock on your host via npx (or install @copilotkit/aimock in your</span>
-<span class="cm"># own container image) to use the config-driven CLI:</span>
-$ npx @copilotkit/aimock --config aimock.json --port 4010 --host 0.0.0.0
+              <pre><code><span class="cm"># The image's default ENTRYPOINT is the flag-driven llmock bin; override it</span>
+<span class="cm"># to run the config-driven aimock CLI that ships in the same image:</span>
+$ docker run -d -p 4010:4010 \
+  -v ./aimock.json:/app/aimock.json:ro \
+  -v ./fixtures:/app/fixtures:ro \
+  --entrypoint node ghcr.io/copilotkit/aimock \
+  dist/aimock-cli.js --config /app/aimock.json --port 4010 --host 0.0.0.0
 
-<span class="cm"># If you only need flag-driven fixture serving, the published image works:</span>
+<span class="cm"># If you only need flag-driven fixture serving, the default entrypoint works:</span>
 $ docker run -d -p 4010:4010 \
   -v ./fixtures:/fixtures \
   ghcr.io/copilotkit/aimock \
@@ -82,10 +85,12 @@ $ docker run -d -p 4010:4010 \
 
         <p style="color: var(--text-dim); font-size: 0.9em">
           <strong>Note:</strong> The published Docker image (<code>ghcr.io/copilotkit/aimock</code>)
-          runs the flag-driven <code>llmock</code> CLI (ENTRYPOINT <code>node dist/cli.js</code>),
-          which does not support <code>--config</code> or the <code>convert</code> and
-          <code>validate</code> subcommands. For config-driven mode, run aimock on your host via
-          <code>npx</code> or install <code>@copilotkit/aimock</code> inside your own image.
+          starts the flag-driven <code>llmock</code> CLI (ENTRYPOINT <code>node dist/cli.js</code>),
+          which does not accept <code>--config</code> or the <code>convert</code> and
+          <code>validate</code> subcommands. The <code>aimock</code> bin is in the image as
+          <code>dist/aimock-cli.js</code>: pass <code>--entrypoint node</code> and put
+          <code>dist/aimock-cli.js</code> first in the command to run config-driven mode. Paths in
+          the mounted config resolve against the container working directory <code>/app</code>.
         </p>
 
         <h2>Config File Format</h2>
@@ -98,28 +103,49 @@ $ docker run -d -p 4010:4010 \
         <div class="code-block">
           <div class="code-block-header">aimock.json <span class="lang-tag">json</span></div>
           <pre><code>{
+  <span class="prop">"port"</span>: <span class="num">4010</span>,
+  <span class="prop">"host"</span>: <span class="str">"127.0.0.1"</span>,
+  <span class="prop">"auth"</span>: { <span class="prop">"apiKeys"</span>: [<span class="str">"test-key"</span>] },
   <span class="prop">"llm"</span>: {
     <span class="prop">"fixtures"</span>: <span class="str">"./fixtures"</span>,
     <span class="prop">"latency"</span>: <span class="num">0</span>,
     <span class="prop">"chunkSize"</span>: <span class="num">20</span>,
     <span class="prop">"replaySpeed"</span>: <span class="num">1</span>,
     <span class="prop">"logLevel"</span>: <span class="str">"info"</span>,
-    <span class="prop">"validateOnLoad"</span>: <span class="kw">true</span>,
-    <span class="prop">"metrics"</span>: <span class="kw">true</span>,
-    <span class="prop">"strict"</span>: <span class="kw">false</span>
+    <span class="prop">"chaos"</span>: { <span class="prop">"dropRate"</span>: <span class="num">0</span> }
   },
-  <span class="prop">"services"</span>: {
-    <span class="prop">"/mcp"</span>: {
-      <span class="prop">"type"</span>: <span class="str">"mcp"</span>,
-      <span class="prop">"tools"</span>: <span class="str">"./mcp-tools.json"</span>
-    },
-    <span class="prop">"/a2a"</span>: {
-      <span class="prop">"type"</span>: <span class="str">"a2a"</span>,
-      <span class="prop">"agents"</span>: <span class="str">"./a2a-agents.json"</span>
-    }
-  }
+  <span class="prop">"mcp"</span>: {
+    <span class="prop">"path"</span>: <span class="str">"/mcp"</span>,
+    <span class="prop">"tools"</span>: [
+      { <span class="prop">"name"</span>: <span class="str">"echo"</span>, <span class="prop">"description"</span>: <span class="str">"Echo the input"</span>, <span class="prop">"result"</span>: <span class="str">"echoed"</span> }
+    ]
+  },
+  <span class="prop">"a2a"</span>: {
+    <span class="prop">"agents"</span>: [
+      {
+        <span class="prop">"name"</span>: <span class="str">"helper"</span>,
+        <span class="prop">"messages"</span>: [{ <span class="prop">"pattern"</span>: <span class="str">"hello"</span>, <span class="prop">"parts"</span>: [{ <span class="prop">"text"</span>: <span class="str">"Hi!"</span> }] }]
+      }
+    ]
+  },
+  <span class="prop">"agui"</span>: {
+    <span class="prop">"fixtures"</span>: [{ <span class="prop">"match"</span>: { <span class="prop">"message"</span>: <span class="str">"hello"</span> }, <span class="prop">"text"</span>: <span class="str">"Hello from AG-UI"</span> }]
+  },
+  <span class="prop">"vector"</span>: {
+    <span class="prop">"collections"</span>: [{ <span class="prop">"name"</span>: <span class="str">"docs"</span>, <span class="prop">"dimension"</span>: <span class="num">3</span> }]
+  },
+  <span class="prop">"services"</span>: { <span class="prop">"search"</span>: <span class="kw">true</span>, <span class="prop">"rerank"</span>: <span class="kw">false</span>, <span class="prop">"moderate"</span>: <span class="kw">true</span> },
+  <span class="prop">"metrics"</span>: <span class="kw">true</span>,
+  <span class="prop">"strict"</span>: <span class="kw">false</span>
 }</code></pre>
         </div>
+
+        <p>
+          Every key is optional. The file is parsed as plain JSON (no comments) and read as the
+          <code>AimockConfig</code> type; a section that is absent is simply not mounted. Only
+          <code>llm.fixtures</code> is a file path &mdash; MCP tools, A2A agents, AG-UI fixtures and
+          vector collections are inline arrays, not paths to other files.
+        </p>
 
         <h3>Config Fields</h3>
         <table class="endpoint-table">
@@ -132,22 +158,102 @@ $ docker run -d -p 4010:4010 \
           </thead>
           <tbody>
             <tr>
+              <td><code>port</code></td>
+              <td>number</td>
+              <td>
+                Port to listen on. <code>--port</code> overrides it; when neither is given the
+                server takes an ephemeral port (<code>0</code>).
+              </td>
+            </tr>
+            <tr>
+              <td><code>host</code></td>
+              <td>string</td>
+              <td>
+                Bind address. <code>--host</code> overrides it; when neither is given the server
+                binds <code>127.0.0.1</code>.
+              </td>
+            </tr>
+            <tr>
+              <td><code>auth</code></td>
+              <td>object</td>
+              <td>
+                Inbound API-key auth: <code>{ "apiKeys": ["..."] }</code>, a non-empty array of
+                distinct non-blank strings. When set, every request except <code>GET /health</code>,
+                <code>GET /ready</code> and <code>GET /metrics</code> must carry one of the keys. If
+                the <code>AIMOCK_API_KEYS</code> environment variable is present (comma-separated),
+                it replaces this section entirely, and the file's <code>auth</code> is not parsed.
+              </td>
+            </tr>
+            <tr>
               <td><code>llm</code></td>
               <td>object</td>
               <td>
-                LLMock configuration. Accepts <code>fixtures</code>, <code>latency</code>,
-                <code>chunkSize</code>, <code>replaySpeed</code>, <code>logLevel</code>,
-                <code>validateOnLoad</code>, <code>metrics</code>, <code>strict</code>,
-                <code>chaos</code>, <code>streamingProfile</code>, <code>record</code>.
+                LLMock configuration. Accepts <code>fixtures</code> (a fixture file or a directory
+                walked for <code>*.json</code>), <code>latency</code>, <code>chunkSize</code>,
+                <code>replaySpeed</code> (a non-positive value is warned about and ignored),
+                <code>logLevel</code> (<code>silent</code> | <code>warn</code> | <code>info</code> |
+                <code>debug</code>), <code>chaos</code>, <code>record</code>. Per-fixture knobs such
+                as <code>streamingProfile</code> live on the fixture entries inside the fixture
+                files, not here.
+              </td>
+            </tr>
+            <tr>
+              <td><code>mcp</code></td>
+              <td>object</td>
+              <td>
+                Mounts an MCP mock. <code>path</code> (default <code>/mcp</code>),
+                <code>serverInfo</code>, and inline <code>tools</code>, <code>resources</code>,
+                <code>prompts</code> arrays. A tool's optional <code>result</code> string is
+                returned by every call to it.
+              </td>
+            </tr>
+            <tr>
+              <td><code>a2a</code></td>
+              <td>object</td>
+              <td>
+                Mounts an A2A mock. <code>path</code> (default <code>/a2a</code>) and an inline
+                <code>agents</code> array; each agent carries its card fields plus optional
+                <code>messages</code>, <code>tasks</code>, <code>streamingTasks</code> pattern
+                lists.
+              </td>
+            </tr>
+            <tr>
+              <td><code>agui</code></td>
+              <td>object</td>
+              <td>
+                Mounts an AG-UI mock. <code>path</code> (default <code>/agui</code>) and an inline
+                <code>fixtures</code> array of <code>{ match, text | events, delayMs }</code>. A
+                fixture with neither <code>text</code> nor <code>events</code> is skipped with a
+                warning.
+              </td>
+            </tr>
+            <tr>
+              <td><code>vector</code></td>
+              <td>object</td>
+              <td>
+                Mounts a vector-database mock. <code>path</code> (default <code>/vector</code>) and
+                an inline <code>collections</code> array of
+                <code>{ name, dimension, vectors?, queryResults? }</code>.
               </td>
             </tr>
             <tr>
               <td><code>services</code></td>
               <td>object</td>
               <td>
-                Map of mount paths to service configs. Each key is a URL path prefix (e.g.
-                <code>/mcp</code>), each value describes the service type and its options.
+                Booleans <code>search</code>, <code>rerank</code>, <code>moderate</code>. Each
+                <code>true</code> installs a catch-all default response on the root-mounted service
+                endpoint (empty results for search and rerank, unflagged for moderation).
               </td>
+            </tr>
+            <tr>
+              <td><code>metrics</code></td>
+              <td>boolean</td>
+              <td>Serve Prometheus metrics at <code>GET /metrics</code> (404 when off).</td>
+            </tr>
+            <tr>
+              <td><code>strict</code></td>
+              <td>boolean</td>
+              <td>Return 503 instead of 404 when no fixture matches.</td>
             </tr>
           </tbody>
         </table>
@@ -174,8 +280,24 @@ $ docker run -d -p 4010:4010 \
               <td>object</td>
               <td>&mdash;</td>
               <td>
-                Map of provider names to upstream URLs or API keys (e.g.
-                <code>{ "openai": "sk-..." }</code>)
+                Map of provider names to upstream base URLs (e.g.
+                <code>{ "openai": "https://api.openai.com" }</code>). Values are URLs, never API
+                keys.
+              </td>
+            </tr>
+            <tr>
+              <td><code>providerKeys</code></td>
+              <td>object</td>
+              <td>&mdash;</td>
+              <td>
+                Map of provider names to aimock's own upstream API keys, injected on a fixture-miss
+                passthrough when the caller sent no credential or a dummy placeholder; a real caller
+                key always wins. Static-key providers only (OpenAI, OpenRouter, Cohere, Grok,
+                BytePlus, Ollama, Anthropic, Gemini, Veo, Azure, ElevenLabs, fal); Bedrock and
+                Vertex AI are never rewritten. Under
+                <code>aimock --config</code> this map is read from the JSON file as written; the
+                <code>AIMOCK_PROVIDER_*_KEY</code> environment variables are read only by the
+                flag-driven <code>llmock</code> bin, not by <code>aimock --config</code>.
               </td>
             </tr>
             <tr>
@@ -320,19 +442,44 @@ $ docker run -d -p 4010:4010 \
               <td>A2A mock service</td>
             </tr>
             <tr>
+              <td><code>/agui/*</code></td>
+              <td>AG-UI mock service</td>
+            </tr>
+            <tr>
+              <td><code>/vector/*</code></td>
+              <td>Vector-database mock service</td>
+            </tr>
+            <tr>
+              <td><code>/search</code>, <code>/v2/rerank</code>, <code>/v1/moderations</code></td>
+              <td>LLMock service endpoints (search, rerank, moderation)</td>
+            </tr>
+            <tr>
               <td><code>/health</code></td>
-              <td>Unified health check (all services)</td>
+              <td>
+                Unified health check: <code>{ "status": "ok", "services": { llm, mcp, ... } }</code>
+                with one entry per mounted service that reports health
+              </td>
+            </tr>
+            <tr>
+              <td><code>/ready</code></td>
+              <td>
+                Readiness probe: always <code>200 { "status": "ready" }</code> once the server is
+                listening; no per-service breakdown
+              </td>
             </tr>
             <tr>
               <td><code>/metrics</code></td>
-              <td>Prometheus metrics (if enabled)</td>
+              <td>Prometheus metrics (404 unless <code>metrics</code> is true)</td>
             </tr>
           </tbody>
         </table>
 
         <p>
           Path stripping is automatic &mdash; a request to <code>/mcp/tools/list</code> arrives at
-          the MCP service as <code>/tools/list</code>.
+          the MCP service as <code>/tools/list</code>. The mount prefixes above are the defaults;
+          each section's <code>path</code> key moves it. <code>GET /health</code>,
+          <code>GET /ready</code> and <code>GET /metrics</code> are served without an API key even
+          when <code>auth</code> is configured.
         </p>
 
         <h2>Docker Usage</h2>
@@ -349,11 +496,15 @@ $ docker run -d -p 4010:4010 \
           <div class="tab-docker">
             <div class="code-block">
               <div class="code-block-header">
-                Run with config (local / npx) <span class="lang-tag">shell</span>
+                Run with config (docker) <span class="lang-tag">shell</span>
               </div>
-              <pre><code><span class="cm"># --config isn't available in the published Docker image's llmock entrypoint.</span>
-<span class="cm"># Run aimock locally with npx to load config.json:</span>
-$ npx @copilotkit/aimock --config aimock.json --host 0.0.0.0</code></pre>
+              <pre><code><span class="cm"># The image's ENTRYPOINT is the flag-driven llmock bin (node dist/cli.js).</span>
+<span class="cm"># dist/aimock-cli.js ships in the same image: override the entrypoint to use --config.</span>
+$ docker run -d -p 4010:4010 \
+  -v ./aimock.json:/app/aimock.json:ro \
+  -v ./fixtures:/app/fixtures:ro \
+  --entrypoint node ghcr.io/copilotkit/aimock \
+  dist/aimock-cli.js --config /app/aimock.json --port 4010 --host 0.0.0.0</code></pre>
             </div>
           </div>
         </div>
@@ -745,10 +896,14 @@ $ npx @copilotkit/aimock validate --json ./fixtures/</code></pre>
           The published image's ENTRYPOINT runs the flag-driven
           <code>llmock</code> CLI &mdash; it supports <code>-f/--fixtures</code>,
           <code>-p/--port</code>, <code>-h/--host</code>, and the chaos / record flags, but not
-          <code>--config</code>. Use the compose snippet below for flag-driven fixture serving. For
-          full config-driven mode (LLM + MCP + A2A + AG-UI on one port), either build your own image
-          with <code>@copilotkit/aimock</code> installed, or run
-          <code>npx @copilotkit/aimock --config ...</code> on the host.
+          <code>--config</code>. The snippet below uses that default for flag-driven fixture
+          serving; for config-driven mode set
+          <code>entrypoint: ["node", "dist/aimock-cli.js"]</code> and
+          <code>command: ["--config", "/app/aimock.json", "--host", "0.0.0.0"]</code> and mount the
+          config file. The image declares no <code>HEALTHCHECK</code>, so the compose file supplies
+          one against <code>GET /ready</code> (busybox <code>wget</code> is in the image) and the
+          app waits on <code>condition: service_healthy</code> instead of on container start, which
+          races the listener.
         </p>
 
         <div class="code-block">
@@ -761,13 +916,19 @@ $ npx @copilotkit/aimock validate --json ./fixtures/</code></pre>
       - <span class="str">"4010:4010"</span>
     <span class="prop">volumes</span>:
       - <span class="str">./fixtures:/app/fixtures:ro</span>
+    <span class="prop">healthcheck</span>:
+      <span class="prop">test</span>: <span class="str">["CMD", "wget", "-qO-", "http://127.0.0.1:4010/ready"]</span>
+      <span class="prop">interval</span>: <span class="str">2s</span>
+      <span class="prop">timeout</span>: <span class="str">2s</span>
+      <span class="prop">retries</span>: <span class="num">15</span>
 
   <span class="prop">app</span>:
     <span class="prop">build</span>: <span class="str">.</span>
     <span class="prop">environment</span>:
       <span class="prop">OPENAI_BASE_URL</span>: <span class="str">http://aimock:4010/v1</span>
     <span class="prop">depends_on</span>:
-      - <span class="str">aimock</span></code></pre>
+      <span class="prop">aimock</span>:
+        <span class="prop">condition</span>: <span class="str">service_healthy</span></code></pre>
         </div>
       </main>
       <aside class="page-toc" id="page-toc"></aside>
