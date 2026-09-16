@@ -8,6 +8,7 @@
 - Chaos `latencyMs` / `--chaos-latency` now actually delays responses on every path (#449)
 - OpenAI Files API mock — byte-exact uploads, create-purpose enum, CORS on faults (#445)
 - Mock OpenAI fine-tuning jobs — deterministic lifecycle, events, cursor pages (#447)
+- `X-Request-Id` echoed or minted on every response; `?requestId=` filters the journal (#450)
 - `aimock validate` lints fixture files or directories offline, failing on broken files (#453)
 
 ### Changed
@@ -18,6 +19,7 @@
 - `POST /v1/images/variations` now replays the real removal 404; OpenAI deleted it (#462)
 - `ChaosAction` gains `"rateLimit"` — an exhaustive switch over it needs a case (#449)
 - `applyChaosAsync()` returns a `ChaosAsyncOutcome` (`false | "handled" | "unwritable"`) instead of a bare `boolean`, so callers can tell "a chaos action fired and was journalled" from "the response was already dead, nothing happened" — the old `true` meant both. Both non-`false` members are truthy, so the standard `if (await applyChaosAsync(...)) return;` call shape is unchanged; only code that stored the result in an explicitly `boolean`-typed binding needs updating (#449)
+- Journal `headers` now ALWAYS carry `x-request-id` — exact `toEqual` asserts break (#450)
 
 ### Deprecated
 
@@ -33,6 +35,7 @@
 - Image endpoints default to `gpt-image-1` — `dall-e-2`/`dall-e-3` were removed (#459)
 - AG-UI record/proxy mode forwards the caller's headers and the raw request body to the upstream agent, instead of rebuilding the request from an `Authorization` / `x-api-key` allowlist and a re-serialized payload. An agent whose runtime contract travels in headers — session affinity, per-request agent configuration, a request signature over the body — now keeps it across the hop. `Accept` is forced to `text/event-stream` (AG-UI is an SSE protocol and the recorder can only parse an event stream); `Content-Type` is only defaulted, since the caller owns it and a signature may cover it (#455)
 - The AG-UI recorder refuses to write a fixture when a 2xx upstream answers with something other than an event stream, or with a stream holding no parseable events, instead of persisting `"events": []` — a fixture that matched on replay and streamed nothing, silently (#455)
+- A MINTED `x-request-id` is no longer forwarded upstream in record/proxy mode (#450)
 
 ## [1.42.0] - 2026-09-13
 
