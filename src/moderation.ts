@@ -34,6 +34,15 @@ export interface ModerationFixture {
   result: ModerationResult;
 }
 
+/**
+ * Model echoed when the caller sends no `model`.
+ *
+ * The real API echoes back the model the request asked for. `text-moderation-*`
+ * was removed from the OpenAI API on 2025-10-27; `omni-moderation-latest` is
+ * the current moderation model, so it stands in when the caller omits one.
+ */
+const DEFAULT_MODERATION_MODEL = "omni-moderation-latest";
+
 // ─── Default unflagged result ─────────────────────────────────────────────
 
 const DEFAULT_RESULT: ModerationResult = {
@@ -84,9 +93,9 @@ export async function handleModeration(
   const { logger } = defaults;
   setCorsHeaders(res);
 
-  let body: { input?: string | string[] };
+  let body: { input?: string | string[]; model?: unknown };
   try {
-    body = JSON.parse(raw) as { input?: string | string[] };
+    body = JSON.parse(raw) as { input?: string | string[]; model?: unknown };
   } catch (parseErr) {
     const detail = parseErr instanceof Error ? parseErr.message : "unknown";
     journal.add({
@@ -163,6 +172,11 @@ export async function handleModeration(
   }
   const inputText = normalized;
 
+  // Echo the requested model, like the real API. A missing (or non-string)
+  // `model` falls back to the current default rather than a removed id.
+  const requestedModel =
+    typeof body.model === "string" && body.model.length > 0 ? body.model : DEFAULT_MODERATION_MODEL;
+
   // Find first matching fixture
   let matchedResult: ModerationResult = DEFAULT_RESULT;
   let matchedFixture: ModerationFixture | null = null;
@@ -231,7 +245,7 @@ export async function handleModeration(
   res.end(
     JSON.stringify({
       id: generateId("modr"),
-      model: "text-moderation-latest",
+      model: requestedModel,
       results: [matchedResult],
     }),
   );

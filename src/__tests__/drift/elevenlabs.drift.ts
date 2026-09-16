@@ -11,7 +11,18 @@
  * Content-Type headers, binary payload presence, and JSON plan structure
  * rather than three-way JSON shape comparison.
  *
- * Requires: ELEVENLABS_API_KEY (for real API comparison; tests run mock-only otherwise)
+ * LIVE COVERAGE: the /v1/sound-generation case below fetches the real
+ * `api.elevenlabs.io` when ELEVENLABS_API_KEY is set, which is what earns this
+ * surface `liveCoverage: "live"`. Every other case here is offline conformance
+ * against the local mock. Without the key the live case skips and the run
+ * proves nothing about the vendor.
+ *
+ * The Voice Design routes (`/v1/text-to-voice/design`, `/v1/text-to-voice`) are
+ * NOT covered here — they have no live leg at all and live in
+ * `elevenlabs-voice.drift.ts` as the separately-declared, offline-only
+ * `elevenlabs-voice` surface.
+ *
+ * Requires: ELEVENLABS_API_KEY (for the one real-API case; omitted → it skips)
  */
 
 import http from "node:http";
@@ -81,9 +92,14 @@ function httpPostBinary(
       (res) => {
         const chunks: Buffer[] = [];
         res.on("data", (c) => chunks.push(c));
+        // A socket error or an abort AFTER the headers arrive settles nothing
+        // on `req`, so without these two the promise stays pending and the
+        // failure surfaces as a 60s testTimeout with no cause named.
+        res.on("error", reject);
+        res.on("aborted", () => reject(new Error("response aborted before end")));
         res.on("end", () =>
           resolve({
-            status: res.statusCode!,
+            status: res.statusCode ?? 0,
             headers: res.headers,
             bodyBuffer: Buffer.concat(chunks),
           }),

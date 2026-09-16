@@ -220,6 +220,7 @@ const BEDROCK_RE =
 const GEMINI_RE = /^\/v1beta\/models\/([^:]+):(generateContent|streamGenerateContent)$/;
 const AZURE_RE = /^\/openai\/deployments\/([^/]+)\/(chat\/completions|embeddings)$/;
 const ELEVENLABS_TTS_RE = /^\/v1\/text-to-speech\/([^/]+)$/;
+const ELEVENLABS_VOICE_RE = /^\/v1\/voices\/([^/]+)$/;
 const VERTEX_RE =
   /^\/v1\/projects\/([^/]+)\/locations\/([^/]+)\/publishers\/google\/models\/([^:]+):(.+)$/;
 // Exported: server.ts route dispatch matches the same OpenRouter and OpenAI
@@ -254,6 +255,56 @@ export const GROK_VIDEO_STATUS_RE = /^\/v1\/videos\/([^/]+)$/;
  */
 export const BYTEPLUS_VIDEO_SUBMIT_RE = /^(?:\/api\/v3)?\/contents\/generations\/tasks$/;
 export const BYTEPLUS_VIDEO_STATUS_RE = /^(?:\/api\/v3)?\/contents\/generations\/tasks\/([^/]+)$/;
+export const FILES_CONTENT_RE = /^\/v1\/files\/([^/]+)\/content$/;
+export const FILES_ID_RE = /^\/v1\/files\/([^/]+)$/;
+
+/**
+ * Fine-tuning routes. Both id families (`ftjob-…` per create, `ftckpt-…` per
+ * checkpoint) are minted per resource, so every id-bearing path has to collapse
+ * or each job and each checkpoint mints its own label pair.
+ *
+ * The label hazard is NOT limited to the routes this server implements: metrics
+ * are recorded on `res.on("finish")` for EVERY response, the generic 404
+ * included, and `openai@4.104.0` calls a good deal more of the namespace than
+ * aimock handles. Enumerated from that SDK:
+ *
+ *   - `resources/fine-tuning/jobs/jobs.js` — `/fine_tuning/jobs`,
+ *     `…/jobs/{id}`, `…/jobs/{id}/cancel`, `…/jobs/{id}/pause`,
+ *     `…/jobs/{id}/resume`
+ *   - `resources/fine-tuning/jobs/checkpoints.js` — `…/jobs/{id}/checkpoints`
+ *   - `resources/fine-tuning/checkpoints/permissions.js` —
+ *     `…/checkpoints/{ckpt}/permissions` (create/list) and
+ *     `…/checkpoints/{ckpt}/permissions/{id}` (delete)
+ *   - `resources/fine-tuning/alpha/graders.js` —
+ *     `/fine_tuning/alpha/graders/run`, `/fine_tuning/alpha/graders/validate`
+ *
+ * The grader routes carry no ids, so they need no placeholder — but they DO
+ * need naming here, because the namespace cascade below ends in a catch-all
+ * and a static route must not be swallowed by it.
+ *
+ * Every segment after `/v1/fine_tuning/` is caller-controlled, so the rule is:
+ * known action names are kept verbatim, ids collapse to `{id}`/`{ckpt}`, and
+ * anything else — an unknown action, an unknown depth — collapses to a single
+ * bucket. That is what actually keeps the fine-tuning label set finite no
+ * matter what is requested; an un-collapsed tail would leave the hole open to
+ * a typo or a fuzzer.
+ *
+ * Not exported: server.ts routes fine-tuning with its own private REs.
+ */
+const FINE_TUNING_PREFIX = "/v1/fine_tuning/";
+const FINE_TUNING_STATIC_PATHS = new Set([
+  "/v1/fine_tuning/jobs",
+  "/v1/fine_tuning/alpha/graders/run",
+  "/v1/fine_tuning/alpha/graders/validate",
+]);
+const FINE_TUNING_SUBRESOURCE_RE = /^\/v1\/fine_tuning\/jobs\/[^/]+\/([^/]+)$/;
+const FINE_TUNING_SUBRESOURCES = new Set(["cancel", "events", "pause", "resume", "checkpoints"]);
+const FINE_TUNING_ID_RE = /^\/v1\/fine_tuning\/jobs\/([^/]+)$/;
+const FINE_TUNING_PERMISSION_ID_RE = /^\/v1\/fine_tuning\/checkpoints\/[^/]+\/permissions\/[^/]+$/;
+const FINE_TUNING_CHECKPOINT_SUBRESOURCE_RE = /^\/v1\/fine_tuning\/checkpoints\/[^/]+\/([^/]+)$/;
+const FINE_TUNING_CHECKPOINT_SUBRESOURCES = new Set(["permissions"]);
+const FINE_TUNING_CHECKPOINT_ID_RE = /^\/v1\/fine_tuning\/checkpoints\/([^/]+)$/;
+const FINE_TUNING_OTHER_LABEL = "/v1/fine_tuning/{other}";
 
 /**
  * Normalize parametric API paths to route patterns for use as metric labels.
@@ -287,6 +338,11 @@ export function normalizePathLabel(pathname: string): string {
   // ElevenLabs TTS: /v1/text-to-speech/{voice_id}
   if (ELEVENLABS_TTS_RE.test(pathname)) {
     return "/v1/text-to-speech/{voice_id}";
+  }
+
+  // ElevenLabs voices: /v1/voices/{voice_id}
+  if (ELEVENLABS_VOICE_RE.test(pathname)) {
+    return "/v1/voices/{voice_id}";
   }
 
   // OpenRouter video: /api/v1/videos/{jobId}[/content] — jobIds are random
@@ -332,6 +388,53 @@ export function normalizePathLabel(pathname: string): string {
   }
   if (BYTEPLUS_VIDEO_SUBMIT_RE.test(pathname)) {
     return "/contents/generations/tasks";
+  }
+
+  // Files API: /v1/files/{id} and /v1/files/{id}/content carry random
+  // `file-…` ids — raw paths would mint unbounded label cardinality.
+  // Content before id: the id RE would otherwise swallow the content suffix.
+  if (FILES_CONTENT_RE.test(pathname)) {
+    return "/v1/files/{id}/content";
+  }
+  if (pathname !== "/v1/files" && FILES_ID_RE.test(pathname)) {
+    return "/v1/files/{id}";
+  }
+
+  // Fine-tuning. Handled as one closed namespace rather than a few loose REs:
+  // the cascade is entered by prefix and always returns, so no fine-tuning path
+  // can reach the verbatim return at the bottom of this function.
+  //
+  // Order matters twice. The id-bearing permission rule reads before the
+  // checkpoint sub-resource rule, because `…/permissions/{id}` would otherwise
+  // never be reached (its own second segment is the id). Within each family the
+  // sub-resource rule reads before the id rule; the id REs are anchored to a
+  // single trailing segment so the two cannot both match, but the more specific
+  // path reading first is what makes the cascade legible.
+  if (pathname.startsWith(FINE_TUNING_PREFIX)) {
+    if (FINE_TUNING_STATIC_PATHS.has(pathname)) return pathname;
+
+    const ftSubresource = pathname.match(FINE_TUNING_SUBRESOURCE_RE);
+    if (ftSubresource) {
+      const action = FINE_TUNING_SUBRESOURCES.has(ftSubresource[1]) ? ftSubresource[1] : "{action}";
+      return `/v1/fine_tuning/jobs/{id}/${action}`;
+    }
+    if (FINE_TUNING_ID_RE.test(pathname)) return "/v1/fine_tuning/jobs/{id}";
+
+    if (FINE_TUNING_PERMISSION_ID_RE.test(pathname)) {
+      return "/v1/fine_tuning/checkpoints/{ckpt}/permissions/{id}";
+    }
+    const ckptSubresource = pathname.match(FINE_TUNING_CHECKPOINT_SUBRESOURCE_RE);
+    if (ckptSubresource) {
+      const action = FINE_TUNING_CHECKPOINT_SUBRESOURCES.has(ckptSubresource[1])
+        ? ckptSubresource[1]
+        : "{action}";
+      return `/v1/fine_tuning/checkpoints/{ckpt}/${action}`;
+    }
+    if (FINE_TUNING_CHECKPOINT_ID_RE.test(pathname)) {
+      return "/v1/fine_tuning/checkpoints/{ckpt}";
+    }
+
+    return FINE_TUNING_OTHER_LABEL;
   }
 
   // Static path — return as-is

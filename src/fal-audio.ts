@@ -35,7 +35,7 @@ import {
 import { isAuthenticatedRequest } from "./api-key-auth.js";
 import { walkFalQueue } from "./fal.js";
 import type { Journal } from "./journal.js";
-import { applyChaos } from "./chaos.js";
+import { applyChaosAsync } from "./chaos.js";
 
 // ─── FalJobMap with TTL and size bound ───────────────────────────────────
 
@@ -344,7 +344,7 @@ async function handleQueueSubmit(
   }
 
   if (
-    applyChaos(
+    await applyChaosAsync(
       res,
       fixture,
       defaults.chaos,
@@ -933,7 +933,7 @@ async function handleSyncRun(
   }
 
   if (
-    applyChaos(
+    await applyChaosAsync(
       res,
       fixture,
       defaults.chaos,

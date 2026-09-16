@@ -23,7 +23,7 @@ import { writeErrorResponse } from "./sse-writer.js";
 import { resolveUpstreamUrl } from "./url.js";
 import { applyConfiguredProviderAuth, applyProviderAuth } from "./provider-auth.js";
 import { isAuthenticatedRequest, isRecognizedApiKeyHeader } from "./api-key-auth.js";
-import { getTestId, slugifyTestId, slugifyContext } from "./helpers.js";
+import { getTestId, slugifyTestId, slugifyContext, hasMintedRequestId } from "./helpers.js";
 import { DEFAULT_TEST_ID } from "./constants.js";
 
 /** True when an SSE frame completes an OpenAI stream. */
@@ -134,9 +134,18 @@ const STRIP_HEADERS = new Set([
 ]);
 
 /**
+ * Headers stripped on egress ONLY when aimock minted the value. A
+ * caller-supplied `x-request-id` is the caller's own trace key and forwards
+ * verbatim; the id aimock invents for its access log and journal is
+ * meaningless on a real provider's wire and must not be transmitted.
+ */
+const MINTED_ONLY_STRIP_HEADERS = new Set(["x-request-id"]);
+
+/**
  * Build the header set forwarded to an upstream provider from an incoming
  * request: everything except hop-by-hop, client-set, and mock-internal
- * headers (STRIP_HEADERS, plus the x-aimock-chaos-* prefix family). Shared
+ * headers (STRIP_HEADERS, plus the x-aimock-chaos-* prefix family, plus
+ * MINTED_ONLY_STRIP_HEADERS when aimock minted the value). Shared
  * by the generic recorder proxy and the OpenRouter-video live lifecycle
  * proxy.
  */
@@ -147,6 +156,7 @@ export function buildForwardHeaders(req: http.IncomingMessage): Record<string, s
     if (
       val === undefined ||
       STRIP_HEADERS.has(lower) ||
+      (MINTED_ONLY_STRIP_HEADERS.has(lower) && hasMintedRequestId(req)) ||
       lower.startsWith("x-aimock-chaos-") ||
       (isAuthenticatedRequest(req) && isRecognizedApiKeyHeader(lower))
     ) {
@@ -163,6 +173,26 @@ export function removeForwardHeader(headers: Record<string, string>, name: strin
   for (const key of Object.keys(headers)) {
     if (key.toLowerCase() === lowerName) delete headers[key];
   }
+}
+
+/**
+ * Set a header on an egress map ONLY if the inbound request did not already
+ * supply it (in any casing). Used for content-negotiation defaults the mock
+ * wants when the caller was not explicit. Never overwrites: a caller-sent
+ * header may be covered by a request signature (AWS SigV4 and friends sign a
+ * named subset of headers), so replacing one silently invalidates the request
+ * upstream.
+ */
+export function setForwardHeaderDefault(
+  headers: Record<string, string>,
+  name: string,
+  value: string,
+): void {
+  const lowerName = name.toLowerCase();
+  for (const key of Object.keys(headers)) {
+    if (key.toLowerCase() === lowerName) return;
+  }
+  headers[name] = value;
 }
 
 /**
@@ -852,10 +882,18 @@ export async function proxyAndRecord(
         `Upstream response is not valid JSON (${msg}) — saving as error fixture`,
       );
     }
-    // fal.ai returns arbitrary, model-specific JSON shapes (images, video URLs,
-    // audio file objects, etc.). Round-trip the payload verbatim instead of
-    // letting buildFixtureResponse mis-classify it as ImageResponse / VideoResponse.
-    if (request._endpointType === "fal" && parsedResponse !== null) {
+    // fal.ai and ElevenLabs Voice Design/create/get/delete return arbitrary JSON shapes
+    // (previews with embedded base64 audio, voice objects). Round-trip the
+    // payload verbatim instead of letting buildFixtureResponse mis-classify
+    // them as ImageResponse / VideoResponse / TranscriptionResponse.
+    if (
+      (request._endpointType === "fal" ||
+        request._endpointType === "elevenlabs-voice-design" ||
+        request._endpointType === "elevenlabs-voice" ||
+        request._endpointType === "elevenlabs-voice-get" ||
+        request._endpointType === "elevenlabs-voice-delete") &&
+      parsedResponse !== null
+    ) {
       const obj = parsedResponse as Record<string, unknown>;
       const isErrorShape =
         typeof obj.error === "object" &&

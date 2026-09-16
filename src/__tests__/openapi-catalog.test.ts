@@ -64,6 +64,22 @@ describe("OpenAPI route catalog", () => {
       "POST /fal/queue/submit/{model}",
       "GET /fal/queue/requests/{requestId}",
       "POST /fal/run/{model}",
+      // New on main after the PR opened: Files API, fine-tuning jobs,
+      // ElevenLabs Voice Design slots.
+      "GET /v1/files",
+      "POST /v1/files",
+      "GET /v1/files/{file_id}",
+      "DELETE /v1/files/{file_id}",
+      "GET /v1/files/{file_id}/content",
+      "POST /v1/fine_tuning/jobs",
+      "GET /v1/fine_tuning/jobs",
+      "GET /v1/fine_tuning/jobs/{job_id}",
+      "POST /v1/fine_tuning/jobs/{job_id}/cancel",
+      "GET /v1/fine_tuning/jobs/{job_id}/events",
+      "POST /v1/text-to-voice/design",
+      "POST /v1/text-to-voice",
+      "GET /v1/voices/{voice_id}",
+      "DELETE /v1/voices/{voice_id}",
       "POST /__aimock/reset/journal",
       "GET /__aimock/journal",
       "GET /__aimock/openapi.json",
@@ -149,6 +165,16 @@ describe("OpenAPI route catalog", () => {
             });
       // Drain the body so the socket can be reused.
       const text = await res.text();
+      // POST /v1/images/variations was removed upstream (dall-e-2,
+      // 2026-05-12) and aimock replays the removal: a 404 with a zero-byte
+      // body and no JSON envelope (see images.ts + the deprecation policy).
+      // The route is still registered and journaled — assert the replay
+      // itself instead of the generic routed check below.
+      if (r.method === "POST" && r.path === "/v1/images/variations") {
+        expect(res.status).toBe(404);
+        expect(text).toBe("");
+        continue;
+      }
       // A routed-but-empty result (e.g. unknown video job id) still proves the
       // route is mounted; only the dispatcher's generic miss means drift.
       let message: string | undefined;
@@ -160,7 +186,8 @@ describe("OpenAPI route catalog", () => {
       }
       const genericMiss =
         res.status === 404 &&
-        (message === "Not found" || message?.startsWith("Unknown control endpoint"));
+        (message === "Not found" ||
+          (typeof message === "string" && message.startsWith("Unknown control endpoint")));
       expect(
         genericMiss,
         `${r.method} ${probePath} hit the generic 404 — catalog drifted from router`,

@@ -38,6 +38,7 @@ import type {
   ParsedDiff,
   QuarantineEntry,
   TimeoutEntry,
+  UnverifiedSurface,
 } from "./drift-types.js";
 
 // ---------------------------------------------------------------------------
@@ -1879,6 +1880,29 @@ export function conclusionForExitCode(exitCode: 0 | 1 | 2 | 5 | 6): string {
 // Main
 // ---------------------------------------------------------------------------
 
+/**
+ * Every registry surface that NO live provider leg grades.
+ *
+ * Read straight off `SURFACE_REGISTRY`, not off the run: whether a surface has
+ * a live leg is a property of the SOURCE, not of what happened to execute, so
+ * this is the same answer on a credential-less run as on a fully-keyed one —
+ * which is exactly the point. A surface with no live leg is never "verified and
+ * clean", it is "not looked at", and the report now says so out loud instead of
+ * letting its absence from `entries` read as a pass.
+ */
+export function collectUnverifiedSurfaces(): UnverifiedSurface[] {
+  return Object.entries(SURFACE_REGISTRY)
+    .filter(([, mapping]) => mapping.liveCoverage === "none")
+    .map(([surface, mapping]) => ({
+      surface,
+      provider: mapping.provider,
+      // Narrowed by the filter above: `liveCoverage: "none"` makes
+      // `coverageNote` required in the SurfaceMapping union.
+      note: mapping.coverageNote as string,
+    }))
+    .sort((a, b) => a.surface.localeCompare(b.surface));
+}
+
 function main(): void {
   const args = process.argv.slice(2);
   const outIndex = args.indexOf("--out");
@@ -1923,6 +1947,8 @@ function main(): void {
   // `conclusion` derived from it (base-report reuse contract).
   const exitCode = computeExitCode(criticalCount, quarantineCount, agUiSkipped, timeoutCount);
 
+  const unverifiedSurfaces = collectUnverifiedSurfaces();
+
   const timestamp = new Date().toISOString();
   const report: DriftReport = {
     timestamp,
@@ -1933,6 +1959,9 @@ function main(): void {
     entries,
     ...(quarantine.length > 0 ? { quarantine } : {}),
     ...(timeouts.length > 0 ? { timeouts } : {}),
+    // Written unconditionally (even when empty): an absent field must mean "an
+    // old report", never "every surface was verified".
+    unverifiedSurfaces,
   };
 
   try {
@@ -1954,6 +1983,15 @@ function main(): void {
   console.log(`  Critical diffs: ${criticalCount}`);
   console.log(`  Quarantined failures: ${quarantineCount}`);
   console.log(`  Live timeouts (zero observations): ${timeoutCount}`);
+  if (unverifiedSurfaces.length > 0) {
+    console.log(
+      `  Surfaces with NO live drift coverage (offline conformance only, not verified ` +
+        `against the vendor): ${unverifiedSurfaces.length}`,
+    );
+    for (const entry of unverifiedSurfaces) {
+      console.log(`    - ${entry.surface} (${entry.provider})`);
+    }
+  }
 
   switch (exitCode) {
     case 2:
@@ -1976,7 +2014,12 @@ function main(): void {
       process.exit(1);
     // eslint-disable-next-line no-fallthrough
     default:
-      console.log("No critical diffs found.");
+      console.log(
+        unverifiedSurfaces.length > 0
+          ? `No critical diffs found (on the surfaces that were actually checked — ` +
+              `${unverifiedSurfaces.length} surface(s) have no live coverage at all).`
+          : "No critical diffs found.",
+      );
   }
 }
 

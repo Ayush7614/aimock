@@ -3,20 +3,24 @@ import { parseArgs } from "node:util";
 import { resolve, basename } from "node:path";
 import { loadConfig, startFromConfig } from "./config-loader.js";
 import { runConvertCli, type ConvertCliDeps } from "./convert.js";
+import { runValidateCli } from "./validate-cli.js";
 
 const HELP = `
 Usage: aimock [options]
        aimock convert <format> <input> [output]
+       aimock validate [--strict] [--json] [--] <path> [more paths ...]
 
 Options:
   -c, --config <path>   Path to aimock config JSON file (required)
   -p, --port <number>   Port override (default: from config or 0)
-  -h, --host <string>   Host override (default: from config or 127.0.0.1)
-      --help            Show this help message
+      --host <string>   Host override (default: from config or 127.0.0.1)
+  -h, --help            Show this help message
 
 Subcommands:
   convert               Convert third-party mock configs to aimock format
                         Run "aimock convert --help" for details
+  validate              Validate fixture files or directories offline
+                        Run "aimock validate --help" for details
 `.trim();
 
 export interface AimockCliDeps {
@@ -28,6 +32,11 @@ export interface AimockCliDeps {
   startFromConfigFn?: typeof startFromConfig;
   onReady?: (ctx: { shutdown: () => void }) => void;
   convertDeps?: Partial<ConvertCliDeps>;
+  validateDeps?: {
+    log?: (msg: string) => void;
+    logError?: (msg: string) => void;
+    exit?: (code: number) => void;
+  };
 }
 
 export function runAimockCli(deps: AimockCliDeps = {}): void {
@@ -51,6 +60,25 @@ export function runAimockCli(deps: AimockCliDeps = {}): void {
     return;
   }
 
+  // Intercept "validate" the same way — it takes file paths, not --config.
+  if (argv[0] === "validate") {
+    runValidateCli({
+      argv: argv.slice(1),
+      log: deps.validateDeps?.log ?? log,
+      logError: deps.validateDeps?.logError ?? logError,
+      exit: deps.validateDeps?.exit ?? exit,
+    });
+    return;
+  }
+
+  // Short-flag rule for the `aimock` bin: a short flag means the same thing at
+  // the top level and in every subcommand. `-h` is `--help` everywhere, which
+  // is what `convert` (src/convert.ts) and `validate` (src/validate-cli.ts)
+  // already did and what a reader typing `aimock -h` expects; the host
+  // override is long-form `--host` only, and had no documented short use.
+  // Short flags are per-bin: the separate `llmock` bin (src/cli.ts, the
+  // Docker ENTRYPOINT) keeps its own documented set, where `-h` is `--host`
+  // and `-c` is `--chunk-size`.
   let values;
   try {
     ({ values } = parseArgs({
@@ -58,8 +86,8 @@ export function runAimockCli(deps: AimockCliDeps = {}): void {
       options: {
         config: { type: "string", short: "c" },
         port: { type: "string", short: "p" },
-        host: { type: "string", short: "h" },
-        help: { type: "boolean", default: false },
+        host: { type: "string" },
+        help: { type: "boolean", short: "h", default: false },
       },
       strict: true,
     }));
@@ -76,8 +104,26 @@ export function runAimockCli(deps: AimockCliDeps = {}): void {
     exit(0);
     return;
   }
-  if (!values.config) {
+  if (values.config === undefined) {
     logError("Error: --config is required.\n\n" + HELP);
+    exit(1);
+    return;
+  }
+  // A value-taking option that was GIVEN an empty (or blank) value is a usage
+  // error, not an absent option. Testing these for truthiness instead let
+  // `--config ""` read as "not given", and let `--port ""` / `--host ""` be
+  // dropped in silence — `--host ""` in particular reached the server as an
+  // empty bind address, which listens on every interface rather than on the
+  // documented 127.0.0.1 default.
+  const blank = (
+    [
+      ["config", values.config],
+      ["port", values.port],
+      ["host", values.host],
+    ] as const
+  ).find(([, value]) => value !== undefined && value.trim() === "");
+  if (blank !== undefined) {
+    logError(`Error: --${blank[0]} requires a non-empty value.\n\n${HELP}`);
     exit(1);
     return;
   }
@@ -93,7 +139,7 @@ export function runAimockCli(deps: AimockCliDeps = {}): void {
     return;
   }
 
-  const port = values.port ? Number(values.port) : undefined;
+  const port = values.port === undefined ? undefined : Number(values.port);
   if (
     port !== undefined &&
     (Number.isNaN(port) || !Number.isInteger(port) || port < 0 || port > 65535)
@@ -139,9 +185,15 @@ export function runAimockCli(deps: AimockCliDeps = {}): void {
 
 // Run when executed as a script (not when imported for testing).
 /* v8 ignore start -- entry-point guard, exercised by integration tests */
+// The basenames this module is ever argv[1] under: the `aimock` bin (the
+// package.json "bin" name), both build outputs — tsdown.config.ts builds
+// src/aimock-cli.ts in "esm" AND "cjs" format, which under `"type": "module"`
+// emits dist/aimock-cli.js and dist/aimock-cli.cjs — and the TypeScript
+// source, run through tsx. Omitting the .cjs made `node dist/aimock-cli.cjs`
+// print nothing and exit 0 despite its shebang and exec bit.
+const ENTRY_BASENAMES = new Set(["aimock", "aimock-cli.js", "aimock-cli.cjs", "aimock-cli.ts"]);
 const scriptName = process.argv[1] ?? "";
-const base = basename(scriptName);
-if (base === "aimock" || base === "aimock-cli.js" || base === "aimock-cli.ts") {
+if (ENTRY_BASENAMES.has(basename(scriptName))) {
   runAimockCli();
 }
 /* v8 ignore stop */

@@ -9,16 +9,17 @@ export {
   loadFixtureFile,
   loadFixturesFromDir,
   validateFixtures,
+  renderValidationRef,
   normalizeResponse,
 } from "./fixture-loader.js";
-export type { ValidationResult } from "./fixture-loader.js";
+export type { ValidationRef, ValidationResult } from "./fixture-loader.js";
 
 // Logger
 export { Logger } from "./logger.js";
 export type { LogLevel } from "./logger.js";
 
 // Journal
-export { Journal, DEFAULT_TEST_ID } from "./journal.js";
+export { Journal, DEFAULT_TEST_ID, isChatCompletionBody } from "./journal.js";
 
 // Router
 export { matchFixture, matchFixtureDiagnostic, getTextContent } from "./router.js";
@@ -82,6 +83,30 @@ export { CATALOG_ROUTES, buildOpenApiDocument } from "./openapi.js";
 export type { CatalogRoute } from "./openapi.js";
 export { ROUTE_DEFINITIONS } from "./route-registry.js";
 export type { RouteDefinition } from "./route-registry.js";
+export {
+  handleFilesCreate,
+  handleFilesList,
+  handleFilesRetrieve,
+  handleFilesContent,
+  handleFilesDelete,
+  clearFileStore,
+} from "./files.js";
+export type { FileObject } from "./files.js";
+export {
+  handleFineTuningCreate,
+  handleFineTuningList,
+  handleFineTuningRetrieve,
+  handleFineTuningCancel,
+  handleFineTuningEvents,
+  clearFineTuningStore,
+} from "./fine-tuning.js";
+export type {
+  FineTuningJob,
+  FineTuningJobError,
+  FineTuningJobEvent,
+  FineTuningJobHyperparameters,
+  FineTuningJobStatus,
+} from "./fine-tuning.js";
 export type { ServiceFixtures } from "./server.js";
 
 // WebSocket
@@ -125,6 +150,14 @@ export {
   buildBytePlusMatchText,
 } from "./byteplus-video.js";
 export { handleElevenLabsAudio } from "./elevenlabs-audio.js";
+export {
+  handleElevenLabsVoiceDesign,
+  handleElevenLabsVoiceCreate,
+  handleElevenLabsVoiceGet,
+  handleElevenLabsVoiceDelete,
+  clearElevenLabsVoices,
+  voiceDesignToJson,
+} from "./elevenlabs-voice.js";
 export { handleFalQueue } from "./fal-audio.js";
 export { handleFal, FalQueueStateMap } from "./fal.js";
 
@@ -132,6 +165,7 @@ export { handleFal, FalQueueStateMap } from "./fal.js";
 export {
   flattenHeaders,
   generateId,
+  resolveRequestId,
   generateToolCallId,
   generateMessageId,
   generateToolUseId,
@@ -170,8 +204,24 @@ export { writeSSEStream, writeErrorResponse, delay, calculateDelay } from "./sse
 export type { StreamOptions, ErrorResponseOptions } from "./sse-writer.js";
 
 // Chaos
-export { evaluateChaos, applyChaos } from "./chaos.js";
+// `applyChaos` is intentionally the DEPRECATED wrapper, not the raw sync function:
+// the sync form cannot await and so skips the configured chaos latency, and the
+// repo now forbids internal sync callers outright. It stays exported (published
+// since v1.10.0) but warns once, naming the gap. New code uses `applyChaosAsync`.
+export {
+  evaluateChaos,
+  applyChaosDeprecated as applyChaos,
+  applyChaosAsync,
+  resolveChaosLatencyMs,
+} from "./chaos.js";
 export type { ChaosAction } from "./types.js";
+// `applyChaosAsync` returns this instead of a bare boolean so callers can tell
+// "a chaos action fired" from "the response was already dead". Both non-`false`
+// members are truthy, so `if (await applyChaosAsync(...)) return;` is
+// unaffected; `false` means the caller still owns the request, including when
+// an action was rolled but could not be applied to an already-committed
+// response.
+export type { ChaosAsyncOutcome } from "./chaos.js";
 
 // Recorder
 export { proxyAndRecord } from "./recorder.js";
@@ -368,6 +418,7 @@ export type {
   Fixture,
   FixtureFile,
   FixtureFileEntry,
+  JournalBody,
   JournalEntry,
   SSEChunk,
   SSEChoice,
@@ -387,6 +438,8 @@ export type {
   ImageItem,
   ImageResponse,
   AudioResponse,
+  VoiceDesignPreview,
+  VoiceDesignResponse,
   TranscriptionResponse,
   VideoResponse,
   RawJSONResponse,

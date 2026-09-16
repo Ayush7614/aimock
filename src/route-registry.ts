@@ -39,6 +39,9 @@ export const GEMINI_PREDICT_RE = /^\/v1beta\/models\/([^:]+):predict$/;
 export const ELEVENLABS_SOUND_GENERATION_PATH = "/v1/sound-generation";
 export const ELEVENLABS_TTS_RE = /^\/v1\/text-to-speech\/([^/]+)$/;
 export const ELEVENLABS_MUSIC_RE = /^\/v1\/music(?:\/(.+))?$/;
+export const ELEVENLABS_VOICE_DESIGN_PATH = "/v1/text-to-voice/design";
+export const ELEVENLABS_VOICE_CREATE_PATH = "/v1/text-to-voice";
+export const ELEVENLABS_VOICE_RE = /^\/v1\/voices\/([^/]+)$/;
 export const FAL_QUEUE_SUBMIT_RE = /^\/fal\/queue\/submit\/(.+)$/;
 export const FAL_QUEUE_REQUESTS_RE = /^\/fal\/queue\/requests\/(.+)$/;
 export const FAL_RUN_RE = /^\/fal\/run\/(.+)$/;
@@ -69,6 +72,15 @@ export const HEALTH_PATH = "/health";
 export const READY_PATH = "/ready";
 export const MODELS_PATH = "/v1/models";
 export const REQUESTS_PATH = "/v1/_requests";
+
+export const FILES_PATH = "/v1/files";
+// FILES_ID_RE / FILES_CONTENT_RE live in metrics.js alongside every other
+// shared route regex (OpenRouter/Veo/Grok/BytePlus) so dispatch and metrics
+// path-labels cannot disagree; the registry only holds the exact base path.
+export const FINE_TUNING_JOBS_PATH = "/v1/fine_tuning/jobs";
+export const FINE_TUNING_ID_RE = /^\/v1\/fine_tuning\/jobs\/([^/]+)$/;
+export const FINE_TUNING_CANCEL_RE = /^\/v1\/fine_tuning\/jobs\/([^/]+)\/cancel$/;
+export const FINE_TUNING_EVENTS_RE = /^\/v1\/fine_tuning\/jobs\/([^/]+)\/events$/;
 
 export const CONTROL_PREFIX = "/__aimock";
 
@@ -226,9 +238,9 @@ export const ROUTE_DEFINITIONS: RouteDefinition[] = [
   },
   {
     method: "POST",
-    path: IMAGES_VARIATIONS_PATH,
+    path: "/v1/images/variations",
     service: "images",
-    description: "Image variations (multipart)",
+    description: "Image variations (removed upstream 2026-05-12 — replays the real 404)",
   },
   { method: "POST", path: SPEECH_PATH, service: "speech", description: "Text-to-speech" },
   {
@@ -372,6 +384,32 @@ export const ROUTE_DEFINITIONS: RouteDefinition[] = [
   },
   {
     method: "POST",
+    path: "/v1/text-to-voice/design",
+    service: "elevenlabs",
+    description: "ElevenLabs voice design preview",
+  },
+  {
+    method: "POST",
+    path: "/v1/text-to-voice",
+    service: "elevenlabs",
+    description: "ElevenLabs save designed voice",
+  },
+  {
+    method: "GET",
+    path: "/v1/voices/{voice_id}",
+    examplePath: "/v1/voices/test-voice",
+    service: "elevenlabs",
+    description: "ElevenLabs voice slot get",
+  },
+  {
+    method: "DELETE",
+    path: "/v1/voices/{voice_id}",
+    examplePath: "/v1/voices/test-voice",
+    service: "elevenlabs",
+    description: "ElevenLabs voice slot delete",
+  },
+  {
+    method: "POST",
     path: "/v1/text-to-speech/{voice_id}",
     examplePath: "/v1/text-to-speech/test-voice",
     service: "elevenlabs",
@@ -425,6 +463,69 @@ export const ROUTE_DEFINITIONS: RouteDefinition[] = [
     examplePath: "/fal/run/fal-ai-test",
     service: "fal",
     description: "fal.ai synchronous run",
+  },
+  // OpenAI Files API
+  {
+    method: "GET",
+    path: "/v1/files/{file_id}/content",
+    examplePath: "/v1/files/file-test123/content",
+    service: "files",
+    description: "File content download",
+  },
+  {
+    method: "GET",
+    path: "/v1/files/{file_id}",
+    examplePath: "/v1/files/file-test123",
+    service: "files",
+    description: "File retrieve",
+  },
+  {
+    method: "DELETE",
+    path: "/v1/files/{file_id}",
+    examplePath: "/v1/files/file-test123",
+    service: "files",
+    description: "File delete",
+  },
+  { method: "GET", path: "/v1/files", service: "files", description: "File list" },
+  {
+    method: "POST",
+    path: "/v1/files",
+    service: "files",
+    description: "File upload (JSON or multipart)",
+  },
+  // OpenAI fine-tuning jobs
+  {
+    method: "POST",
+    path: "/v1/fine_tuning/jobs/{job_id}/cancel",
+    examplePath: "/v1/fine_tuning/jobs/ftjob-test123/cancel",
+    service: "fine-tuning",
+    description: "Fine-tuning job cancel",
+  },
+  {
+    method: "GET",
+    path: "/v1/fine_tuning/jobs/{job_id}/events",
+    examplePath: "/v1/fine_tuning/jobs/ftjob-test123/events",
+    service: "fine-tuning",
+    description: "Fine-tuning job events",
+  },
+  {
+    method: "GET",
+    path: "/v1/fine_tuning/jobs/{job_id}",
+    examplePath: "/v1/fine_tuning/jobs/ftjob-test123",
+    service: "fine-tuning",
+    description: "Fine-tuning job retrieve",
+  },
+  {
+    method: "GET",
+    path: "/v1/fine_tuning/jobs",
+    service: "fine-tuning",
+    description: "Fine-tuning job list",
+  },
+  {
+    method: "POST",
+    path: "/v1/fine_tuning/jobs",
+    service: "fine-tuning",
+    description: "Fine-tuning job create",
   },
   // Chat completions (terminal dispatcher branch)
   {
