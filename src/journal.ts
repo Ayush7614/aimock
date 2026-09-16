@@ -1,5 +1,11 @@
 import { generateId } from "./helpers.js";
-import type { ChatCompletionRequest, Fixture, FixtureMatch, JournalEntry } from "./types.js";
+import type {
+  ChatCompletionRequest,
+  Fixture,
+  FixtureMatch,
+  JournalBody,
+  JournalEntry,
+} from "./types.js";
 import { DEFAULT_TEST_ID } from "./constants.js";
 export { DEFAULT_TEST_ID } from "./constants.js";
 
@@ -27,18 +33,42 @@ const JOURNAL_BODY_CAP_BYTES = 64 * 1024; // 64 KB
  * content (e.g. CJK/emoji) whose code-unit count falls under the threshold
  * but whose byte size does not.
  */
-function capBody(body: ChatCompletionRequest | null): ChatCompletionRequest | null {
+function capBody(body: JournalBody | null): JournalBody | null {
   if (body === null) return null;
   const serialized = JSON.stringify(body);
   if (Buffer.byteLength(serialized, "utf8") <= JOURNAL_BODY_CAP_BYTES) return body;
-  // Cast: the marker is not a real ChatCompletionRequest, but the field type
-  // is already nullable-union and downstream consumers (e.g. GET /journal)
-  // treat the body as opaque JSON — the truncation marker is safe to store.
+  // The marker is not a chat request, and `JournalBody` no longer claims it is
+  // — downstream consumers (e.g. GET /journal) treat the body as opaque JSON.
   return {
     __aimock_truncated: true,
     originalByteSize: Buffer.byteLength(serialized, "utf8"),
     note: "body truncated by aimock journal cap (64 KB limit)",
-  } as unknown as ChatCompletionRequest;
+  };
+}
+
+/**
+ * Narrow a journaled body to a chat-completion request.
+ *
+ * `JournalEntry.body` is a union (see {@link JournalBody}): most entries hold a
+ * chat request, but the fine-tuning create payload and this module's own
+ * truncation marker do not. Anything reading `messages`, `model` or the rest of
+ * the chat shape off a journal entry — inside aimock or in a consumer's test
+ * — goes through here, so an entry that is not a chat request fails as a
+ * `false` it can assert on rather than as an undefined property three accesses
+ * later.
+ *
+ * `messages` is the discriminator because it is the one required field no
+ * other journaled shape carries.
+ */
+export function isChatCompletionBody(
+  body: JournalBody | null | undefined,
+): body is ChatCompletionRequest {
+  return (
+    body !== null &&
+    body !== undefined &&
+    Array.isArray((body as { messages?: unknown }).messages) &&
+    typeof (body as { model?: unknown }).model === "string"
+  );
 }
 
 /**

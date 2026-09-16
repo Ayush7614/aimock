@@ -17,7 +17,7 @@ import {
 import { matchFixtureDiagnostic } from "./router.js";
 import { writeErrorResponse } from "./sse-writer.js";
 import type { Journal } from "./journal.js";
-import { applyChaos } from "./chaos.js";
+import { applyChaosAsync } from "./chaos.js";
 import { proxyAndRecord } from "./recorder.js";
 import { extractBoundary, extractFormField } from "./transcription.js";
 
@@ -240,7 +240,7 @@ export async function handleVideoCreate(
   }
 
   if (
-    applyChaos(
+    await applyChaosAsync(
       res,
       fixture,
       defaults.chaos,
@@ -392,7 +392,7 @@ export async function handleVideoCreate(
   }
 }
 
-export function handleVideoStatus(
+export async function handleVideoStatus(
   req: http.IncomingMessage,
   res: http.ServerResponse,
   videoId: string,
@@ -400,13 +400,13 @@ export function handleVideoStatus(
   defaults: HandlerDefaults,
   setCorsHeaders: (res: http.ServerResponse) => void,
   videoStates: VideoStateMap,
-): void {
+): Promise<void> {
   setCorsHeaders(res);
   const path = req.url ?? `/v1/videos/${videoId}`;
   const method = req.method ?? "GET";
 
   if (
-    applyChaos(
+    await applyChaosAsync(
       res,
       null,
       defaults.chaos,

@@ -156,6 +156,10 @@ export interface FixtureMatch {
     | "embedding"
     | "audio-gen"
     | "elevenlabs-tts"
+    | "elevenlabs-voice-design"
+    | "elevenlabs-voice"
+    | "elevenlabs-voice-get"
+    | "elevenlabs-voice-delete"
     | "fal-audio"
     | "fal"
     | "realtime"
@@ -405,6 +409,27 @@ export interface ImageResponse {
 // guards, because the optional companion fields below make these shapes
 // structurally overlap (an AudioResponse with `toolCalls`/`content` would also
 // satisfy those guards otherwise).
+export interface VoiceDesignPreview {
+  generated_voice_id: string;
+  // Optional like its siblings below: `voiceDesignToJson` substitutes `""`
+  // when it is absent, so requiring it here made that documented fallback
+  // unreachable from TypeScript.
+  audio_base_64?: string;
+  media_type?: string;
+  duration_secs?: number;
+  language?: string | null;
+}
+
+/**
+ * Convenience shape for `LLMock.onElevenLabsVoiceDesign`. Stored as a
+ * {@link RawJSONResponse} wrapping `{ previews, text }` — the ElevenLabs
+ * `/v1/text-to-voice/design` envelope.
+ */
+export interface VoiceDesignResponse {
+  previews: VoiceDesignPreview[];
+  text?: string;
+}
+
 export interface AudioResponse {
   audio: string | { b64Json: string; contentType?: string };
   format?: string;
@@ -527,16 +552,50 @@ export interface RecordedTimings {
 /**
  * Probabilistic chaos injection rates.
  *
- * Rates are evaluated sequentially per request — drop → malformed → disconnect
- * — and the first hit wins. Consequently malformedRate is conditional on drop
- * not firing, and disconnectRate is conditional on neither drop nor malformed
- * firing. A config of `{ dropRate: 0.5, malformedRate: 0.5 }` yields a ~25 %
- * effective malformed rate, not 50 %.
+ * Rates are evaluated sequentially per request — drop → malformed → rateLimit
+ * → disconnect — as four separate draws in that order, and the first draw that
+ * hits wins and short-circuits the rest. Each rate is therefore the probability
+ * that its OWN draw hits GIVEN that no earlier rate fired, not the share of
+ * requests that end in that fault; only `dropRate`, first in the chain, is
+ * unconditional. A config of `{ dropRate: 0.5, malformedRate: 0.5 }` yields a
+ * ~25 % effective malformed rate, not 50 %, and the same compounding applies to
+ * `{ dropRate: 0.5, rateLimitRate: 0.5 }` (~25 % rate limits).
+ */
+/**
+ * Probabilistic (and one deterministic) fault injection knobs.
+ *
+ * VALIDATION — ONE policy, whatever the source. Each field is a finite number
+ * in its range: the rates in [0, 1], `latencyMs` in [0, 30000]. A value outside
+ * it, or one that is not a number at all (`"0.5abc"`, `"Infinity"`, `NaN`), is
+ * REJECTED, never clamped — silent clamping substitutes a fault rate nobody
+ * asked for and hides the misconfiguration that produced it.
+ *
+ * Rejection is reported in the loudest way each source allows, and the three
+ * agree: `POST /__aimock/chaos` answers 400, the `--chaos-*` CLI flags refuse
+ * to start, and a per-request header or a fixture/server value is refused with
+ * a `[chaos]` warning and left unset so the next level of precedence (header >
+ * fixture > server) applies.
  */
 export interface ChaosConfig {
   dropRate?: number;
   malformedRate?: number;
   disconnectRate?: number;
+  /**
+   * Deterministic delay (ms) injected before the request is handled.
+   * Applied when > 0 — header > fixture > server precedence, same as rates.
+   * Unlike rates it is not probabilistic: a set latency always fires so
+   * timeout/retry suites get a stable signal. Must be in [0, 30000]; a value
+   * outside that range is rejected, not clamped (see above).
+   */
+  latencyMs?: number;
+  /**
+   * Chance of a 429 rate-limit rejection with `Retry-After`, CONDITIONAL on
+   * neither `dropRate` nor `malformedRate` having fired first: it is the third
+   * draw in the drop → malformed → rateLimit → disconnect order, and the first
+   * hit wins. Paired with a 0.5 `dropRate` a 0.5 `rateLimitRate` produces ~25 %
+   * rate limits, not 50 % (see the interface docstring above).
+   */
+  rateLimitRate?: number;
 }
 
 /**
@@ -558,7 +617,28 @@ export interface ChaosConfig {
 export interface ChaosScope {
   /** Server-wide baseline: the construction config, or the untagged override. */
   base?: ChaosConfig;
-  /** Per-testId overrides, consulted before `base`. */
+  /**
+   * Per-testId overrides, consulted INSTEAD OF `base` — never merged over it.
+   *
+   * An installed override REPLACES the baseline wholesale for that testId: a
+   * server started with `--chaos-latency 500` whose test `t1` installs
+   * `{ dropRate: 1 }` gives `t1` traffic a drop and NO latency, because
+   * `latencyMs` is not restated. To keep a baseline field, restate it in the
+   * override body.
+   *
+   * Replacement — not a field-wise merge — is deliberate, and it is what makes
+   * `POST /__aimock/chaos {}` ("explicitly no chaos for my test") different
+   * from `DELETE /__aimock/chaos` ("forget I said anything, fall back to the
+   * baseline"). Under a merge, `POST {}` would be a no-op and that distinction
+   * would collapse. It also matches the untagged case, where an override
+   * likewise replaces the construction-time config rather than layering on it.
+   *
+   * The two chain links ABOVE this one — fixture chaos over server chaos, and
+   * request headers over both — DO merge field-wise (see `resolveChaosConfig`).
+   * Only the scope lookup replaces, because it selects a config rather than
+   * refining one. `GET /__aimock/chaos` with the same testId always reports the
+   * config actually in effect for that scope, so the replacement is auditable.
+   */
   byTestId?: ReadonlyMap<string, ChaosConfig>;
 }
 
@@ -569,7 +649,7 @@ export interface ChaosScope {
  */
 export type ChaosDefaults = ChaosConfig | ChaosScope;
 
-export type ChaosAction = "drop" | "malformed" | "disconnect";
+export type ChaosAction = "drop" | "malformed" | "rateLimit" | "disconnect";
 
 // Response factory — allows dynamic fixture responses based on the incoming request
 
@@ -746,6 +826,10 @@ export interface FixtureFileEntry {
       | "embedding"
       | "audio-gen"
       | "elevenlabs-tts"
+      | "elevenlabs-voice-design"
+      | "elevenlabs-voice"
+      | "elevenlabs-voice-get"
+      | "elevenlabs-voice-delete"
       | "fal-audio"
       | "fal"
       | "realtime"
@@ -773,13 +857,35 @@ export interface FixtureFileEntry {
 
 // Request journal
 
+/**
+ * A recorded request body.
+ *
+ * Most journal entries carry a chat-completion request, but every service
+ * journals through one entry type and several of them record a body that is
+ * not one: the fine-tuning create payload is recorded verbatim so the journal
+ * reports what the caller actually sent, and the journal's own size cap
+ * substitutes a truncation marker for an oversized body. Neither shape has a
+ * `model`/`messages` pair, so typing the field as `ChatCompletionRequest`
+ * alone forces those writers through a cast that claims fields that are not
+ * there — the second member exists so they do not have to lie.
+ *
+ * TypeScript collapses the two for ASSIGNMENT (`ChatCompletionRequest` has an
+ * index signature, so it is itself a `Record<string, unknown>`); the union is
+ * kept two-membered because it is what the field means, not because it narrows
+ * anything. For READING, treat the body as opaque JSON — that is already how
+ * every consumer uses it (the journal cap re-serializes it, `GET
+ * /__aimock/journal` hands it back) — and property-check before reaching for a
+ * chat-request field.
+ */
+export type JournalBody = ChatCompletionRequest | Record<string, unknown>;
+
 export interface JournalEntry {
   id: string;
   timestamp: number;
   method: string;
   path: string;
   headers: Record<string, string>;
-  body: ChatCompletionRequest | null;
+  body: JournalBody | null;
   service?: string;
   response: {
     status: number;
@@ -792,9 +898,12 @@ export interface JournalEntry {
      * configured proxy: chaos-path entries (e.g. chaos on the OpenRouter
      * video lifecycle endpoints; in REPLAY mode their normal 200/400/401/404
      * entries omit source, while record-mode 200s on those endpoints carry
-     * source:"proxy") AND the OpenRouter video models listing synthesized as
-     * the fallback after a FAILED proxy attempt. Absent when the distinction
-     * doesn't apply (e.g. 404/503 fallback where nothing was going to serve).
+     * source:"proxy"), the OpenRouter video models listing synthesized as the
+     * fallback after a FAILED proxy attempt, and the services whose responses
+     * are synthesized outright — every fine-tuning entry carries it, success
+     * and error alike, since that store is aimock's own and no fixture or
+     * proxy ever serves it. Absent when the distinction doesn't apply
+     * (e.g. 404/503 fallback where nothing was going to serve).
      */
     source?: "fixture" | "proxy" | "internal";
     interrupted?: boolean;

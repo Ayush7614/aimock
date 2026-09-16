@@ -446,6 +446,57 @@ function buildErrorRealtimeEvent(
   sendEvent(ws, { type: "error", error: { message, type, code } }, isBeta);
 }
 
+// ─── Retired Beta shape ─────────────────────────────────────────────────────
+
+/**
+ * OpenAI's Realtime *Beta* shape ("OpenAI-Beta: realtime=v1") no longer serves.
+ * Per aimock's deprecation policy (https://aimock.copilotkit.dev/deprecation-policy/)
+ * a removed upstream surface is mocked as REMOVED: a client that negotiates it
+ * gets the sunset rejection the real API returns, so the removal surfaces in the
+ * caller's tests instead of in production.
+ *
+ * Wire behaviour observed firsthand against wss://api.openai.com/v1/realtime on
+ * 2026-09-15 (authenticated, `OpenAI-Beta: realtime=v1`, GA control run in the
+ * same session still returned session.created):
+ *
+ *   HTTP/1.1 101 Switching Protocols          <- the upgrade SUCCEEDS
+ *   TEXT  {"type":"error","event_id":"event_…","error":{"type":"invalid_request_error",
+ *          "code":"beta_api_shape_disabled","message":"The Realtime Beta API is no
+ *          longer supported. Please use /v1/realtime for the GA API.","param":null,
+ *          "event_id":null}}
+ *   CLOSE code=4000 reason="invalid_request_error.beta_api_shape_disabled"
+ *
+ * No session.created is sent. Every value below is copied from that capture —
+ * none of it is inferred.
+ */
+const BETA_SUNSET_ERROR_CODE = "beta_api_shape_disabled";
+const BETA_SUNSET_MESSAGE =
+  "The Realtime Beta API is no longer supported. Please use /v1/realtime for the GA API.";
+const BETA_SUNSET_CLOSE_CODE = 4000;
+const BETA_SUNSET_CLOSE_REASON = `invalid_request_error.${BETA_SUNSET_ERROR_CODE}`;
+
+function rejectRetiredBetaShape(ws: WebSocketConnection, logger: Logger): void {
+  logger.warn(
+    `WS /v1/realtime rejected the retired Realtime Beta shape (OpenAI-Beta: realtime=v1) — ${BETA_SUNSET_MESSAGE}`,
+  );
+  // Sent raw, NOT through sendEvent(): this frame is the real API's own wire
+  // shape and must not pass through the GA->Beta translation shim.
+  ws.send(
+    JSON.stringify({
+      type: "error",
+      event_id: realtimeId("event"),
+      error: {
+        type: "invalid_request_error",
+        code: BETA_SUNSET_ERROR_CODE,
+        message: BETA_SUNSET_MESSAGE,
+        param: null,
+        event_id: null,
+      },
+    }),
+  );
+  ws.close(BETA_SUNSET_CLOSE_CODE, BETA_SUNSET_CLOSE_REASON);
+}
+
 // ─── Main handler ───────────────────────────────────────────────────────────
 
 export function handleWebSocketRealtime(
@@ -471,6 +522,13 @@ export function handleWebSocketRealtime(
   const isBeta = defaults.upgradeHeaders?.["openai-beta"]
     ? String(defaults.upgradeHeaders["openai-beta"]).includes("realtime=v1")
     : false;
+
+  // The Realtime Beta shape is RETIRED upstream. aimock mocks the sunset, not a
+  // successful handshake — see rejectRetiredBetaShape.
+  if (isBeta) {
+    rejectRetiredBetaShape(ws, logger);
+    return;
+  }
 
   const session: SessionConfig = {
     model: defaults.model,

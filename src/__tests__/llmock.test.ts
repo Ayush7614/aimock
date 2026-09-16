@@ -4,9 +4,27 @@ import { resolve, join } from "node:path";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { LLMock } from "../llmock.js";
-import { Journal } from "../journal.js";
+import { Journal, isChatCompletionBody } from "../journal.js";
+import type { ChatCompletionRequest, JournalEntry } from "../types.js";
 
 // ---- Helpers ----
+
+/**
+ * The chat request a journal entry recorded.
+ *
+ * `JournalEntry.body` is a union — not every service journals a chat request —
+ * so reading `messages` off one needs a narrowing step. Throwing here names the
+ * problem ("this entry is not a chat request") at the point it exists, instead
+ * of letting a non-chat entry surface as an undefined property inside an
+ * expectation.
+ */
+function chatBodyOf(entry: JournalEntry | null | undefined): ChatCompletionRequest {
+  const body = entry?.body;
+  if (!isChatCompletionBody(body)) {
+    throw new Error(`journal entry has no chat-completion body: ${JSON.stringify(body)}`);
+  }
+  return body;
+}
 
 const FIXTURES_DIR = resolve(import.meta.dirname, "../../fixtures");
 
@@ -475,7 +493,7 @@ describe("LLMock", () => {
       expect(mock.journal.size).toBe(1);
       const entry = mock.journal.getLast();
       expect(entry).not.toBeNull();
-      expect(entry!.body!.messages[0].content).toBe("journal-test");
+      expect(chatBodyOf(entry).messages[0].content).toBe("journal-test");
     });
   });
 
@@ -884,6 +902,56 @@ describe("LLMock", () => {
       const body = JSON.parse(chat.data);
       expect(body.error.message).toBe("Overloaded");
     });
+
+    it("fires on an elevenlabs-voice-design request and is consumed by it", async () => {
+      mock = new LLMock();
+      mock.onElevenLabsVoiceDesign(/sea captain/, {
+        previews: [{ generated_voice_id: "p1", audio_base_64: "QQ==" }],
+        text: "Ahoy",
+      });
+      await mock.start();
+
+      // The router's endpoint-compat table marks the four elevenlabs-voice*
+      // types as error-compatible; the one-shot gate must agree or the error
+      // silently stays pending while the voice route answers normally.
+      mock.nextRequestError(503, { message: "Voice outage", type: "server_error" });
+
+      const design = {
+        voice_description: "A gruff old sea captain with a gravelly voice and a thick accent",
+      };
+      const first = await postTo(mock.url, "/v1/text-to-voice/design", design);
+      expect(first.status).toBe(503);
+      expect(JSON.parse(first.data).error.message).toBe("Voice outage");
+
+      // One-shot: the same request now reaches the voice fixture.
+      const second = await postTo(mock.url, "/v1/text-to-voice/design", design);
+      expect(second.status).toBe(200);
+      expect(second.data).toContain("p1");
+    });
+
+    it("fires on an elevenlabs-voice-get request and is consumed by it", async () => {
+      mock = new LLMock();
+      await mock.start();
+
+      mock.nextRequestError(503, { message: "Voice outage", type: "server_error" });
+
+      const first = await new Promise<{ status: number; data: string }>((res, rej) => {
+        http
+          .get(`${mock!.url}/v1/voices/aimock-nonexistent-voice`, (r) => {
+            let data = "";
+            r.on("data", (c: Buffer) => (data += c.toString()));
+            r.on("end", () => res({ status: r.statusCode ?? 0, data }));
+          })
+          .on("error", rej);
+      });
+      expect(first.status).toBe(503);
+      expect(JSON.parse(first.data).error.message).toBe("Voice outage");
+
+      // Consumed: a chat request no longer sees the pending error.
+      mock.onMessage("hello", { content: "Hi!" });
+      const chat = await post(mock.url, chatBody("hello"));
+      expect(chat.status).toBe(200);
+    });
   });
 
   describe("journal proxies", () => {
@@ -910,7 +978,7 @@ describe("LLMock", () => {
 
       const last = mock.getLastRequest();
       expect(last).not.toBeNull();
-      expect(last!.body!.messages[0].content).toBe("b");
+      expect(chatBodyOf(last).messages[0].content).toBe("b");
     });
 
     it("getLastRequest returns null when no requests", async () => {

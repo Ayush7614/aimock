@@ -32,7 +32,7 @@
  * string array), and `sdkShapesFile` (non-empty string) — so every entry here
  * must resolve to a real file with real, non-invented function names.
  */
-export interface SurfaceMapping {
+export interface SurfaceMappingBase {
   /** Human-readable label used in the report/prompt and the legacy fallback. */
   provider: string;
   /** Source file the fixer edits, e.g. `"src/cohere.ts"`. */
@@ -51,6 +51,34 @@ export interface SurfaceMapping {
   sdkShapesFile?: string;
 }
 
+/**
+ * Whether a drift run ever puts this surface in front of the REAL provider.
+ *
+ * `"live"` — at least one emitting `*.drift.ts` leg issues a request to the
+ * vendor (directly, or through `providers.ts` / `ws-providers.ts`), so a
+ * vendor-side change can turn that leg red.
+ *
+ * `"none"` — every emitting leg only drives the LOCAL aimock server and grades
+ * its output against a hand-written SDK-shape fixture in this repo. That is a
+ * useful offline CONFORMANCE check (it reds when aimock's own builder changes
+ * shape) but it is NOT drift detection: nothing in the loop can observe the
+ * vendor, so the surface can silently rot and the drift run stays green.
+ *
+ * There is deliberately NO default. Omission used to mean "covered" by
+ * implication, which is how four Bedrock surfaces and Vertex AI reported as
+ * verified while no AWS or Google call has ever been made from this repo.
+ * Every entry must state which it is, and `drift-collector.test.ts` re-derives
+ * the answer from the emitting sources so a wrong declaration fails CI.
+ */
+export type SurfaceLiveCoverage = "live" | "none";
+
+export type SurfaceMapping = SurfaceMappingBase &
+  (
+    | { liveCoverage: "live"; coverageNote?: string }
+    /** `"none"` must say WHY there is no live leg and what it would take. */
+    | { liveCoverage: "none"; coverageNote: string }
+  );
+
 const SDK_SHAPES_FILE = "src/__tests__/drift/sdk-shapes.ts";
 
 /**
@@ -65,6 +93,7 @@ export const SURFACE_REGISTRY: Record<string, SurfaceMapping> = {
   // --- Existing PROVIDER_MAP surfaces, migrated to slugs (unchanged mappings) ---
   "openai-chat": {
     provider: "OpenAI Chat",
+    liveCoverage: "live",
     builderFile: "src/helpers.ts",
     builderFunctions: [
       "buildTextCompletion",
@@ -76,6 +105,7 @@ export const SURFACE_REGISTRY: Record<string, SurfaceMapping> = {
   },
   "openai-responses": {
     provider: "OpenAI Responses",
+    liveCoverage: "live",
     builderFile: "src/responses.ts",
     builderFunctions: [
       "buildTextResponse",
@@ -87,6 +117,7 @@ export const SURFACE_REGISTRY: Record<string, SurfaceMapping> = {
   },
   anthropic: {
     provider: "Anthropic Claude",
+    liveCoverage: "live",
     builderFile: "src/messages.ts",
     builderFunctions: [
       "buildClaudeTextResponse",
@@ -98,6 +129,7 @@ export const SURFACE_REGISTRY: Record<string, SurfaceMapping> = {
   },
   gemini: {
     provider: "Google Gemini",
+    liveCoverage: "live",
     builderFile: "src/gemini.ts",
     builderFunctions: [
       "buildGeminiTextResponse",
@@ -109,24 +141,28 @@ export const SURFACE_REGISTRY: Record<string, SurfaceMapping> = {
   },
   "openai-realtime": {
     provider: "OpenAI Realtime",
+    liveCoverage: "live",
     builderFile: "src/ws-realtime.ts",
     builderFunctions: ["handleWebSocketRealtime", "realtimeItemsToMessages"],
     typesFile: null,
   },
   "openai-responses-ws": {
     provider: "OpenAI Responses WS",
+    liveCoverage: "live",
     builderFile: "src/ws-responses.ts",
     builderFunctions: ["handleWebSocketResponses"],
     typesFile: null,
   },
   "gemini-live": {
     provider: "Gemini Live",
+    liveCoverage: "live",
     builderFile: "src/ws-gemini-live.ts",
     builderFunctions: ["handleWebSocketGeminiLive"],
     typesFile: null,
   },
   "openai-embeddings": {
     provider: "OpenAI Embeddings",
+    liveCoverage: "live",
     builderFile: "src/helpers.ts",
     builderFunctions: ["buildEmbeddingResponse", "generateDeterministicEmbedding"],
     typesFile: null,
@@ -134,6 +170,7 @@ export const SURFACE_REGISTRY: Record<string, SurfaceMapping> = {
   },
   "gemini-interactions": {
     provider: "Gemini Interactions",
+    liveCoverage: "live",
     builderFile: "src/gemini-interactions.ts",
     builderFunctions: [
       "buildInteractionsTextResponse",
@@ -149,18 +186,23 @@ export const SURFACE_REGISTRY: Record<string, SurfaceMapping> = {
   // --- Previously unmapped surfaces (the hole) — now keyed. -------------------
   "cohere-chat": {
     provider: "Cohere Chat",
+    liveCoverage: "live",
     builderFile: "src/cohere.ts",
     builderFunctions: ["handleCohere", "cohereToCompletionRequest"],
     typesFile: null,
   },
   rerank: {
     provider: "Cohere Rerank",
+    liveCoverage: "live",
     builderFile: "src/rerank.ts",
     builderFunctions: ["handleRerank"],
     typesFile: null,
   },
   "bedrock-invoke": {
     provider: "Bedrock Invoke",
+    liveCoverage: "none",
+    coverageNote:
+      "No live AWS leg: nothing in this repo implements SigV4 request signing (no @aws-sdk dependency, no HMAC signer), so the Bedrock legs only drive the local mock. Offline conformance only.",
     builderFile: "src/bedrock.ts",
     builderFunctions: [
       "handleBedrock",
@@ -174,6 +216,9 @@ export const SURFACE_REGISTRY: Record<string, SurfaceMapping> = {
   },
   "bedrock-invoke-stream": {
     provider: "Bedrock InvokeStream",
+    liveCoverage: "none",
+    coverageNote:
+      "No live AWS leg — see `bedrock-invoke`. The binary event-stream frames are graded against a hand-written fixture, never against Bedrock.",
     builderFile: "src/bedrock.ts",
     builderFunctions: [
       "handleBedrockStream",
@@ -185,66 +230,112 @@ export const SURFACE_REGISTRY: Record<string, SurfaceMapping> = {
   },
   "bedrock-converse": {
     provider: "Bedrock Converse",
+    liveCoverage: "none",
+    coverageNote: "No live AWS leg — see `bedrock-invoke`. Offline conformance only.",
     builderFile: "src/bedrock-converse.ts",
     builderFunctions: ["handleConverse", "converseToCompletionRequest"],
     typesFile: null,
   },
   "bedrock-converse-stream": {
     provider: "Bedrock ConverseStream",
+    liveCoverage: "none",
+    coverageNote: "No live AWS leg — see `bedrock-invoke`. Offline conformance only.",
     builderFile: "src/bedrock-converse.ts",
     builderFunctions: ["handleConverseStream", "converseToCompletionRequest"],
     typesFile: null,
   },
   ollama: {
     provider: "Ollama",
+    liveCoverage: "live",
     builderFile: "src/ollama.ts",
     builderFunctions: ["handleOllama", "handleOllamaGenerate", "ollamaToCompletionRequest"],
     typesFile: null,
   },
   "fal-sync": {
     provider: "fal.ai sync-run",
+    liveCoverage: "none",
+    coverageNote:
+      "No live fal.ai leg: `fal.drift.ts` only drives the local mock's sync-run passthrough. The QUEUE surface (`fal-queue`) does have a live canary; this one does not.",
     builderFile: "src/fal.ts",
     builderFunctions: ["handleFal", "imageResponseToFalJson", "videoResponseToFalJson"],
     typesFile: null,
   },
   "fal-queue": {
     provider: "fal.ai queue",
+    liveCoverage: "live",
     builderFile: "src/fal.ts",
     builderFunctions: ["handleFal", "walkFalQueue", "resolveProgression"],
     typesFile: null,
   },
   elevenlabs: {
     provider: "ElevenLabs",
+    liveCoverage: "live",
     builderFile: "src/elevenlabs-audio.ts",
     builderFunctions: ["handleElevenLabsTTS", "handleElevenLabsAudio"],
     typesFile: null,
   },
+  "elevenlabs-voice": {
+    provider: "ElevenLabs Voice Design",
+    liveCoverage: "none",
+    coverageNote:
+      "No live ElevenLabs Voice Design leg: `elevenlabs-voice.drift.ts` only drives the local mock. No " +
+      "ElevenLabs API key is reachable from this repo (1Password holds an elevenlabs.io web login, not a " +
+      "key), so no SUCCESSFUL response from any of these routes has ever been observed here — the shapes " +
+      "come from `@elevenlabs/elevenlabs-js@2.68.0` serialization types, a secondary source. Offline " +
+      "conformance only: it reds when aimock's own serializer changes shape, never when the vendor does. " +
+      "Retiring this needs a funded key and one recorded design + create round-trip; the `elevenlabs` " +
+      "surface's live `/v1/sound-generation` leg does NOT cover these routes.",
+    builderFile: "src/elevenlabs-voice.ts",
+    builderFunctions: [
+      "voiceDesignToJson",
+      "handleElevenLabsVoiceDesign",
+      "handleElevenLabsVoiceCreate",
+      "buildSyntheticVoice",
+    ],
+    typesFile: "src/types.ts",
+  },
   images: {
     provider: "OpenAI Images",
+    liveCoverage: "none",
+    coverageNote:
+      "No live OpenAI Images leg: `images.drift.ts` only drives the local mock. Offline conformance only. " +
+      "`/v1/images/variations` is out of scope entirely — the endpoint is REMOVED upstream (404, zero-byte " +
+      "body, observed 2026-09-15) and `handleImageVariations` now replays that removal, so it is not a " +
+      "response builder and must not be steered at as one; it is pinned by `image-edits.test.ts`.",
     builderFile: "src/images.ts",
-    builderFunctions: ["handleImages", "handleImageEdit", "handleImageVariations"],
+    builderFunctions: ["handleImages", "handleImageEdit"],
     typesFile: null,
   },
   video: {
     provider: "OpenAI Video",
+    liveCoverage: "none",
+    coverageNote:
+      "No live OpenAI Video leg: `video.drift.ts` only drives the local mock. Offline conformance only.",
     builderFile: "src/video.ts",
     builderFunctions: ["handleVideoCreate", "handleVideoStatus"],
     typesFile: null,
   },
   moderation: {
     provider: "OpenAI Moderations",
+    liveCoverage: "none",
+    coverageNote:
+      "No live OpenAI Moderations leg: `moderation.drift.ts` only drives the local mock. Offline conformance only.",
     builderFile: "src/moderation.ts",
     builderFunctions: ["handleModeration"],
     typesFile: null,
   },
   transcription: {
     provider: "Transcription",
+    liveCoverage: "live",
     builderFile: "src/transcription.ts",
     builderFunctions: ["handleTranscription", "extractFormField", "extractBoundary"],
     typesFile: null,
   },
   "vertex-ai": {
     provider: "Vertex AI",
+    liveCoverage: "none",
+    coverageNote:
+      "No live Vertex leg: `vertex-ai.drift.ts` only drives the local mock's Vertex-style path. A live leg needs a GCP service account and an OAuth2 token exchange, neither of which this repo does.",
     builderFile: "src/gemini.ts",
     builderFunctions: [
       "handleGemini",
@@ -266,6 +357,7 @@ export const SURFACE_REGISTRY: Record<string, SurfaceMapping> = {
   // constants, and that is what a fixer must re-observe and edit.
   "byteplus-video": {
     provider: "BytePlus Video",
+    liveCoverage: "live",
     builderFile: "src/byteplus-video.ts",
     builderFunctions: [
       "handleBytePlusVideoCreate",
@@ -278,6 +370,7 @@ export const SURFACE_REGISTRY: Record<string, SurfaceMapping> = {
   },
   "openrouter-video": {
     provider: "OpenRouter Video",
+    liveCoverage: "live",
     builderFile: "src/openrouter-video.ts",
     builderFunctions: [
       "handleOpenRouterVideoCreate",
@@ -289,6 +382,7 @@ export const SURFACE_REGISTRY: Record<string, SurfaceMapping> = {
   },
   "openrouter-chat": {
     provider: "OpenRouter Chat",
+    liveCoverage: "live",
     builderFile: "src/openrouter-chat.ts",
     builderFunctions: [
       "shapeOpenRouterCompletion",

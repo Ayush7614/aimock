@@ -45,7 +45,7 @@ import { writeErrorResponse, delay, calculateDelay } from "./sse-writer.js";
 import { createInterruptionSignal } from "./interruption.js";
 import type { RecordedTimings } from "./types.js";
 import type { Journal } from "./journal.js";
-import { applyChaos } from "./chaos.js";
+import { applyChaosAsync } from "./chaos.js";
 import { proxyAndRecord } from "./recorder.js";
 
 // ─── Responses API request types ────────────────────────────────────────────
@@ -1347,7 +1347,7 @@ export async function handleResponses(
   }
 
   if (
-    applyChaos(
+    await applyChaosAsync(
       res,
       fixture,
       defaults.chaos,

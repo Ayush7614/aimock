@@ -414,6 +414,31 @@ function classifyRoute(
   return null;
 }
 
+/** The single-valued `x-fal-target-host` header, or undefined when absent. */
+function falTargetHost(req: http.IncomingMessage): string | undefined {
+  const header = req.headers["x-fal-target-host"];
+  return Array.isArray(header) ? header[0] : header;
+}
+
+/**
+ * Whether `handleFal` will take ownership of this request — i.e. whether it
+ * returns `"handled"` rather than `"passthrough"`. Pure, synchronous and
+ * side-effect free: it runs exactly the classification `handleFal` itself runs
+ * (same `falTargetHost` + `classifyRoute` pair, which are the ONLY two things
+ * that can produce `"passthrough"`), so the two cannot disagree.
+ *
+ * The server calls this BEFORE rolling chaos so that each fal request is
+ * rolled exactly once: when this returns true the general handler owns the
+ * request and the server's gate is the single roll; when it returns false the
+ * request falls through to the legacy `/fal/queue/...` and `/fal/run/...`
+ * routes, which roll (and delay) their own.
+ */
+export function falWillHandle(req: http.IncomingMessage, pathname: string): boolean {
+  const targetHost = falTargetHost(req);
+  if (!targetHost) return false;
+  return classifyRoute(req, pathname, targetHost) !== null;
+}
+
 /**
  * General fal.ai handler. Routes by `x-fal-target-host` header (the convention
  * used by `@fal-ai/client`'s server-side requestMiddleware workaround for the
@@ -421,7 +446,8 @@ function classifyRoute(
  *
  * Returns `"passthrough"` when the request does not look like a host-mirrored
  * fal call, so the caller can fall back to the legacy `/fal/queue/...` and
- * `/fal/run/...` audio routes.
+ * `/fal/run/...` audio routes. `falWillHandle` predicts that outcome without
+ * running the handler.
  */
 export async function handleFal(
   req: http.IncomingMessage,
@@ -432,8 +458,7 @@ export async function handleFal(
   defaults: HandlerDefaults,
   journal: Journal,
 ): Promise<HandleFalOutcome> {
-  const targetHostHeader = req.headers["x-fal-target-host"];
-  const targetHost = Array.isArray(targetHostHeader) ? targetHostHeader[0] : targetHostHeader;
+  const targetHost = falTargetHost(req);
   if (!targetHost) return "passthrough";
 
   const route = classifyRoute(req, pathname, targetHost);

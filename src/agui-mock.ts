@@ -197,6 +197,7 @@ export class AGUIMock implements Mountable {
         this.fixtures,
         this.recordConfig,
         this.logger,
+        body,
       );
       if (result !== false) {
         this.journalRequest(req, pathname, result);

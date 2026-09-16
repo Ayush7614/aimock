@@ -16,7 +16,7 @@ import {
 import { matchFixtureDiagnostic } from "./router.js";
 import { calculateDelay, delay, writeErrorResponse } from "./sse-writer.js";
 import type { Journal } from "./journal.js";
-import { applyChaos } from "./chaos.js";
+import { applyChaosAsync } from "./chaos.js";
 import { proxyAndRecord } from "./recorder.js";
 import { createInterruptionSignal } from "./interruption.js";
 
@@ -30,7 +30,7 @@ import { createInterruptionSignal } from "./interruption.js";
  * read. So the quotes are consumed BY the match rather than stripped after it:
  * a post-strip runs on an already-truncated value and leaves `boundary="a b c"`
  * as the useless `"a`, and the delimiter then never matches, so every form
- * field silently falls back to its default (`whisper-1`, `dall-e-2`, …).
+ * field silently falls back to its default (`whisper-1`, `gpt-image-1`, …).
  *
  * Only DQUOTE quotes. An apostrophe is a legal RFC 2045 token character and a
  * legal RFC 2046 `bchar`, so `boundary='abc'` is a BARE token whose value
@@ -147,7 +147,7 @@ export async function handleTranscription(
   }
 
   if (
-    applyChaos(
+    await applyChaosAsync(
       res,
       fixture,
       defaults.chaos,
