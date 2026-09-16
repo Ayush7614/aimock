@@ -1,11 +1,6 @@
-import type {
-  ChatCompletionRequest,
-  ChatMessage,
-  ContentPart,
-  Fixture,
-  FixtureMatch,
-} from "./types.js";
+import type { ChatCompletionRequest, ChatMessage, ContentPart, Fixture } from "./types.js";
 import {
+  describeMatch,
   isImageResponse,
   isAudioResponse,
   isTranscriptionResponse,
@@ -628,44 +623,6 @@ export function matchFixtureDiagnostic(
   }
 
   return { fixture: selected, skippedBySequenceOrTurn, turnIndexRelaxed, matchedBy };
-}
-
-/**
- * Build a stable, human-readable identifier for a fixture's match shape for the
- * relaxed-turnIndex warning. The previous `JSON.stringify(match)` was unfit: it
- * DROPS `predicate` functions (non-serialisable) and serialises any RegExp
- * matcher to `{}`, so a predicate- or regex-gated fixture's warning collapsed to
- * an uninformative "served fixture {}" / `{"userMessage":{}}` blob.
- *
- * Instead we list the PRESENT matcher keys in declaration order, annotating each
- * by VALUE KIND so predicates and regexes survive: `predicate(fn)`,
- * `userMessage(regex)`, `userMessage("hello")`, `turnIndex=0`, etc. The
- * fixture's array `index` (when known, i.e. `>= 0`) is prefixed as the stable
- * positional identifier — the `Fixture` type carries no `id`/`name`, so its
- * registration index is the only stable handle. String/number values are shown
- * inline (truncated) so a content match remains recognisable; the whole string
- * is capped to keep the log line bounded.
- */
-function describeMatch(match: FixtureMatch, index: number): string {
-  const parts: string[] = [];
-  for (const [key, value] of Object.entries(match)) {
-    if (value === undefined) continue;
-    if (typeof value === "function") {
-      parts.push(`${key}(fn)`);
-    } else if (value instanceof RegExp) {
-      parts.push(`${key}(${value})`);
-    } else if (typeof value === "string") {
-      const v = value.length > 40 ? `${value.slice(0, 40)}…` : value;
-      parts.push(`${key}(${JSON.stringify(v)})`);
-    } else if (Array.isArray(value)) {
-      parts.push(`${key}(${value.length} item${value.length === 1 ? "" : "s"})`);
-    } else {
-      parts.push(`${key}=${String(value)}`);
-    }
-  }
-  const keys = parts.length > 0 ? parts.join(", ") : "no matchers";
-  const prefix = index >= 0 ? `#${index} ` : "";
-  return `${prefix}{ ${keys} }`.slice(0, 160);
 }
 
 /**

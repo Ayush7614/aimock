@@ -8,6 +8,7 @@ import { isRecognizedApiKeyHeader } from "./api-key-auth.js";
 import type {
   ChatCompletionRequest,
   Fixture,
+  FixtureMatch,
   FixtureResponse,
   ResponseFactory,
   TextResponse,
@@ -1594,4 +1595,47 @@ export function buildEmbeddingResponse(
     model,
     usage: { prompt_tokens: usage?.prompt_tokens ?? 0, total_tokens: usage?.total_tokens ?? 0 },
   };
+}
+
+/**
+ * Build a stable, human-readable identifier for a fixture's match shape, for
+ * any log line that has to name WHICH fixture it means. The `Fixture` type
+ * carries no `id`/`name`, so the matchers are the only handle a reader has.
+ *
+ * Used by the relaxed-turnIndex warning (`router.ts`) and by the chaos
+ * rejected-value warning (`chaos.ts`); one implementation so the two name the
+ * same fixture the same way. The obvious `JSON.stringify(match)` is unfit: it
+ * DROPS `predicate` functions (non-serialisable) and serialises any RegExp
+ * matcher to `{}`, so a predicate- or regex-gated fixture's warning collapsed to
+ * an uninformative "served fixture {}" / `{"userMessage":{}}` blob.
+ *
+ * Instead we list the PRESENT matcher keys in declaration order, annotating each
+ * by VALUE KIND so predicates and regexes survive: `predicate(fn)`,
+ * `userMessage(regex)`, `userMessage("hello")`, `turnIndex=0`, etc. The
+ * fixture's array `index` is prefixed as a stable positional identifier when
+ * the caller knows it (i.e. `>= 0`); callers holding only the fixture object
+ * pass `-1` and get the matcher summary alone. String/number values are shown
+ * inline (truncated) so a content match remains recognisable; the whole string
+ * is capped to keep the log line bounded.
+ */
+export function describeMatch(match: FixtureMatch, index: number): string {
+  const parts: string[] = [];
+  for (const [key, value] of Object.entries(match)) {
+    if (value === undefined) continue;
+    if (typeof value === "function") {
+      parts.push(`${key}(fn)`);
+    } else if (value instanceof RegExp) {
+      parts.push(`${key}(${value})`);
+    } else if (typeof value === "string") {
+      const v = value.length > 40 ? `${value.slice(0, 40)}…` : value;
+      parts.push(`${key}(${JSON.stringify(v)})`);
+    } else if (Array.isArray(value)) {
+      parts.push(`${key}(${value.length} item${value.length === 1 ? "" : "s"})`);
+    } else {
+      parts.push(`${key}=${String(value)}`);
+    }
+  }
+  const keys = parts.length > 0 ? parts.join(", ") : "no matchers";
+  const prefix = index >= 0 ? `#${index} ` : "";
+  return `${prefix}{ ${keys} }`.slice(0, 160);
 }
