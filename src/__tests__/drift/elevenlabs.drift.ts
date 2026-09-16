@@ -5,17 +5,20 @@
  * - /v1/sound-generation — binary audio with Content-Type header
  * - /v1/music — binary audio with song-id header
  * - /v1/music/stream — chunked binary audio
- * - /v1/music/plan — JSON composition plan (graded against the SDK's `MusicPrompt.Raw`)
+ * - /v1/music/plan — JSON composition plan (passthrough conformance of a
+ *   test-authored fixture against the SDK's `MusicPrompt.Raw`; no vendor observation)
  *
  * Since ElevenLabs returns binary audio (not JSON), drift testing focuses on
  * Content-Type headers, binary payload presence, and JSON plan structure
  * rather than three-way JSON shape comparison.
  *
  * LIVE COVERAGE: the /v1/sound-generation case below fetches the real
- * `api.elevenlabs.io` when ELEVENLABS_API_KEY is set, which is what earns this
- * surface `liveCoverage: "live"`. Every other case here is offline conformance
- * against the local mock. Without the key the live case skips and the run
- * proves nothing about the vendor.
+ * `api.elevenlabs.io` when ELEVENLABS_API_KEY is set and emits the one
+ * `elevenlabs` drift block graded against a vendor response (status,
+ * Content-Type, body presence — the body is opaque audio), which is what earns
+ * this surface `liveCoverage: "live"`. Every other case here is offline
+ * conformance against the local mock. Without the key the live case skips and
+ * the run proves nothing about the vendor.
  *
  * The Voice Design routes (`/v1/text-to-voice/design`, `/v1/text-to-voice`) are
  * NOT covered here — they have no live leg at all and live in
@@ -185,13 +188,16 @@ async function realSoundGeneration(text: string): Promise<{
  *     source_from?: SectionSource.Raw | null }` (`source_from` is optional
  *     and omitted here).
  *
- * This grades the `MusicPrompt.Raw` arm (the `music_v1` composition plan). It
- * is the shape the SDK will PARSE, not one this repo has observed on the wire:
- * no live `/v1/music/plan` request has ever been made from here, and the
+ * This is the `MusicPrompt.Raw` arm (the `music_v1` composition plan) — the
+ * shape the SDK will PARSE, not one this repo has observed on the wire: no
+ * live `/v1/music/plan` request has ever been made from here, and the
  * `elevenlabs` surface's `liveCoverage: "live"` is earned by the
- * `/v1/sound-generation` leg alone (see the file header). Before this the
- * expected shape was a copy of the fixture's own input, so the case could not
- * fail for any reason but a passthrough bug.
+ * `/v1/sound-generation` leg alone (see the file header).
+ *
+ * What the case below grades is passthrough conformance against a
+ * test-authored fixture, with no vendor observation: the plan handler writes
+ * `PLAN_FIXTURE`'s `response.content` verbatim, so the only things that can
+ * red it are a passthrough bug or the fixture and this shape disagreeing.
  */
 function musicPlanResponseShape() {
   return extractShape({
@@ -245,7 +251,7 @@ describe("ElevenLabs drift — sound generation", () => {
     expect(mockRes.bodyBuffer.byteLength).toBe(5);
   });
 
-  it("/v1/sound-generation missing text field returns 400 with aimock's error envelope (vendor: 422 detail[])", async () => {
+  it("/v1/sound-generation missing text field returns 400 with aimock's error envelope (vendor shape not observed on this route)", async () => {
     const mockRes = await httpPostBinary(`${instance.url}/v1/sound-generation`, {});
 
     expect(mockRes.status).toBe(400);
@@ -284,6 +290,32 @@ describe("ElevenLabs drift — sound generation", () => {
       });
       expect(mockRes.status).toBe(200);
       expect(mockRes.headers["content-type"]).toMatch(/^audio\//);
+
+      // The only surface-keyed drift block in this file that is graded against
+      // a VENDOR response. The body is opaque audio, so what is compared is the
+      // response envelope: status, Content-Type presence/type, and whether any
+      // bytes came back. `elevenlabs`'s `liveCoverage: "live"` rests on this
+      // block alone; every other emit in this file is offline conformance.
+      const realShape = extractShape({
+        status: realRes.status,
+        contentType: realRes.contentType,
+        hasAudioBytes: realRes.bodyLength > 0,
+      });
+      const mockShape = extractShape({
+        status: mockRes.status,
+        contentType: mockRes.headers["content-type"] ?? null,
+        hasAudioBytes: mockRes.bodyBuffer.byteLength > 0,
+      });
+      const diffs = triangulate(realShape, realShape, mockShape);
+      const report = formatDriftReport(
+        "ElevenLabs /v1/sound-generation (live response envelope)",
+        diffs,
+        "elevenlabs",
+      );
+      expect(
+        diffs.filter((d) => d.severity === "critical"),
+        report,
+      ).toEqual([]);
     },
   );
 });
@@ -335,7 +367,7 @@ describe("ElevenLabs drift — music endpoints", () => {
     ).toEqual([]);
   });
 
-  it("/v1/music missing prompt returns 400 with aimock's error envelope (vendor: 422 detail[])", async () => {
+  it("/v1/music missing prompt returns 400 with aimock's error envelope (vendor shape not observed on this route)", async () => {
     const mockRes = await httpPostBinary(`${instance.url}/v1/music`, {});
 
     expect(mockRes.status).toBe(400);

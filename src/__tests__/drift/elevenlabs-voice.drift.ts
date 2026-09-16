@@ -10,10 +10,9 @@
  * `secrets.ELEVENLABS_API_KEY` as `ELEVENLABS_API_KEY` to the drift run;
  * whether that secret is populated is not visible from the repo — but no case
  * here fetches the vendor with it, so setting the key changes nothing in this
- * file. (Locally, 1Password holds an `elevenlabs.io` web login and no
- * key: `internal-skills secret-cache resolve "elevenlabs api key"` -> no match,
- * 2026-09-16.) No successful Voice Design response has been observed from this
- * repo — see the provenance block at the top of `src/elevenlabs-voice.ts`.
+ * file. These routes have no vendor leg; they are offline-only. No successful
+ * Voice Design response has been observed from this repo — see the provenance
+ * block at the top of `src/elevenlabs-voice.ts`.
  * Earning "live" here means adding a leg that spends Voice Design credits
  * against the real service, not flipping the registry.
  * These cases drive the LOCAL aimock server and grade its output against the
@@ -285,9 +284,10 @@ describe("ElevenLabs Voice Design conformance (offline) — /v1/text-to-voice/de
     bare.onElevenLabsVoiceDesign(VOICE_DESCRIPTION, {
       previews: [{ generated_voice_id: "", audio_base_64: "" }],
     });
-    // `start()` inside the `try` so nothing between binding the port and the
-    // `finally` can leave the server listening; `started` because `stop()` on
-    // an unstarted LLMock throws and would hide the original error.
+    // The server is constructed above the `try`; `start()` (which binds the
+    // port) and the request run inside it, so a failure in either still reaches
+    // the `finally`. `started` guards `stop()` because stopping an unstarted
+    // LLMock throws and would hide the original error.
     let started = false;
     try {
       await bare.start();
