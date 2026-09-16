@@ -171,6 +171,20 @@ describe.skipIf(!CLI_AVAILABLE)("CLI: argument validation", () => {
     expect(code).toBe(1);
   });
 
+  it("rejects --chaos-drop 0.5abc (trailing garbage, not a full number)", async () => {
+    // parseFloat would have accepted this as 0.5. Chaos input is parsed the
+    // same reject-never-clamp way at every source — see `ChaosConfig`.
+    const { stderr, code } = await runCli(["--chaos-drop", "0.5abc"]);
+    expect(stderr).toContain("Invalid chaos-drop");
+    expect(code).toBe(1);
+  });
+
+  it("rejects --chaos-latency Infinity", async () => {
+    const { stderr, code } = await runCli(["--chaos-latency", "Infinity"]);
+    expect(stderr).toContain("Invalid chaos-latency");
+    expect(code).toBe(1);
+  });
+
   it("rejects --chunk-size 0 (below minimum)", async () => {
     const { stderr, code } = await runCli(["--chunk-size", "0"]);
     expect(stderr).toContain("Invalid chunk-size");
