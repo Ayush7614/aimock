@@ -148,3 +148,61 @@ describe("Batches API mock", () => {
     expect(normalizePathLabel("/v1/batches/batch-123/cancel")).toBe("/v1/batches/{id}/cancel");
   });
 });
+
+// The chaos gate is shared with every other job surface (files, fine-tuning),
+// so it has to behave the same way here: async so `latencyMs` actually
+// delays, CORS set before the roll so a faulted 429/500 is readable from a
+// browser, and `service: "batches"` on the journal context so faulted
+// requests show up under `?service=batches`.
+describe("Batches API chaos gate", () => {
+  let mock: LLMock;
+  const create = {
+    input_file_id: "file-chaos",
+    endpoint: "/v1/chat/completions",
+    completion_window: "24h",
+  };
+
+  beforeEach(async () => {
+    clearBatchStore();
+    mock = new LLMock({ port: 0 });
+    await mock.start();
+  });
+
+  afterEach(async () => {
+    await mock.stop();
+    clearBatchStore();
+  });
+
+  it("honours chaos latencyMs on create", async () => {
+    const t0 = Date.now();
+    const res = await fetch(`${mock.url}/v1/batches`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-aimock-chaos-latency": "400" },
+      body: JSON.stringify(create),
+    });
+    await res.text();
+    expect(res.status).toBe(200);
+    expect(Date.now() - t0).toBeGreaterThanOrEqual(400);
+  });
+
+  it("sets CORS on a chaos-faulted response and journals it under service=batches", async () => {
+    const chaos = { "Content-Type": "application/json", "x-aimock-chaos-ratelimit": "1" };
+    const routes: [string, RequestInit][] = [
+      [`${mock.url}/v1/batches`, { method: "POST", headers: chaos, body: JSON.stringify(create) }],
+      [`${mock.url}/v1/batches`, { headers: chaos }],
+      [`${mock.url}/v1/batches/batch-x`, { headers: chaos }],
+      [`${mock.url}/v1/batches/batch-x/cancel`, { method: "POST", headers: chaos, body: "{}" }],
+    ];
+    for (const [url, init] of routes) {
+      const res = await fetch(url, init);
+      await res.text();
+      expect(res.status).toBe(429);
+      expect(res.headers.get("access-control-allow-origin")).toBe("*");
+    }
+    const journal = (await (
+      await fetch(`${mock.url}/__aimock/journal?service=batches`)
+    ).json()) as { response: { chaosAction?: string } }[];
+    expect(journal).toHaveLength(4);
+    expect(journal.every((e) => e.response.chaosAction === "rateLimit")).toBe(true);
+  });
+});

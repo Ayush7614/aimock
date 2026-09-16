@@ -18,7 +18,7 @@
 
 import type * as http from "node:http";
 import { flattenHeaders, generateId, isJsonObject } from "./helpers.js";
-import { applyChaos } from "./chaos.js";
+import { applyChaosAsync, type ChaosAsyncOutcome } from "./chaos.js";
 import type { ChaosDefaults } from "./types.js";
 import type { Journal } from "./journal.js";
 import type { Logger } from "./logger.js";
@@ -81,22 +81,39 @@ function invalid(message: string): { error: { message: string; type: string } } 
 
 type Defaults = { logger: Logger; chaos?: ChaosDefaults; registry?: MetricsRegistry };
 
-function chaosHit(
+/**
+ * Roll the chaos dice for one batches request. Returns true when a fault
+ * fired and the response is already written, so the caller returns early.
+ *
+ * CORS headers go on BEFORE the roll, because a fault writes the response
+ * itself and never reaches `writeJson`. `service: "batches"` on the journal
+ * context keeps faulted requests visible under `?service=batches`. Mirrors
+ * the `chaosHit` in `src/fine-tuning.ts`.
+ */
+async function chaosHit(
   req: http.IncomingMessage,
   journal: Journal,
   defaults: Defaults,
   method: string,
   path: string,
   res: http.ServerResponse,
-): boolean {
-  return applyChaos(
+  setCorsHeaders: (res: http.ServerResponse) => void,
+): Promise<ChaosAsyncOutcome> {
+  setCorsHeaders(res);
+  return await applyChaosAsync(
     res,
     null,
     defaults.chaos,
     req.headers,
     req.url,
     journal,
-    { method, path, headers: flattenHeaders(req.headers), body: null },
+    {
+      method,
+      path,
+      headers: flattenHeaders(req.headers),
+      body: null,
+      service: "batches",
+    },
     "internal",
     defaults.registry,
     defaults.logger,
@@ -129,7 +146,7 @@ export async function handleBatchesCreate(
 ): Promise<void> {
   const path = req.url ?? "/v1/batches";
   const method = req.method ?? "POST";
-  if (chaosHit(req, journal, defaults, method, path, res)) return;
+  if (await chaosHit(req, journal, defaults, method, path, res, setCorsHeaders)) return;
 
   let body: unknown;
   try {
@@ -207,7 +224,7 @@ export async function handleBatchesList(
 ): Promise<void> {
   const path = req.url ?? "/v1/batches";
   const method = req.method ?? "GET";
-  if (chaosHit(req, journal, defaults, method, path, res)) return;
+  if (await chaosHit(req, journal, defaults, method, path, res, setCorsHeaders)) return;
   const data = [...batches.values()].sort((a, b) => a.created_at - b.created_at);
   journalBatches(journal, method, path, flattenHeaders(req.headers), 200);
   writeJson(res, 200, { object: "list", data }, setCorsHeaders);
@@ -223,7 +240,7 @@ export async function handleBatchesRetrieve(
 ): Promise<void> {
   const path = req.url ?? `/v1/batches/${batchId}`;
   const method = req.method ?? "GET";
-  if (chaosHit(req, journal, defaults, method, path, res)) return;
+  if (await chaosHit(req, journal, defaults, method, path, res, setCorsHeaders)) return;
   const batch = batches.get(batchId);
   if (!batch) {
     journalBatches(journal, method, path, flattenHeaders(req.headers), 404);
@@ -244,7 +261,7 @@ export async function handleBatchesCancel(
 ): Promise<void> {
   const path = req.url ?? `/v1/batches/${batchId}/cancel`;
   const method = req.method ?? "POST";
-  if (chaosHit(req, journal, defaults, method, path, res)) return;
+  if (await chaosHit(req, journal, defaults, method, path, res, setCorsHeaders)) return;
   const batch = batches.get(batchId);
   if (!batch) {
     journalBatches(journal, method, path, flattenHeaders(req.headers), 404);
