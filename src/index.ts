@@ -9,9 +9,10 @@ export {
   loadFixtureFile,
   loadFixturesFromDir,
   validateFixtures,
+  renderValidationRef,
   normalizeResponse,
 } from "./fixture-loader.js";
-export type { ValidationResult } from "./fixture-loader.js";
+export type { ValidationRef, ValidationResult } from "./fixture-loader.js";
 
 // Logger
 export { Logger } from "./logger.js";

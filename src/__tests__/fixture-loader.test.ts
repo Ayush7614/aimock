@@ -1474,6 +1474,21 @@ describe("validateFixtures", () => {
     expect(duplicateWarnings).toHaveLength(0);
   });
 
+  it("no warning: RegExp systemMessage where source+flags would concatenate alike", () => {
+    // serializeMatcher joins a RegExp's source and flags with a literal U+0000
+    // separator, so /ag/i and /a/gi (both "ag" + "gi"/"i" -> "agi" if simply
+    // concatenated) stay distinct dedup keys.
+    const fixtures = [
+      makeFixture({ match: { userMessage: "hello", systemMessage: /ag/i } }),
+      makeFixture({ match: { userMessage: "hello", systemMessage: /a/gi } }),
+    ];
+    const results = validateFixtures(fixtures);
+    const duplicateWarnings = results.filter(
+      (r) => r.severity === "warning" && r.message.includes("duplicate"),
+    );
+    expect(duplicateWarnings).toHaveLength(0);
+  });
+
   it("no warning: same userMessage but different model", () => {
     const fixtures = [
       makeFixture({ match: { userMessage: "hello", model: "gpt-4o" } }),
