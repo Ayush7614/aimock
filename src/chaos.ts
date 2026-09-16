@@ -283,6 +283,14 @@ interface ChaosJournalContext {
   path: string;
   headers: Record<string, string>;
   body: ChatCompletionRequest | null;
+  /**
+   * Service tag copied onto the chaos-path journal entry, so a faulted request
+   * stays selectable by `GET /__aimock/journal?service=<name>` exactly like the
+   * handler's own non-chaos entries. Handlers that tag their normal journal
+   * writes MUST pass it here too, or their chaos traffic falls out of that
+   * filter. Optional because the OpenAI-surface handlers journal untagged.
+   */
+  service?: string;
 }
 
 /**
