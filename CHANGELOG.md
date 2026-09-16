@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+> **BREAKING** — `aimock -h` is `--help`, not `--host`: `aimock -h 0.0.0.0` exits 1 with `Error: Unexpected argument '0.0.0.0'. This command does not take positional arguments`. Migration: `--host <string>` (long form only). The `llmock` bin (the Docker ENTRYPOINT) keeps `-h, --host` (#453).
+
 ### Added
 
 - Chaos `rateLimitRate` / `--chaos-ratelimit`: deterministic 429 with `Retry-After` (#449)
@@ -15,7 +17,7 @@
 
 ### Changed
 
-- `aimock -h` is `--help`, matching `aimock convert -h` and `aimock validate -h`; the host override is `--host` only. The `llmock` bin (the Docker entrypoint) keeps its own `-h, --host` (#453)
+- **BREAKING:** `aimock -h` is `--help`, matching `aimock convert -h` and `aimock validate -h`; the host override is `--host` only. The `llmock` bin (the Docker entrypoint) keeps its own `-h, --host` — see the note above (#453)
 - `aimock --config ""`, `--port ""` and `--host ""` are usage errors naming the option, instead of being read as "not given" (#453)
 - Realtime `OpenAI-Beta: realtime=v1` now returns the real sunset rejection, not a session (#461)
 - `POST /v1/images/variations` now replays the real removal 404; OpenAI deleted it (#462)
