@@ -7,6 +7,7 @@ import { loadFixtureFile, loadFixturesFromDir, validateFixtures } from "./fixtur
 import { Logger, type LogLevel } from "./logger.js";
 import { watchFixtures } from "./watcher.js";
 import { AGUIMock } from "./agui-mock.js";
+import { parseChaosField, CHAOS_FIELDS, type ChaosField } from "./chaos.js";
 import { resolveFixturesValue } from "./fixtures-remote.js";
 import { readProviderKeysFromEnv } from "./provider-auth.js";
 import { resolveInboundAuth, selectInboundAuthSource } from "./api-key-auth.js";
@@ -54,6 +55,8 @@ Options:
       --chaos-drop <rate>   Probability (0-1) of dropping requests with 500
       --chaos-malformed <rate>  Probability (0-1) of returning malformed JSON
       --chaos-disconnect <rate> Probability (0-1) of destroying connection
+      --chaos-ratelimit <rate> Probability (0-1) of 429 with Retry-After
+      --chaos-latency <ms> Delay (0-${CHAOS_FIELDS.latencyMs.max}ms) injected before handling
       AIMOCK_API_KEYS  Comma-separated inbound test API keys (environment only)
       --help                Show this help message
 `.trim();
@@ -94,6 +97,8 @@ const { values } = parseArgs({
     "chaos-drop": { type: "string" },
     "chaos-malformed": { type: "string" },
     "chaos-disconnect": { type: "string" },
+    "chaos-ratelimit": { type: "string" },
+    "chaos-latency": { type: "string" },
     "journal-max": { type: "string", default: "1000" },
     "fixture-counts-max": { type: "string", default: "500" },
     help: { type: "boolean", default: false },
@@ -216,32 +221,38 @@ let chaos: ChaosConfig | undefined;
   const dropStr = values["chaos-drop"];
   const malformedStr = values["chaos-malformed"];
   const disconnectStr = values["chaos-disconnect"];
+  const ratelimitStr = values["chaos-ratelimit"];
+  const latencyStr = values["chaos-latency"];
 
-  if (dropStr !== undefined || malformedStr !== undefined || disconnectStr !== undefined) {
+  if (
+    dropStr !== undefined ||
+    malformedStr !== undefined ||
+    disconnectStr !== undefined ||
+    ratelimitStr !== undefined ||
+    latencyStr !== undefined
+  ) {
+    // Same parser, same TABLE, same reject-never-clamp policy as every other
+    // chaos input (headers, fixture, server default, control API) — see
+    // `ChaosConfig`. The bounds and the integer-vs-rate grammar are read out of
+    // `CHAOS_FIELDS`, never re-typed here, so raising a cap in that one table
+    // moves the flag with it instead of leaving `--chaos-latency` on the old
+    // limit with no compile error.
     chaos = {};
-    if (dropStr !== undefined) {
-      const val = parseFloat(dropStr);
-      if (isNaN(val) || val < 0 || val > 1) {
-        console.error(`Invalid chaos-drop: ${dropStr} (must be 0-1)`);
+    const flagFields: Array<{ flag: string; field: ChaosField; raw: string | undefined }> = [
+      { flag: "chaos-drop", field: "dropRate", raw: dropStr },
+      { flag: "chaos-malformed", field: "malformedRate", raw: malformedStr },
+      { flag: "chaos-disconnect", field: "disconnectRate", raw: disconnectStr },
+      { flag: "chaos-ratelimit", field: "rateLimitRate", raw: ratelimitStr },
+      { flag: "chaos-latency", field: "latencyMs", raw: latencyStr },
+    ];
+    for (const { flag, field, raw } of flagFields) {
+      if (raw === undefined) continue;
+      const val = parseChaosField(field, raw);
+      if (val === undefined) {
+        console.error(`Invalid ${flag}: ${raw} (must be 0-${CHAOS_FIELDS[field].max})`);
         process.exit(1);
       }
-      chaos.dropRate = val;
-    }
-    if (malformedStr !== undefined) {
-      const val = parseFloat(malformedStr);
-      if (isNaN(val) || val < 0 || val > 1) {
-        console.error(`Invalid chaos-malformed: ${malformedStr} (must be 0-1)`);
-        process.exit(1);
-      }
-      chaos.malformedRate = val;
-    }
-    if (disconnectStr !== undefined) {
-      const val = parseFloat(disconnectStr);
-      if (isNaN(val) || val < 0 || val > 1) {
-        console.error(`Invalid chaos-disconnect: ${disconnectStr} (must be 0-1)`);
-        process.exit(1);
-      }
-      chaos.disconnectRate = val;
+      chaos[field] = val;
     }
   }
 }

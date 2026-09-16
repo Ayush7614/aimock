@@ -24,7 +24,7 @@ import {
 import { matchFixtureDiagnostic } from "./router.js";
 import { writeErrorResponse } from "./sse-writer.js";
 import type { Journal } from "./journal.js";
-import { applyChaos } from "./chaos.js";
+import { applyChaosAsync } from "./chaos.js";
 import { resolveProgression } from "./fal.js";
 import {
   buildFixtureMatch,
@@ -405,7 +405,7 @@ export async function handleOpenRouterVideoStatus(
   // "internal" even in record mode, and a chaos-dropped poll never reaches
   // the upstream.
   if (
-    applyChaos(
+    await applyChaosAsync(
       res,
       null,
       defaults.chaos,
@@ -562,7 +562,7 @@ export async function handleOpenRouterVideoContent(
   const method = req.method ?? "GET";
 
   if (
-    applyChaos(
+    await applyChaosAsync(
       res,
       null,
       defaults.chaos,
@@ -1190,7 +1190,7 @@ export async function handleOpenRouterVideoModels(
   const method = req.method ?? "GET";
 
   if (
-    applyChaos(
+    await applyChaosAsync(
       res,
       null,
       defaults.chaos,
@@ -1481,7 +1481,7 @@ export async function handleOpenRouterVideoCreate(
   // upstream contact. The roll is still LABELED "proxy" below because that
   // is what the request would have been had chaos not fired.
   if (
-    applyChaos(
+    await applyChaosAsync(
       res,
       fixture,
       defaults.chaos,
