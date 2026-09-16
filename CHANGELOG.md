@@ -9,11 +9,14 @@
 - OpenAI Files API mock — byte-exact uploads, create-purpose enum, CORS on faults (#445)
 - Mock OpenAI fine-tuning jobs — deterministic lifecycle, events, cursor pages (#447)
 - `X-Request-Id` echoed or minted on every response; `?requestId=` filters the journal (#450)
+- `aimock validate` lints fixture files or directories offline, failing on broken files (#453)
 - **ElevenLabs Voice Design record/replay** — `POST /v1/text-to-voice/design` matches fixtures on `voice_description` (via `onElevenLabsVoiceDesign`), `POST /v1/text-to-voice` saves a preview as a permanent voice with a deterministic `voice_id`, and `GET`/`DELETE /v1/voices/{voice_id}` cover slot management (delete is idempotent). Unmatched design/save calls proxy under the existing `elevenlabs` provider key. Preview fixtures embed `audio_base_64` and are larger than JSON-only tapes (#452)
 - ElevenLabs Voice Design: wire-fact provenance block and strict-mode 503 coverage (#454)
 
 ### Changed
 
+- `aimock -h` is `--help`, matching `aimock convert -h` and `aimock validate -h`; the host override is `--host` only. The `llmock` bin (the Docker entrypoint) keeps its own `-h, --host` (#453)
+- `aimock --config ""`, `--port ""` and `--host ""` are usage errors naming the option, instead of being read as "not given" (#453)
 - Realtime `OpenAI-Beta: realtime=v1` now returns the real sunset rejection, not a session (#461)
 - `POST /v1/images/variations` now replays the real removal 404; OpenAI deleted it (#462)
 - `ChaosAction` gains `"rateLimit"` — an exhaustive switch over it needs a case (#449)
