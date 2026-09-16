@@ -86,7 +86,13 @@ export {
   handleFineTuningEvents,
   clearFineTuningStore,
 } from "./fine-tuning.js";
-export type { FineTuningJob } from "./fine-tuning.js";
+export type {
+  FineTuningJob,
+  FineTuningJobError,
+  FineTuningJobEvent,
+  FineTuningJobHyperparameters,
+  FineTuningJobStatus,
+} from "./fine-tuning.js";
 export type { ServiceFixtures } from "./server.js";
 
 // WebSocket
