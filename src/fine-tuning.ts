@@ -100,7 +100,7 @@
 
 import type * as http from "node:http";
 import { flattenHeaders, generateId, isJsonObject } from "./helpers.js";
-import { applyChaosAsync } from "./chaos.js";
+import { applyChaosAsync, type ChaosAsyncOutcome } from "./chaos.js";
 import type { ChaosDefaults, JournalBody } from "./types.js";
 import type { Journal } from "./journal.js";
 import type { Logger } from "./logger.js";
@@ -360,7 +360,7 @@ async function chaosHit(
   path: string,
   res: http.ServerResponse,
   setCorsHeaders: (res: http.ServerResponse) => void,
-): Promise<boolean> {
+): Promise<ChaosAsyncOutcome> {
   setCorsHeaders(res);
   return await applyChaosAsync(
     res,
