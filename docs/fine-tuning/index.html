@@ -276,41 +276,47 @@ cancel   -> cancelled   (any non-terminal job, with a finished_at stamp;
           <code>1</code> to <code>100</code>, <code>after</code> resumes from an id, and
           <code>has_more</code> reports whether anything was left behind rather than being a
           constant. That is what the OpenAI SDK's <code>CursorPage</code> reads when you iterate
-          results. Anything else, including the spellings <code>Number()</code> would quietly
-          reinterpret at some other value (<code>0x10</code>, <code>1e2</code>,
-          <code>%2B5</code> &mdash; a literal <code>+</code> must be percent-encoded, since a bare
-          <code>+</code> in a query decodes to a space &mdash; <code>20.0</code>, a
-          whitespace-padded <code>" 20 "</code>), is rejected with <code>400</code> quoting what you
-          sent, as is an <code>after</code> that matches no item &mdash; a stale cursor that quietly
-          returned page one would make <code>CursorPage</code> iterate forever. Sending
-          <code>limit</code> or <code>after</code> more than once on one request is also a
-          <code>400</code>, naming the parameter and the number of times it appeared: the spec types
-          each as a single scalar and gives no combining rule, so taking the first would launder the
-          rest.
+          results. Any other spelling is rejected with <code>400</code> quoting the raw query text
+          you sent, and that includes every spelling <code>Number()</code> would have accepted,
+          whether it would have landed on a different integer (<code>0x10</code> as 16,
+          <code>1e2</code> as 100) or on the very one you meant (<code>%2B5</code>,
+          <code>20.0</code>, a percent-encoded whitespace-padded <code>%2020%20</code>). A literal
+          <code>+</code> must be percent-encoded, since a bare <code>+</code> in a query decodes to
+          a space. An <code>after</code> that matches no item is rejected the same way &mdash; a
+          stale cursor that quietly returned page one would make <code>CursorPage</code> iterate
+          forever. Sending <code>limit</code> or <code>after</code> more than once on one request is
+          also a <code>400</code>, naming the parameter and the number of times it appeared: the
+          spec types each as a single scalar and gives no combining rule, so taking the first would
+          launder the rest.
         </p>
         <p>
           Only the <code>20</code> default is the vendor&rsquo;s: <code>openai-openapi</code> v2.3.0
           types <code>limit</code> as an integer defaulting to <code>20</code> on both endpoints.
           The upper bound of <code>100</code>, the refusal of non-decimal spellings of an in-range
           integer, the <code>400</code> on an <code>after</code> that matches nothing, the
-          <code>400</code> on a repeated <code>limit</code> or <code>after</code>, the newest-first
-          order, and the rejection of <code>validation_file: ""</code> are this mock&rsquo;s own
-          choices: the same spec declares no maximum, says nothing about a cursor that misses or a
-          repeated parameter, accepts no <code>order</code> parameter on either endpoint, and sets
-          no <code>minLength</code> on a file id. So are three rejections on the create body &mdash;
-          an unrecognized top-level parameter, an unrecognized member of
-          <code>hyperparameters</code> or of a <code>method</code> variant, and an
-          <code>integrations</code> list longer than the five the job schema declares &mdash;
-          because the spec marks none of those objects <code>additionalProperties: false</code>, and
-          a mock that answered <code>200</code>
-          having dropped what you wrote would let the bug through to the real API. The
-          <code>hyperparameters</code> ranges below are the vendor&rsquo;s, quoted from that spec.
+          <code>400</code> on a repeated <code>limit</code> or <code>after</code> and the
+          newest-first order are this mock&rsquo;s own choices: the same spec declares no maximum,
+          says nothing about a cursor that misses or a repeated parameter, and accepts no
+          <code>order</code> parameter on either endpoint. So are the create-body rejections that
+          refuse what the spec merely fails to forbid: an unrecognized top-level parameter; an
+          unrecognized member of <code>hyperparameters</code>, of <code>method</code>, of a
+          <code>method</code> variant, of an <code>integrations</code> entry or of its
+          <code>wandb</code> object; an <code>integrations</code> list longer than the five the job
+          schema declares; a configuration for a <code>method</code> type other than the one in
+          <code>method.type</code>; and the empty string as a file id, on
+          <code>training_file</code> as on <code>validation_file</code>. The spec marks none of
+          those objects <code>additionalProperties: false</code>, sets no <code>minLength</code> on
+          a file id and says nothing about a stray variant, and a mock that answered
+          <code>200</code> having dropped what you wrote would let the bug through to the real API.
+          Every other rejection in the list below enforces a bound the spec itself declares, and the
+          <code>hyperparameters</code> ranges are the vendor&rsquo;s, quoted from that spec.
         </p>
         <div class="code-block">
           <div class="code-block-header">Paging a job list <span class="lang-tag">ts</span></div>
           <pre><code><span class="cm">// The store is process-wide, so a job any earlier test left behind would be</span>
 <span class="cm">// on this page too. Reset first, then create exactly the two jobs counted below.</span>
-<span class="kw">await</span> <span class="op">mock</span>.<span class="fn">reset</span>();
+<span class="cm">// reset() is synchronous and returns the instance; there is nothing to await.</span>
+<span class="op">mock</span>.<span class="fn">reset</span>();
 <span class="kw">await</span> <span class="op">openai</span>.<span class="prop">fineTuning</span>.<span class="prop">jobs</span>.<span class="fn">create</span>({ <span class="prop">training_file</span>: <span class="str">"file-train"</span>, <span class="prop">model</span>: <span class="str">"gpt-4o-mini"</span> });
 <span class="kw">await</span> <span class="op">openai</span>.<span class="prop">fineTuning</span>.<span class="prop">jobs</span>.<span class="fn">create</span>({ <span class="prop">training_file</span>: <span class="str">"file-train-2"</span>, <span class="prop">model</span>: <span class="str">"gpt-4o-mini"</span> });
 
@@ -365,11 +371,19 @@ cancel   -> cancelled   (any non-terminal job, with a finished_at stamp;
           </li>
           <li>
             A <code>suffix</code> that is not a string of 1&ndash;64 code points is rejected with
-            <code>400</code>; <code>null</code> means &ldquo;none&rdquo;. A
-            <code>seed</code> outside <code>0</code>&ndash;<code>2147483647</code>,
+            <code>400</code>; <code>null</code> means &ldquo;none&rdquo;. A <code>seed</code> that
+            is not an integer in <code>0</code>&ndash;<code>2147483647</code> and
             <code>metadata</code> outside the 16-pair / 64-code-point-key / 512-code-point-value
-            bounds, and an <code>integrations</code> list of more than five entries or missing
-            <code>wandb.project</code> are each rejected the same way
+            bounds are rejected the same way
+          </li>
+          <li>
+            <code>integrations</code> is checked entry by entry: a list of more than five entries,
+            an entry member other than <code>type</code> and <code>wandb</code>, a
+            <code>wandb</code> member other than <code>project</code>, <code>name</code>,
+            <code>entity</code> and <code>tags</code>, and a <code>project</code> that is missing or
+            not a non-empty string are each a <code>400</code>. The five-entry cap and the two
+            unknown-member rejections are this mock&rsquo;s own; the rest is the shape the spec
+            requires
           </li>
           <li>
             On either list endpoint, a <code>limit</code> that is not plain decimal digits naming an
@@ -419,8 +433,19 @@ cancel   -> cancelled   (any non-terminal job, with a finished_at stamp;
           body, whether it went on to succeed or to be rejected, on any of the rejections above.
           Three kinds of entry record <code>body: null</code>: the <code>GET</code> and cancel
           routes, a create whose body was not a JSON object at all, and any request the chaos gate
-          faulted, because the gate rolls before the body is read. The cancel route takes no
-          payload, but it is not bodyless: it reads and discards whatever you send, so that
+          faulted. The gate does not roll before the body is read. On create and cancel the server
+          reads the body first, then hands off to the handler, whose first act is the chaos roll,
+          and only a create that survives the roll goes on to parse what was read; a faulted
+          request&rsquo;s entry is written by the gate itself with a fixed <code>body: null</code>,
+          so a create carrying a perfectly good JSON body still journals <code>null</code> when
+          chaos fires, and its <code>response</code> names the <code>chaosAction</code> that did. A
+          cancel journals its outcome as <code>response.status</code> alone &mdash;
+          <code>200</code> when the job moved to <code>cancelled</code>, <code>404</code> for an
+          unknown id, <code>400</code> for a job already terminal &mdash; with
+          <code>body: null</code> and no reason field of any kind; the human-readable reason,
+          <code>Job cancelled by user</code>, is the event the cancel appends to the job&rsquo;s own
+          log and is read back from <code>/events</code>, not from the journal. The cancel route
+          takes no payload, but it is not bodyless: it reads and discards whatever you send, so that
           <code>readBody</code>'s 10 MB ceiling applies to it as it does to create. Those two are
           also the only requests that are not journaled at all: a create or a cancel whose body
           could not be read in the first place — past the body-size cap, or a broken socket — is

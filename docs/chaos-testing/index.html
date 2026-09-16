@@ -51,8 +51,8 @@
         <h1>Chaos Testing</h1>
         <p class="lead">
           aimock provides probabilistic failure injection to test how your application handles
-          unreliable LLM APIs. Three failure modes can be configured at the server, fixture, or
-          per-request level.
+          unreliable LLM APIs. Four probabilistic failure modes and one deterministic delay can be
+          configured at the server, fixture, or per-request level.
         </p>
 
         <h2>Failure Modes</h2>
@@ -85,12 +85,31 @@
               </td>
             </tr>
             <tr>
+              <td><code>rateLimit</code></td>
+              <td>HTTP 429</td>
+              <td>
+                Returns a 429 with
+                <code
+                  >{"error":{"message":"Chaos: rate limit
+                  exceeded","type":"rate_limit_error","code":"chaos_ratelimit"}}</code
+                >
+                plus <code>Retry-After: 1</code> and the static OpenAI-style
+                <code>x-ratelimit-*</code> headers every aimock 429 carries
+              </td>
+            </tr>
+            <tr>
               <td><code>disconnect</code></td>
               <td>Connection destroyed</td>
               <td>Destroys the TCP connection immediately with no response</td>
             </tr>
           </tbody>
         </table>
+        <p>
+          The four modes are rolled from rates. A fifth field, <code>latencyMs</code>, is not a mode
+          and is not rolled: when set it always fires, delaying the request by that many
+          milliseconds <em>before</em> the four rates are drawn, so the delay applies to a request
+          whether or not a fault then fires.
+        </p>
 
         <h2>Precedence</h2>
         <p>
@@ -160,7 +179,9 @@
 <span class="op">mock</span>.<span class="fn">setChaos</span>({
   <span class="prop">dropRate</span>: <span class="num">0.1</span>,        <span class="cm">// 10% drop rate</span>
   <span class="prop">malformedRate</span>: <span class="num">0.05</span>,  <span class="cm">// 5% malformed rate</span>
+  <span class="prop">rateLimitRate</span>: <span class="num">0.05</span>,  <span class="cm">// 5% rate-limit (429) rate</span>
   <span class="prop">disconnectRate</span>: <span class="num">0.02</span>, <span class="cm">// 2% disconnect rate</span>
+  <span class="prop">latencyMs</span>: <span class="num">250</span>,       <span class="cm">// always delay 250 ms first</span>
 });
 
 <span class="cm">// Remove all server-level chaos</span>
@@ -261,18 +282,24 @@
         </div>
 
         <h2>CLI Flags</h2>
-        <p>Set server-level chaos from the command line:</p>
+        <p>
+          Set server-level chaos from the command line. The <code>--chaos-*</code> flags belong to
+          the <code>llmock</code> binary (the fixtures-and-flags CLI), which is also what the Docker
+          image runs.
+        </p>
 
         <div class="cli-docker-tabs">
           <div class="tab-cli">
             <div class="code-block">
               <div class="code-block-header">
-                CLI chaos flags <span class="lang-tag">shell</span>
+                llmock chaos flags <span class="lang-tag">shell</span>
               </div>
-              <pre><code>$ npx -p @copilotkit/aimock aimock --fixtures ./fixtures \
+              <pre><code>$ npx -p @copilotkit/aimock llmock --fixtures ./fixtures \
   --chaos-drop 0.1 \
   --chaos-malformed 0.05 \
-  --chaos-disconnect 0.02</code></pre>
+  --chaos-ratelimit 0.05 \
+  --chaos-disconnect 0.02 \
+  --chaos-latency 250</code></pre>
             </div>
           </div>
           <div class="tab-docker">
@@ -286,10 +313,21 @@
   -f /fixtures -h 0.0.0.0 \
   --chaos-drop 0.1 \
   --chaos-malformed 0.05 \
-  --chaos-disconnect 0.02</code></pre>
+  --chaos-ratelimit 0.05 \
+  --chaos-disconnect 0.02 \
+  --chaos-latency 250</code></pre>
             </div>
           </div>
         </div>
+
+        <p>
+          The <code>aimock</code> binary takes no chaos flags &mdash; its options are
+          <code>--config</code>, <code>--port</code>, <code>--host</code> and
+          <code>-h, --help</code>. With <code>aimock --config</code>, set the server-level chaos
+          under <code>llm.chaos</code> in the config file (the same five fields, the same bounds),
+          or install it at runtime with <code>POST /__aimock/chaos</code> (see the
+          <a href="/control-api">Control API</a>).
+        </p>
 
         <h2>Proxy Mode</h2>
         <p>
@@ -312,6 +350,11 @@
               <td><code>drop</code></td>
               <td>Never &mdash; upstream not contacted</td>
               <td>HTTP 500 chaos body; upstream is not called</td>
+            </tr>
+            <tr>
+              <td><code>rateLimit</code></td>
+              <td>Never &mdash; upstream not contacted</td>
+              <td>HTTP 429 chaos body; upstream is not called</td>
             </tr>
             <tr>
               <td><code>disconnect</code></td>
@@ -362,9 +405,11 @@
 }</code></pre>
         </div>
         <p>
-          The <code>chaosAction</code> values are <code>"drop"</code>, <code>"malformed"</code>, or
-          <code>"disconnect"</code>. The status codes are 500 for drop, 200 for malformed, and 0 for
-          disconnect (connection destroyed).
+          The <code>chaosAction</code> values are <code>"drop"</code>, <code>"malformed"</code>,
+          <code>"rateLimit"</code> and <code>"disconnect"</code>. The recorded status codes are 500
+          for drop, 200 for malformed, 429 for rateLimit, and 0 for disconnect (connection
+          destroyed). A latency delay alone leaves no <code>chaosAction</code>: the entry is the
+          ordinary one for whatever the request then received.
         </p>
 
         <h2>Prometheus Metrics</h2>
