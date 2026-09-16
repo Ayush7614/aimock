@@ -51,6 +51,7 @@
         { label: "Web Search", href: "/search" },
         { label: "Rerank", href: "/rerank" },
         { label: "Moderation", href: "/moderation" },
+        { label: "Files API", href: "/files" },
         { label: "Structured Output", href: "/structured-output" },
         { label: "Sequential Responses", href: "/sequential-responses" },
         { label: "Multi-Turn Conversations", href: "/multi-turn" },
