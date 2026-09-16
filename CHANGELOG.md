@@ -9,9 +9,12 @@
 - OpenAI Files API mock — byte-exact uploads, create-purpose enum, CORS on faults (#445)
 - Mock OpenAI fine-tuning jobs — deterministic lifecycle, events, cursor pages (#447)
 - `X-Request-Id` echoed or minted on every response; `?requestId=` filters the journal (#450)
+- `aimock validate` lints fixture files or directories offline, failing on broken files (#453)
 
 ### Changed
 
+- `aimock -h` is `--help`, matching `aimock convert -h` and `aimock validate -h`; the host override is `--host` only. The `llmock` bin (the Docker entrypoint) keeps its own `-h, --host` (#453)
+- `aimock --config ""`, `--port ""` and `--host ""` are usage errors naming the option, instead of being read as "not given" (#453)
 - Realtime `OpenAI-Beta: realtime=v1` now returns the real sunset rejection, not a session (#461)
 - `POST /v1/images/variations` now replays the real removal 404; OpenAI deleted it (#462)
 - `ChaosAction` gains `"rateLimit"` — an exhaustive switch over it needs a case (#449)

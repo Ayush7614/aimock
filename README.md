@@ -134,11 +134,87 @@ npx -p @copilotkit/aimock llmock -p 4010 -f ./fixtures --replay-speed 2
 npx @copilotkit/aimock convert vidaimock ./templates/ ./fixtures/
 npx @copilotkit/aimock convert mockllm ./config.yaml ./fixtures/
 
+# Validate fixtures offline (file or directory, recursive)
+npx @copilotkit/aimock validate ./fixtures/
+npx @copilotkit/aimock validate --strict --json ./fixtures/openai.json
+
 # Docker
 docker run -d -p 4010:4010 -v "$(pwd)/fixtures:/fixtures" ghcr.io/copilotkit/aimock -f /fixtures -h 0.0.0.0
 ```
 
-> **Note on `llmock` vs `aimock` CLIs.** The `llmock` bin is retained as a compat alias for users of the pre-1.7.0 `@copilotkit/llmock` package. It runs a narrower flag-driven CLI without `--config` or the `convert` subcommand. New projects should use `aimock` (or `npx @copilotkit/aimock`) for full feature support.
+> **Note on `llmock` vs `aimock` CLIs.** The `llmock` bin is retained as a compat alias for users of the pre-1.7.0 `@copilotkit/llmock` package. It runs a narrower flag-driven CLI without `--config` or the `convert` and `validate` subcommands. New projects should use `aimock` (or `npx @copilotkit/aimock`) for full feature support.
+
+### Offline fixture validation
+
+`aimock validate [--strict] [--json] [--] <path> [more paths ...]` lints fixtures without starting a server. Each path is a fixture file or a directory of them (walked recursively for `*.json`, like `--fixtures <dir>`). `--strict` treats warnings as errors; `--json` emits a machine-readable report for CI; `--` stops option parsing so a path beginning with `-` is still reachable. A path given twice is validated twice, because the server loads one set of fixtures per `--fixtures` it is given; the duplicate fixtures that produces are reported as the server reports them, one finding per fixture and rule. Such a path is printed as `<path>[<n>]`, numbering its mentions from 1, so each load — and every cross-file reference to its fixtures — names one of them. `--json` carries that number as `mention` on every file, whether or not the path repeats.
+
+Files are checked one at a time and then again as one combined set in load order, so the rules that span files — a `userMessage` duplicated across two files, an empty catch-all `match` that is last in its own file but not last overall — fire here as they do on the server. Cross-file findings are prefixed `cross-file:`, attributed to the file owning the fixture, and name the other file. One the per-file pass already made against the same fixture never prints a second line: naming the same fixtures it is dropped, and naming others — a shadow that reaches into another load — it replaces the per-file wording in place, at the same position.
+
+Against the server's `--validate-on-load` it is stricter in one direction and weaker in another. **Stricter:** there an unreadable, unparseable, or wrong-shape file only warns on stderr and contributes zero fixtures, and startup continues as long as the run loaded at least one fixture from somewhere, whereas `validate` fails the run on every such file. The one exception, which matches the loader: a `*.json` file found by **walking** a directory and having no top-level `"fixtures"` key at all is not a fixture file (an aimock config, say), so it is passed over with a `skipped (...)` line instead of failing the run — a file you name on the command line is still validated, and still fails on the wrong shape. Two walk hazards the server does not survive are refused outright rather than mirrored: a `*.json` path that is not a regular file (a FIFO, a socket, a device) is a per-file error here, where the server's `readFileSync` blocks on it forever; and a directory symlink pointing back at a directory already being walked is reported once as a cycle, where the server recurses through it until the kernel returns `ELOOP` and loads those levels' fixtures over and over. **Equal:** the fixture rules themselves, and the zero-fixture rule — a run whose inputs yield no fixtures at all is an error, matching the server's startup abort, while a single `{"fixtures": []}` file alongside files that do load fixtures is fine in both. Equal too in what the inputs expand to: a path named twice, and a directory reached both directly and through an acyclic symlink to it, are validated once per mention, exactly as the server loads one `--fixtures` source per mention, and each fixture-and-rule pair is reported once — the count the server logs. **Weaker:** it is a static lint that starts no server and reads local paths only, so it says nothing about binding, remote `--fixtures <url>` sources, `--watch` reloads, or any runtime behaviour. An `http://` or `https://` path is refused by name — `Remote fixture source: this lint reads local paths only (the server's --fixtures accepts a URL; validate does not) — download the file and validate the local copy` — rather than reported as a missing file.
+
+Anything the filesystem or a fixture entry can throw is contained in the report instead of crashing the run: a malformed entry, an unreadable file or directory, a stat failure, or a symlink cycle each becomes a per-file `[error]` line and exits 1. One stat failure is deliberately silent: a directory entry that vanishes between the `readdir` and the `stat` (`ENOENT` — a dangling symlink, or a file deleted mid-walk) is skipped without a finding, exactly as the server's loader skips it; every other stat failure is surfaced. A directory argument that walks cleanly but holds no `*.json` files is likewise a per-path `[error]` and exits 1. A crash inside the validator itself is contained too: a per-file one becomes a file-level `[error]` naming no entry, and one in the combined pass becomes a run-level `[error]` printed after the per-file output.
+
+Errors go to stderr while `OK` and summary lines go to stdout; warnings follow the exit they produce — stdout by default, stderr under `--strict`. Every file gets exactly one stdout line — including a file that failed fatally, and a file the walk skipped (`<file>: skipped (...)`) — so a reader tallying stdout never loses a file. `OK` is withheld in one case: on a run that failed because it loaded no fixtures at all, the file that loaded none reads `<file>: 0 fixture(s), loaded nothing — see the run-level error`. With `--json`, stdout carries the report alone and the one-line failure reason goes to stderr; a usage error is reported the same way, as a document with `files: []` and the reason in `run.errors`. Exit codes: `0` clean; `1` everything else — validation errors, a malformed fixture entry, unreadable/unparseable files, a NAMED path of the wrong shape (a walked one is skipped instead), a remote `http(s)://` path, a stat failure or symlink cycle while walking a directory, a `*.json` path that is not a regular file, a directory holding no `*.json` files, no fixtures loaded at all, `--strict` warnings, or a usage error (no paths given, or an unknown option). There is no exit code 2; every other CLI in this package reports a usage error as 1 too.
+
+`--json` emits one document on stdout, and only that document — a usage error included. Validating a directory holding a file with invalid JSON and a file with one bad entry and a duplicate `userMessage`:
+
+```json
+{
+  "strict": false,
+  "failed": true,
+  "files": [
+    {
+      "file": "fixtures/badjson.json",
+      "mention": 1,
+      "fixtures": 0,
+      "errors": [
+        {
+          "message": "Invalid JSON: Expected property name or '}' in JSON at position 1 (line 1 column 2)"
+        }
+      ],
+      "warnings": [],
+      "fatal": "Invalid JSON: Expected property name or '}' in JSON at position 1 (line 1 column 2)"
+    },
+    {
+      "file": "fixtures/mixed.json",
+      "mention": 1,
+      "fixtures": 2,
+      "errors": [
+        {
+          "index": 0,
+          "message": "Invalid fixture entry #0: missing or non-object \"match\" and \"response\" — every entry needs { \"match\": { ... }, \"response\": { ... } }"
+        }
+      ],
+      "warnings": [
+        {
+          "index": 2,
+          "message": "duplicate userMessage 'hi' — shadows fixture 1"
+        }
+      ]
+    }
+  ],
+  "run": {
+    "fixtures": 2,
+    "errors": []
+  }
+}
+```
+
+A usage error carries the reason in `run.errors` (`aimock validate --json`, exit 1):
+
+```json
+{
+  "strict": false,
+  "failed": true,
+  "files": [],
+  "run": {
+    "fixtures": 0,
+    "errors": ["no fixture paths given."]
+  }
+}
+```
+
+`failed` is the boolean the exit code follows, and `strict` echoes the flag it was computed under. `files` has one entry per path the run touched, in argv/walk order: `mention` is which load of that path this is (1-based, always present); `fixtures` is how many entries converted; `skipped` (present only when set) is why a walked non-fixture file was passed over; `fatal` (present only when set) is the reason the file produced no report at all, and that same reason also appears in `errors`, so a tally of `files[].errors` matches the error count on the file's stdout line; and `errors`/`warnings` hold findings. A finding always has `message`; `index` is the entry it belongs to and is **absent** on a file-level finding; `detail` carries the raw thrown text when `message` is a rephrasing of it. `run` covers the combined pass: `fixtures` is the total fixture count across every file, and `errors` holds run-level strings such as `"Cross-file validation failed: ..."`, the `"No fixtures loaded from any input"` line, or the reason a usage error failed.
 
 ### Remote fixture URLs
 
@@ -148,7 +224,7 @@ Private and link-local addresses (loopback, RFC1918, CGNAT, cloud metadata, ULA,
 
 ### Replay matching & `AIMOCK_STRICT_TURN_INDEX`
 
-On replay, `turnIndex` is a non-fatal disambiguator, not a hard reject gate: a content-matching fixture is served even when its scripted `turnIndex` differs from the request's assistant-message count. This kills false "no fixture matched" misses for multi-bubble agent runs (multi-step agents emit several assistant bubbles per logical turn). When a served fixture diverges from its scripted `turnIndex`, the match diagnostic carries `turnIndexRelaxed: true` and aimock logs a one-shot warning (at the `warn` log level — silent by default). To restore the legacy strict behavior where a defined `turnIndex` must equal the assistant count exactly, set `AIMOCK_STRICT_TURN_INDEX=1`. The record path is always strict regardless of this flag.
+On replay, `turnIndex` is a non-fatal disambiguator, not a hard reject gate: a content-matching fixture is served even when its scripted `turnIndex` differs from the request's assistant-message count. This kills false "no fixture matched" misses for multi-bubble agent runs (multi-step agents emit several assistant bubbles per logical turn). When a served fixture diverges from its scripted `turnIndex`, the match diagnostic carries `turnIndexRelaxed: true` and aimock logs a one-shot warning (at the `warn` log level, so it is silent under the programmatic default, which is `silent`, and printed by the `llmock` CLI, which defaults `--log-level` to `info`). To restore the legacy strict behavior where a defined `turnIndex` must equal the assistant count exactly, set `AIMOCK_STRICT_TURN_INDEX=1`. The record path is always strict regardless of this flag.
 
 ## API-key validation
 
