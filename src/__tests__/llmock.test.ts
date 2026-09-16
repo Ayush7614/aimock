@@ -4,9 +4,27 @@ import { resolve, join } from "node:path";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { LLMock } from "../llmock.js";
-import { Journal } from "../journal.js";
+import { Journal, isChatCompletionBody } from "../journal.js";
+import type { ChatCompletionRequest, JournalEntry } from "../types.js";
 
 // ---- Helpers ----
+
+/**
+ * The chat request a journal entry recorded.
+ *
+ * `JournalEntry.body` is a union — not every service journals a chat request —
+ * so reading `messages` off one needs a narrowing step. Throwing here names the
+ * problem ("this entry is not a chat request") at the point it exists, instead
+ * of letting a non-chat entry surface as an undefined property inside an
+ * expectation.
+ */
+function chatBodyOf(entry: JournalEntry | null | undefined): ChatCompletionRequest {
+  const body = entry?.body;
+  if (!isChatCompletionBody(body)) {
+    throw new Error(`journal entry has no chat-completion body: ${JSON.stringify(body)}`);
+  }
+  return body;
+}
 
 const FIXTURES_DIR = resolve(import.meta.dirname, "../../fixtures");
 
@@ -475,7 +493,7 @@ describe("LLMock", () => {
       expect(mock.journal.size).toBe(1);
       const entry = mock.journal.getLast();
       expect(entry).not.toBeNull();
-      expect(entry!.body!.messages[0].content).toBe("journal-test");
+      expect(chatBodyOf(entry).messages[0].content).toBe("journal-test");
     });
   });
 
@@ -960,7 +978,7 @@ describe("LLMock", () => {
 
       const last = mock.getLastRequest();
       expect(last).not.toBeNull();
-      expect(last!.body!.messages[0].content).toBe("b");
+      expect(chatBodyOf(last).messages[0].content).toBe("b");
     });
 
     it("getLastRequest returns null when no requests", async () => {
