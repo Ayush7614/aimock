@@ -6,6 +6,7 @@
 
 - Chaos `rateLimitRate` / `--chaos-ratelimit`: deterministic 429 with `Retry-After` (#449)
 - Chaos `latencyMs` / `--chaos-latency` now actually delays responses on every path (#449)
+- Mock OpenAI fine-tuning jobs — deterministic lifecycle, events, cursor pages (#447)
 
 ### Changed
 
