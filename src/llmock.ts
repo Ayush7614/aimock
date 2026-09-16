@@ -341,9 +341,9 @@ export class LLMock {
     // An injected error is only a valid response for endpoints that can carry
     // an error envelope. Mirror the router's endpoint-compat table
     // (matchFixtureDiagnostic in router.ts): error responses are compatible
-    // with chat / embedding / realtime* / fal and with requests that carry no
-    // endpoint type, but NOT with multimedia endpoints (image, speech, video,
-    // transcription, …). Gating consumption on this prevents an incompatible
+    // with chat / embedding / realtime* / fal / the four elevenlabs-voice*
+    // slots and with requests that carry no endpoint type, but NOT with
+    // multimedia endpoints (image, speech, video, transcription, …). Gating consumption on this prevents an incompatible
     // request from matching the predicate and splicing — and thereby
     // destroying — a one-shot error intended for a different endpoint before
     // the router's own compat check would have skipped it.
@@ -354,7 +354,11 @@ export class LLMock {
         reqEndpoint === "chat" ||
         reqEndpoint === "embedding" ||
         reqEndpoint.startsWith("realtime") ||
-        reqEndpoint === "fal"
+        reqEndpoint === "fal" ||
+        reqEndpoint === "elevenlabs-voice-design" ||
+        reqEndpoint === "elevenlabs-voice" ||
+        reqEndpoint === "elevenlabs-voice-get" ||
+        reqEndpoint === "elevenlabs-voice-delete"
       ) {
         return true;
       }
