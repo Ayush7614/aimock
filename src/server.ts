@@ -2764,9 +2764,37 @@ export async function createServerWithResolvedAuth(
     }
 
     // Batches API — cancel RE before id RE (the id RE would swallow /cancel).
+    // Cancel takes no payload — the `openai` SDK posts an empty body — but the
+    // body is still read, and discarded, before the handler runs. Reading it is
+    // what applies `readBody`'s 10 MB ceiling: a POST route that never touches
+    // the stream lets node quietly dump whatever the client sends, so this one
+    // route would accept an unbounded upload while the create route beside it
+    // (the sibling pattern followed here, down to the error arm) rejects the
+    // same bytes.
     const batchesCancelMatch = pathname.match(BATCHES_CANCEL_RE);
     if (batchesCancelMatch && req.method === "POST") {
-      await handleBatchesCancel(req, res, batchesCancelMatch[1], journal, defaults, setCorsHeaders);
+      try {
+        await readBody(req);
+        await handleBatchesCancel(
+          req,
+          res,
+          batchesCancelMatch[1],
+          journal,
+          defaults,
+          setCorsHeaders,
+        );
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : "Internal error";
+        if (!res.headersSent) {
+          writeErrorResponse(
+            res,
+            500,
+            JSON.stringify({ error: { message: msg, type: "server_error" } }),
+          );
+        } else if (!res.writableEnded) {
+          res.destroy();
+        }
+      }
       return;
     }
     const batchesIdMatch = pathname.match(BATCHES_ID_RE);

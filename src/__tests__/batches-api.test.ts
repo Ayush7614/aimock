@@ -206,3 +206,70 @@ describe("Batches API chaos gate", () => {
     expect(journal.every((e) => e.response.chaosAction === "rateLimit")).toBe(true);
   });
 });
+
+/**
+ * B4: `POST /v1/batches/{id}/cancel` reads (and discards) its body before the
+ * handler runs, so `readBody`'s 10 MB ceiling applies to it exactly as it does
+ * to the create route beside it. A route that never touches the stream lets
+ * node dump whatever the client sends and answers 200 to a 12 MB upload.
+ */
+describe("Batches cancel bounds its request body like create", () => {
+  let mock: LLMock;
+
+  beforeEach(async () => {
+    clearBatchStore();
+    mock = new LLMock({ port: 0 });
+    await mock.start();
+  });
+
+  afterEach(async () => {
+    await mock.stop();
+    clearBatchStore();
+  });
+
+  async function createBatch(): Promise<string> {
+    const created = (await (
+      await post(`${mock.url}/v1/batches`, {
+        input_file_id: "file-b4",
+        endpoint: "/v1/chat/completions",
+        completion_window: "24h",
+      })
+    ).json()) as { id: string };
+    return created.id;
+  }
+
+  it("rejects an over-cap cancel body the same way create does and leaves the batch untouched", async () => {
+    const id = await createBatch();
+    // readBody's ceiling is 10 MB; over it the request is destroyed, which
+    // surfaces to fetch as a transport failure rather than a status.
+    const overCap = Buffer.alloc(12 * 1024 * 1024, 0x78);
+    const overCapPost = (path: string): Promise<Response> =>
+      fetch(`${mock.url}${path}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: overCap,
+      });
+
+    await expect(overCapPost("/v1/batches")).rejects.toThrow();
+    await expect(overCapPost(`/v1/batches/${id}/cancel`)).rejects.toThrow();
+
+    const after = (await (await fetch(`${mock.url}/v1/batches/${id}`)).json()) as {
+      status: string;
+    };
+    expect(after.status).not.toBe("cancelled");
+  });
+
+  it("still cancels with an empty body and with a small JSON body", async () => {
+    const empty = await fetch(`${mock.url}/v1/batches/${await createBatch()}/cancel`, {
+      method: "POST",
+    });
+    expect(empty.status).toBe(200);
+    expect(((await empty.json()) as { status: string }).status).toBe("cancelled");
+
+    const small = await post(`${mock.url}/v1/batches/${await createBatch()}/cancel`, {
+      reason: "changed my mind",
+    });
+    expect(small.status).toBe(200);
+    expect(((await small.json()) as { status: string }).status).toBe("cancelled");
+  });
+});
