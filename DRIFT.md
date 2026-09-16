@@ -243,13 +243,16 @@ aimock's TEXT `serverContent` path is exercised mock-only by `ws-gemini-live.tes
 
 ## CI Schedule
 
-Drift tests run on a schedule:
+Two workflows run the drift suite. Neither runs on `push`.
 
-- **Daily**: 6:00 AM UTC
-- **Manual**: Trigger via GitHub Actions UI (`workflow_dispatch`)
-- **NOT** on PR or push — these tests hit real APIs and cost money
+`.github/workflows/test-drift.yml` (**Drift Tests**) triggers on a daily cron (`0 6 * * *`, 6:00 UTC), on `workflow_dispatch`, and on `pull_request` — but a PR only triggers it when the diff touches drift-grading code (`paths:` = `src/agui-types.ts`, `scripts/drift-*.ts`, `src/__tests__/drift/**`, `.github/workflows/*drift*`). Its jobs:
 
-See `.github/workflows/test-drift.yml`.
+- **`agui-schema-drift`** — runs on every trigger, including PRs. Clones the canonical `ag-ui` repo and runs `src/__tests__/drift/agui-*.drift.ts` (today `agui-schema.drift.ts`) against `src/agui-types.ts`. Needs no provider keys; **costs nothing**.
+- **`drift`** — schedule and `workflow_dispatch` only (`if: github.event_name != 'pull_request'`). Runs the full live collector (`scripts/drift-retry.ts`) against the real providers, plus a locally provisioned Ollama daemon. **Spends real API credits** on every run.
+- **`notify`** — schedule and `workflow_dispatch` only; Slack summary of the two jobs above. Free.
+- **`drift-live-pr`** — `pull_request` only (`if: github.event_name == 'pull_request'`). Runs the live collector on the PR head, and on the `main` base too unless a same-UTC-day scheduled `main` report can be reused — so **one or two full live runs per PR push**, real credits each. Fork PRs get no secrets, so their live legs skip (neutral) and a maintainer runs the delta by hand.
+
+`.github/workflows/fix-drift.yml` (**Fix Drift**) triggers on a daily cron (`10 6 * * *`, 6:10 UTC — offset from the 6:00 run) and on `workflow_dispatch`; its single `sync` job is gated to exactly those two events. It fetches each provider's live `/models` listing, and its clean-re-collect gate then runs the **full live collector** (every leg, Ollama daemon included), so it **also spends real API credits** once a day. See "Automated Drift Remediation" below.
 
 ## Automated Drift Remediation
 
@@ -284,4 +287,4 @@ family does not, by itself, fail the drift tests):
 
 ## Cost
 
-~31 API calls per run (20 HTTP response-shape + 3 model listing + 8 WS) using the cheapest available models (`gpt-4o-mini`, `gpt-realtime-2`, `claude-haiku-4-5-20251001`, `gemini-2.5-flash`) with 10-100 max tokens each. Under $0.25/week at daily cadence. The GA protocol probe adds a second Realtime WS connection (one GA, one Beta) per run. The 2 Gemini Live legs each open a real WS session and generate a short audio turn.
+A live collector run exercises every `liveCoverage: "live"` surface in `src/__tests__/drift/surface-registry.ts` (18 of the 28 registered surfaces at the time of writing; the other 10 are mock-only conformance checks that make no vendor call), using the cheapest available models (`gpt-4o-mini`, `gpt-realtime-mini`, `claude-haiku-4-5-20251001`, `gemini-2.5-flash`) with 10-100 max tokens each. Per day that is two scheduled live runs (`test-drift.yml`'s `drift` job and `fix-drift.yml`'s re-collect gate) plus one or two per push on a drift-code PR. The Realtime probe opens a single GA WS connection per run (the Beta shape is retired upstream). The 2 Gemini Live legs each open a real WS session and generate a short audio turn.
