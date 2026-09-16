@@ -18,22 +18,27 @@ Two-way comparison (mock vs real) can't distinguish between "we need to fix aimo
 ## Running Drift Tests
 
 ```bash
-# All providers (requires all three API keys)
+# Several providers (each key enables only its own legs)
 OPENAI_API_KEY=sk-... ANTHROPIC_API_KEY=sk-... GOOGLE_API_KEY=... pnpm test:drift
 
 # Single provider (others skip automatically)
 OPENAI_API_KEY=sk-... pnpm test:drift
-
-# Strict mode — warnings also fail
-STRICT_DRIFT=1 OPENAI_API_KEY=sk-... pnpm test:drift
 ```
 
-Required environment variables:
+Environment variables the drift legs read (each one gates only the legs listed; an unset variable skips those legs — reported as skipped, never as a failure):
 
-- `OPENAI_API_KEY` — OpenAI API key
-- `ANTHROPIC_API_KEY` — Anthropic API key
-- `GOOGLE_API_KEY` — Google AI API key
+- `OPENAI_API_KEY` — OpenAI Chat Completions, Responses, Embeddings, Transcription, Realtime WS and Responses WS legs, plus the OpenAI model check in `models.drift.ts`
+- `OPENAI_REALTIME_KEY` — optional; used instead of `OPENAI_API_KEY` for the Realtime WS session probes only
+- `ANTHROPIC_API_KEY` — Anthropic Claude Messages legs and capability canaries, plus the Anthropic model check
+- `GOOGLE_API_KEY` — Google Gemini, Gemini Embeddings canary, Gemini Interactions and Gemini Live WS legs, plus the Gemini model check
+- `COHERE_API_KEY` — Cohere Chat and Cohere Rerank legs
+- `OPENROUTER_API_KEY` — OpenRouter chat catalog and video model-family availability legs
+- `FAL_KEY` — fal.ai queue lifecycle canary
 - `ELEVENLABS_API_KEY` — ElevenLabs API key (the one live `/v1/sound-generation` case; every other ElevenLabs case is offline conformance and runs without it)
+- `ARK_API_KEY` — BytePlus Ark authenticated unknown-task canary (the keyless auth-envelope canary runs on every run without it)
+- `ARK_BASE_URL` — optional; regional BytePlus Ark base URL (default `https://ark.ap-southeast.bytepluses.com`)
+- `OLLAMA_HOST` — URL of a running Ollama daemon; gates the Ollama live leg
+- `OLLAMA_MODEL` — optional; model the Ollama leg requests (default `llama3.2`)
 
 Each provider's tests skip independently if its key is not set. You can run drift tests for just one provider.
 
@@ -55,7 +60,7 @@ Currently offline-only: `bedrock-invoke`, `bedrock-invoke-stream`, `bedrock-conv
 ### Severity levels
 
 - **critical** — Test fails. aimock produces a different shape than the real API for a field that both the SDK and real API agree on. This means aimock needs an update.
-- **warning** — Test passes (unless `STRICT_DRIFT=1`). The real API has a field that neither the SDK nor aimock knows about, or the SDK and real API disagree. Usually means a provider added something new.
+- **warning** — Test passes. The real API has a field that neither the SDK nor aimock knows about, or the SDK and real API disagree. Usually means a provider added something new.
 - **info** — Always passes. Known intentional differences (usage fields are always zero, optional fields aimock omits, etc.).
 
 ### Example report output
@@ -86,19 +91,7 @@ API DRIFT DETECTED: OpenAI Chat Completions (non-streaming text)
 
 When a `critical` drift is detected:
 
-1. **Identify the response builder** — the report path tells you which provider and field:
-   - OpenAI Chat Completions → `src/helpers.ts` (`buildTextCompletion`, `buildToolCallCompletion`, `buildTextChunks`, `buildToolCallChunks`)
-   - OpenAI Responses API → `src/responses.ts` (`buildTextResponse`, `buildToolCallResponse`, `buildTextStreamEvents`, `buildToolCallStreamEvents`)
-   - Anthropic Claude → `src/messages.ts` (`buildClaudeTextResponse`, `buildClaudeToolCallResponse`, `buildClaudeTextStreamEvents`, `buildClaudeToolCallStreamEvents`)
-   - Google Gemini → `src/gemini.ts` (`buildGeminiTextResponse`, `buildGeminiToolCallResponse`, `buildGeminiTextStreamChunks`, `buildGeminiToolCallStreamChunks`)
-   - Gemini embedContent → `src/gemini.ts` (embedContent response builder)
-   - Gemini Interactions → `src/gemini-interactions.ts` (`buildInteractionsTextResponse`, `buildInteractionsToolCallResponse`, `buildInteractionsTextSSEEvents`, `buildInteractionsToolCallSSEEvents`)
-   - OpenAI Image Edit → `src/images.ts` (multipart `/v1/images/edits` handler)
-   - OpenAI Audio Translation → `src/transcription.ts` (multipart `/v1/audio/translations` handler)
-   - Ollama Embeddings → `src/ollama.ts` (`/api/embed` + legacy `/api/embeddings` response builder)
-   - Cohere Embed → `src/cohere.ts` (`/v2/embed` response builder)
-   - ElevenLabs TTS → `src/elevenlabs-audio.ts` (`/v1/text-to-speech/{voice_id}` response builder)
-   - ElevenLabs Voice Design → `src/elevenlabs-voice.ts` (`/v1/text-to-voice/design`, `/v1/text-to-voice`, `GET /v1/voices/{id}`, `DELETE /v1/voices/{id}`)
+1. **Identify the response builder** — the report's `Surface:` line is a slug keyed in `SURFACE_REGISTRY` (`src/__tests__/drift/surface-registry.ts`); that entry's `builderFile` and `builderFunctions` name the file and functions to edit, and the report path tells you which field.
 
 2. **Update the builder** — add or modify the field to match the real API shape.
 
@@ -120,29 +113,34 @@ When a `critical` drift is detected:
 4. Create `src/__tests__/drift/<provider>.drift.ts` with 4 test scenarios
 5. Add model listing function to `providers.ts` and model check to `models.drift.ts`
 6. If the provider uses WebSocket, add protocol functions to `ws-providers.ts` and create `ws-<provider>.drift.ts`
-7. Update the allowlist in `schema.ts` if needed
+7. Register the surface in `SURFACE_REGISTRY` (`src/__tests__/drift/surface-registry.ts`) with `provider`, `builderFile`, `builderFunctions`, `typesFile` and a `liveCoverage` of `"live"` or `"none"` (`"none"` requires a `coverageNote`), and pass that slug as the third argument of every `formatDriftReport` call in the new leg — `formatDriftReport` throws on an unregistered slug, and `drift-collector.test.ts` fails on an emitted slug missing from the registry
+8. Update the allowlist in `schema.ts` if needed
 
-## WebSocket Drift Coverage
+## Additional Drift Coverage
 
-Alongside the 23 core drift tests (20 HTTP response-shape + 3 model deprecation), these endpoints are covered too:
+`surface-registry.ts` declares 28 surfaces: 18 `liveCoverage: "live"` and 10 `"none"`. Beyond the per-provider chat/completion cases, these endpoints are covered too:
 
 ### Additional Endpoint Drift Coverage
 
-| Endpoint                                 | Provider      | Type              | Status    |
-| ---------------------------------------- | ------------- | ----------------- | --------- |
-| POST /v1beta/models/{model}:embedContent | Gemini        | HTTP              | Covered   |
-| POST /v1/images/edits                    | OpenAI        | HTTP (multipart)  | Covered   |
-| POST /v1/audio/translations              | OpenAI        | HTTP (multipart)  | Covered   |
-| POST /v1/images/variations               | OpenAI        | HTTP (multipart)  | Excluded² |
-| POST /api/embed, /api/embeddings         | Ollama        | HTTP              | Covered   |
-| POST /v2/embed                           | Cohere        | HTTP              | Covered   |
-| POST /v1/text-to-speech/{voice_id}       | ElevenLabs    | HTTP              | None³     |
-| POST /v1/text-to-voice/design            | ElevenLabs    | HTTP              | Offline⁴  |
-| POST /v1/text-to-voice                   | ElevenLabs    | HTTP              | Offline⁴  |
-| GET /v1/voices/{id}                      | ElevenLabs    | HTTP              | None⁵     |
-| DELETE /v1/voices/{id}                   | ElevenLabs    | HTTP              | None⁵     |
-| stream_options.include_usage             | OpenAI        | Streaming feature | Covered   |
-| x-ratelimit-\* / Retry-After 429         | All providers | Response headers  | Covered   |
+| Endpoint                                 | Provider      | Type              | Status                |
+| ---------------------------------------- | ------------- | ----------------- | --------------------- |
+| POST /v1beta/models/{model}:embedContent | Gemini        | HTTP              | Covered (live canary) |
+| POST /v1/images/edits                    | OpenAI        | HTTP (multipart)  | None⁶                 |
+| POST /v1/audio/translations              | OpenAI        | HTTP (multipart)  | None⁶                 |
+| POST /v1/images/variations               | OpenAI        | HTTP (multipart)  | Excluded²             |
+| POST /api/embed, /api/embeddings         | Ollama        | HTTP              | None⁶                 |
+| POST /v2/embed                           | Cohere        | HTTP              | None⁶                 |
+| POST /v1/sound-generation                | ElevenLabs    | HTTP              | Covered               |
+| POST /v1/music                           | ElevenLabs    | HTTP              | Offline (mock only)   |
+| POST /v1/music/stream                    | ElevenLabs    | HTTP              | Offline (mock only)   |
+| POST /v1/music/plan                      | ElevenLabs    | HTTP              | Offline (mock only)   |
+| POST /v1/text-to-speech/{voice_id}       | ElevenLabs    | HTTP              | None³                 |
+| POST /v1/text-to-voice/design            | ElevenLabs    | HTTP              | Offline⁴              |
+| POST /v1/text-to-voice                   | ElevenLabs    | HTTP              | Offline⁴              |
+| GET /v1/voices/{id}                      | ElevenLabs    | HTTP              | None⁵                 |
+| DELETE /v1/voices/{id}                   | ElevenLabs    | HTTP              | None⁵                 |
+| stream_options.include_usage             | OpenAI        | Streaming feature | None⁶                 |
+| x-ratelimit-\* / Retry-After 429         | All providers | Response headers  | None⁶                 |
 
 ² **POST /v1/images/variations — excluded from drift, not covered by it.** The endpoint is REMOVED
 upstream. It only ever served `dall-e-2`, which OpenAI removed on 2026-05-12, and the path went with
@@ -161,8 +159,10 @@ exercised by the unit suite only. Adding a case belongs in `elevenlabs.drift.ts`
 
 ⁴ **Voice Design — offline conformance, NOT drift.** `elevenlabs-voice.drift.ts` drives only the
 local aimock server and grades it against shapes read off `@elevenlabs/elevenlabs-js@2.68.0`
-serialization types. No ElevenLabs key is reachable from this repo, so no successful response from
-either route has ever been observed here and nothing in the loop can see the vendor. The surface is
+serialization types. `test-drift.yml` and `fix-drift.yml` do hand `ELEVENLABS_API_KEY` to the drift
+run, but `elevenlabs-voice.drift.ts` never reads it and never contacts `api.elevenlabs.io`, so no
+successful response from either route has ever been observed here and nothing in the loop can see
+the vendor. The surface is
 declared `liveCoverage: "none"` and appears in `unverifiedSurfaces` on every run. A funded key plus
 one recorded design + create round-trip is what would move it to "Covered".
 
@@ -177,25 +177,37 @@ before a row can claim otherwise: the honest first step is an offline conformanc
 which moves these rows to `Offline⁴`; a funded key is what would move the whole surface to
 "Covered".
 
-WebSocket drift tests cover aimock's WS protocols (6 verified + 2 canary = 8 WS tests):
+⁶ **No drift case drives these.** No case in `src/__tests__/drift/` requests `/v1/images/edits`,
+`/v1/audio/translations`, `/api/embed`, `/api/embeddings` or `/v2/embed`, and none asserts on
+`x-ratelimit-*` or `Retry-After`. `stream_options.include_usage` appears only in
+`openrouter-chat.drift.ts`, a mock-only OpenRouter case, not an OpenAI one. All of these are pinned
+by the unit suite only.
+
+WebSocket drift tests cover aimock's WS protocols with 11 `it(` blocks across the three
+`ws-*.drift.ts` files: 6 live three-way comparisons (Responses WS text + tool call, Realtime GA
+text + tool call, Gemini Live audio + tool call), 1 live model canary (Realtime) and 4 offline unit
+cases (Gemini Live model resolution). See the table under "WebSocket Protocols" below.
 
 ### Gemini Interactions API (Beta)
 
-The Gemini Interactions API (`/v1beta/interactions`) is covered by 4 drift tests in `gemini-interactions.drift.ts`:
+The Gemini Interactions API (`/v1beta/interactions`) is covered by 5 drift tests in `gemini-interactions.drift.ts`:
 
 - Non-streaming text shape
+- Non-streaming text shape (`Step[]` input)
 - Streaming text event sequence
 - Non-streaming tool call shape
 - Streaming tool call event sequence
 
 Uses `describe.skipIf(!GOOGLE_API_KEY)` like other Gemini tests. The Interactions API is in Beta — shapes may shift as Google iterates on the endpoint.
 
-| Protocol               | Text | Tool Call | Real Endpoint                                                       | Status     |
-| ---------------------- | ---- | --------- | ------------------------------------------------------------------- | ---------- |
-| OpenAI Responses WS    | ✓    | ✓         | `wss://api.openai.com/v1/responses`                                 | Verified   |
-| OpenAI Realtime (GA)   | ✓    | ✓         | `wss://api.openai.com/v1/realtime`                                  | Verified   |
-| OpenAI Realtime (Beta) | —    | —         | `wss://api.openai.com/v1/realtime` + `OpenAI-Beta: realtime=v1`     | Excluded¹  |
-| Gemini Live            | —    | —         | `wss://generativelanguage.googleapis.com/ws/...BidiGenerateContent` | Unverified |
+### WebSocket Protocols
+
+| Protocol               | Text        | Tool Call | Real Endpoint                                                       | Status    |
+| ---------------------- | ----------- | --------- | ------------------------------------------------------------------- | --------- |
+| OpenAI Responses WS    | ✓           | ✓         | `wss://api.openai.com/v1/responses`                                 | Verified  |
+| OpenAI Realtime (GA)   | ✓           | ✓         | `wss://api.openai.com/v1/realtime`                                  | Verified  |
+| OpenAI Realtime (Beta) | —           | —         | `wss://api.openai.com/v1/realtime` + `OpenAI-Beta: realtime=v1`     | Excluded¹ |
+| Gemini Live            | — (AUDIO ✓) | ✓         | `wss://generativelanguage.googleapis.com/ws/...BidiGenerateContent` | Verified  |
 
 ¹ **OpenAI Realtime (Beta) — excluded from drift, not covered by it.** OpenAI removed the
 Beta shape: a live Beta handshake returns
@@ -207,11 +219,11 @@ answers the Beta shape — with that same sunset rejection, not a handshake — 
 [deprecation policy](https://aimock.copilotkit.dev/deprecation-policy/); it is pinned by
 `ws-realtime.test.ts` and `ws-api-conformance.test.ts`, not by drift.
 
-**Models**: `gpt-4o-mini` for Responses WS, `gpt-realtime-2` for Realtime GA (was `gpt-4o-mini-realtime-preview`).
+**Models**: `gpt-4o-mini` for Responses WS, `gpt-realtime-mini` for Realtime GA.
 
 **GA Realtime Drift Tests**:
 
-- **Model canary** — Verifies GA models exist (`gpt-realtime`, `gpt-realtime-2`, `gpt-realtime-1.5`, `gpt-realtime-mini` and dated snapshots) and flags unknown realtime models
+- **Model canary** — Verifies GA models exist (`gpt-realtime`, `gpt-realtime-2`, `gpt-realtime-2.1`, `gpt-realtime-2.1-mini`, `gpt-realtime-1.5`, `gpt-realtime-mini` and dated snapshots — `gaRealtimeModels` in `voice-models.ts`) and flags unknown realtime models
 - **Protocol probe** — Connects with the GA protocol only (the Beta shape is retired upstream) and grades the event sequence
 - **Event shape validation** — GA event names (`response.output_text.delta`, `conversation.item.added`, `conversation.item.done`) and nested session config (`session.audio.*`, `session.type`, `session.reasoning`)
 
@@ -223,21 +235,24 @@ answers the Beta shape — with that same sunset rejection, not a handshake — 
 
 aimock's Gemini Live handler implements the `BidiGenerateContent` protocol as documented in Google's [Live API reference](https://ai.google.dev/api/live) — `setup`/`setupComplete` handshake, `clientContent` with turns, `serverContent` with `modelTurn.parts[]`, and `toolCall` responses.
 
-A Live session carries exactly ONE response modality, and every model exposing `bidiGenerateContent` is a native-audio model that supports only `AUDIO` — Google's [capabilities guide](https://ai.google.dev/gemini-api/docs/live-api/capabilities) states the native audio models "only support `AUDIO` response modality". A session requesting `TEXT` is refused with an RFC 6455 CLOSE frame (`code=1007`, "The requested combination of response modalities (TEXT) is not supported by the model"), so `ws-gemini-live.drift.ts` drives `responseModalities: ["AUDIO"]` and grades the audio event sequence — `inlineData` parts plus `turnComplete` — along with the modality-independent `toolCall`. The mock side is driven by an audio fixture so both sides of the comparison see the same modality.
+A Live session carries exactly ONE response modality, and the native-audio models exposing `bidiGenerateContent` support only `AUDIO` — Google's [capabilities guide](https://ai.google.dev/gemini-api/docs/live-api/capabilities) states the native audio models "only support `AUDIO` response modality". `bidiGenerateContent` does not imply `AUDIO`, though: `gemini-3.5-transcribe-live` declares it and emits only `TEXT`, refusing `AUDIO` with the mirror-image 1007 close. On a native-audio model a session requesting `TEXT` is refused with an RFC 6455 CLOSE frame (`code=1007`, "The requested combination of response modalities (TEXT) is not supported by the model"), so `ws-gemini-live.drift.ts` drives `responseModalities: ["AUDIO"]` and grades the audio event sequence — `inlineData` parts plus `turnComplete` — along with the modality-independent `toolCall`. The mock side is driven by an audio fixture so both sides of the comparison see the same modality.
 
-Model selection keys ONLY on the listing's declared `bidiGenerateContent` support. It must never re-derive a capability from the model name: a `"native-audio"` name-substring filter previously mis-classified `gemini-3.1-flash-live-preview` — a native-audio model that omits that substring from its name — as text-capable, which is how the leg came to request an unsupported modality.
+Model selection keys ONLY on the listing's declared `bidiGenerateContent` support; since the listing cannot express response modality, `driveGeminiLiveAudio` walks the candidates in listing order and a 1007 modality refusal advances to the next one (all candidates refusing `AUDIO` is an honest skip, not drift). It must never re-derive a capability from the model name: `gemini-3.1-flash-live-preview` is a native-audio model whose name lacks any `"native-audio"` substring, so a name-based filter would classify it as text-capable and request an unsupported modality.
 
 aimock's TEXT `serverContent` path is exercised mock-only by `ws-gemini-live.test.ts`; it cannot be triangulated against a live endpoint while no Live model serves text. `ws-gemini-live-modality.test.ts` runs the whole three-way comparison locally against a fake provider that enforces Google's modality rule, so the mock side is verified without live credentials.
 
 ## CI Schedule
 
-Drift tests run on a schedule:
+Two workflows run the drift suite. Neither runs on `push`.
 
-- **Daily**: 6:00 AM UTC
-- **Manual**: Trigger via GitHub Actions UI (`workflow_dispatch`)
-- **NOT** on PR or push — these tests hit real APIs and cost money
+`.github/workflows/test-drift.yml` (**Drift Tests**) triggers on a daily cron (`0 6 * * *`, 6:00 UTC), on `workflow_dispatch`, and on `pull_request` — but a PR only triggers it when the diff touches drift-grading code (`paths:` = `src/agui-types.ts`, `scripts/drift-*.ts`, `src/__tests__/drift/**`, `.github/workflows/*drift*`). Its jobs:
 
-See `.github/workflows/test-drift.yml`.
+- **`agui-schema-drift`** — runs on every trigger, including PRs. Clones the canonical `ag-ui` repo and runs `src/__tests__/drift/agui-*.drift.ts` (today `agui-schema.drift.ts`) against `src/agui-types.ts`. Needs no provider keys; **costs nothing**.
+- **`drift`** — schedule and `workflow_dispatch` only (`if: github.event_name != 'pull_request'`). Runs the full live collector (`scripts/drift-retry.ts`) against the real providers, plus a locally provisioned Ollama daemon. **Spends real API credits** on every run.
+- **`notify`** — schedule and `workflow_dispatch` only; Slack summary of the two jobs above. Free.
+- **`drift-live-pr`** — `pull_request` only (`if: github.event_name == 'pull_request'`). Runs the live collector on the PR head, and on the `main` base too unless a same-UTC-day scheduled `main` report can be reused — so **one or two full live runs per PR push**, real credits each. Fork PRs get no secrets, so their live legs skip (neutral) and a maintainer runs the delta by hand.
+
+`.github/workflows/fix-drift.yml` (**Fix Drift**) triggers on a daily cron (`10 6 * * *`, 6:10 UTC — offset from the 6:00 run) and on `workflow_dispatch`; its single `sync` job is gated to exactly those two events. It fetches each provider's live `/models` listing, and its clean-re-collect gate then runs the **full live collector** (every leg, Ollama daemon included), so it **also spends real API credits** once a day. See "Automated Drift Remediation" below.
 
 ## Automated Drift Remediation
 
@@ -272,4 +287,4 @@ family does not, by itself, fail the drift tests):
 
 ## Cost
 
-~31 API calls per run (20 HTTP response-shape + 3 model listing + 8 WS) using the cheapest available models (`gpt-4o-mini`, `gpt-realtime-2`, `claude-haiku-4-5-20251001`, `gemini-2.5-flash`) with 10-100 max tokens each. Under $0.25/week at daily cadence. The GA protocol probe adds a second Realtime WS connection (one GA, one Beta) per run. The 2 Gemini Live legs each open a real WS session and generate a short audio turn.
+A live collector run exercises every `liveCoverage: "live"` surface in `src/__tests__/drift/surface-registry.ts` (18 of the 28 registered surfaces at the time of writing; the other 10 are mock-only conformance checks that make no vendor call), using the cheapest available models (`gpt-4o-mini`, `gpt-realtime-mini`, `claude-haiku-4-5-20251001`, `gemini-2.5-flash`) with 10-100 max tokens each. Per day that is two scheduled live runs (`test-drift.yml`'s `drift` job and `fix-drift.yml`'s re-collect gate) plus one or two per push on a drift-code PR. The Realtime probe opens two GA WS connections per run (one text turn, one tool call) and no Beta connection (the Beta shape is retired upstream). The 2 Gemini Live legs each open a real WS session and generate a short audio turn.
