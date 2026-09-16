@@ -80,6 +80,8 @@ export { handleModeration } from "./moderation.js";
 export type { ModerationResult, ModerationFixture } from "./moderation.js";
 export { CATALOG_ROUTES, buildOpenApiDocument } from "./openapi.js";
 export type { CatalogRoute } from "./openapi.js";
+export { ROUTE_DEFINITIONS } from "./route-registry.js";
+export type { RouteDefinition } from "./route-registry.js";
 export type { ServiceFixtures } from "./server.js";
 
 // WebSocket
