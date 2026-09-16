@@ -2,7 +2,7 @@
 
 ## [Unreleased]
 
-> **BREAKING** — `aimock -h` now means `--help`, not `--host`. A script calling `aimock -h 0.0.0.0` now fails with `Error: Unexpected argument '0.0.0.0'. This command does not take positional arguments` (exit 1) instead of binding, and a bare `aimock -h` prints the help and exits 0. Migration: use `--host <string>`; only the long form is accepted. The `llmock` bin (the Docker ENTRYPOINT) is unchanged and keeps `-h, --host` (#453).
+> **BREAKING** — `aimock -h` is `--help`, not `--host`: `aimock -h 0.0.0.0` exits 1 with `Error: Unexpected argument '0.0.0.0'. This command does not take positional arguments`. Migration: `--host <string>` (long form only). The `llmock` bin (the Docker ENTRYPOINT) keeps `-h, --host` (#453).
 
 ### Added
 

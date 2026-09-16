@@ -253,11 +253,9 @@
           <code>application/pdf</code> upload, which a browser's built-in viewer would otherwise run
           as an active surface. A stored name containing any character outside printable ASCII
           (<code>0x20</code> to <code>0x7E</code>) also gets an RFC 5987
-          <code>filename*=UTF-8''…</code> parameter (the <code>ext-value</code> form can carry any
-          name; the mock emits it only when the plain parameter cannot) alongside an ASCII fallback
-          in which each UTF-16 code unit outside that range becomes a single <code>_</code> (so
-          <code>é</code> is one underscore and an astral character is two) and <code>"</code> and
-          <code>\</code> are backslash-escaped. Neither header is listed in the mock's
+          <code>filename*=UTF-8''…</code> parameter alongside an ASCII fallback in which each UTF-16
+          code unit outside that range becomes a single <code>_</code> (so <code>é</code> is one
+          underscore and an astral character is two). Neither header is listed in the mock's
           <code>Access-Control-Expose-Headers</code>, which exposes only
           <code>X-Total-Count</code> and <code>X-Request-Id</code>, so cross-origin browser code
           cannot read <code>Content-Disposition</code> or <code>X-Content-Type-Options</code>; a
@@ -364,11 +362,9 @@ created.bytes === uploaded.length; <span class="cmt">// true</span></code></pre>
           how a test pins byte identity without a megabyte of binary in the journal. Every other
           files entry — list, retrieve, content, delete, a chaos-faulted request, and an upload
           rejected with a <code>400</code> (bad purpose, oversize body, malformed multipart) —
-          carries <code>body: null</code>, because there is no parsed payload to describe. The
-          <code>filename</code> in the descriptor is the <em>stored</em> name, so a synthesized
-          <code>upload-…bin</code> appears there when the upload sent none. Around the body, each
-          entry has the standard journal keys: <code>id</code>, <code>timestamp</code>,
-          <code>method</code>, <code>path</code>, <code>headers</code>,
+          carries <code>body: null</code>, because there is no parsed payload to describe. Around
+          the body, each entry has the standard journal keys: <code>id</code>,
+          <code>timestamp</code>, <code>method</code>, <code>path</code>, <code>headers</code>,
           <code>service: "files"</code> and <code>response: { status, fixture: null }</code>.
         </p>
         <div class="code-block">

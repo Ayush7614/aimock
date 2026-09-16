@@ -111,8 +111,7 @@ $ docker run -d -p 4010:4010 \
     <span class="prop">"latency"</span>: <span class="num">0</span>,
     <span class="prop">"chunkSize"</span>: <span class="num">20</span>,
     <span class="prop">"replaySpeed"</span>: <span class="num">1</span>,
-    <span class="prop">"logLevel"</span>: <span class="str">"info"</span>,
-    <span class="prop">"chaos"</span>: { <span class="prop">"dropRate"</span>: <span class="num">0</span> }
+    <span class="prop">"logLevel"</span>: <span class="str">"info"</span>
   },
   <span class="prop">"mcp"</span>: {
     <span class="prop">"path"</span>: <span class="str">"/mcp"</span>,
@@ -139,13 +138,6 @@ $ docker run -d -p 4010:4010 \
   <span class="prop">"strict"</span>: <span class="kw">false</span>
 }</code></pre>
         </div>
-
-        <p>
-          Every key is optional. The file is parsed as plain JSON (no comments) and read as the
-          <code>AimockConfig</code> type; a section that is absent is simply not mounted. Only
-          <code>llm.fixtures</code> is a file path &mdash; MCP tools, A2A agents, AG-UI fixtures and
-          vector collections are inline arrays, not paths to other files.
-        </p>
 
         <h3>Config Fields</h3>
         <table class="endpoint-table">
@@ -188,13 +180,10 @@ $ docker run -d -p 4010:4010 \
               <td><code>llm</code></td>
               <td>object</td>
               <td>
-                LLMock configuration. Accepts <code>fixtures</code> (a fixture file or a directory
-                walked for <code>*.json</code>), <code>latency</code>, <code>chunkSize</code>,
-                <code>replaySpeed</code> (a non-positive value is warned about and ignored),
-                <code>logLevel</code> (<code>silent</code> | <code>warn</code> | <code>info</code> |
-                <code>debug</code>), <code>chaos</code>, <code>record</code>. Per-fixture knobs such
-                as <code>streamingProfile</code> live on the fixture entries inside the fixture
-                files, not here.
+                LLMock configuration. Accepts <code>fixtures</code>, <code>latency</code>,
+                <code>chunkSize</code>, <code>replaySpeed</code>, <code>logLevel</code>,
+                <code>chaos</code>, <code>record</code>. Per-fixture knobs such as
+                <code>streamingProfile</code> live on the fixture entries.
               </td>
             </tr>
             <tr>
@@ -292,12 +281,10 @@ $ docker run -d -p 4010:4010 \
               <td>
                 Map of provider names to aimock's own upstream API keys, injected on a fixture-miss
                 passthrough when the caller sent no credential or a dummy placeholder; a real caller
-                key always wins. Static-key providers only (OpenAI, OpenRouter, Cohere, Grok,
-                BytePlus, Ollama, Anthropic, Gemini, Veo, Azure, ElevenLabs, fal); Bedrock and
-                Vertex AI are never rewritten. Under
-                <code>aimock --config</code> this map is read from the JSON file as written; the
-                <code>AIMOCK_PROVIDER_*_KEY</code> environment variables are read only by the
-                flag-driven <code>llmock</code> bin, not by <code>aimock --config</code>.
+                key always wins. Under <code>aimock --config</code> this map is read from the JSON
+                file as written; the <code>AIMOCK_PROVIDER_*_KEY</code> environment variables are
+                read only by the flag-driven <code>llmock</code> bin, not by
+                <code>aimock --config</code>.
               </td>
             </tr>
             <tr>
@@ -450,36 +437,23 @@ $ docker run -d -p 4010:4010 \
               <td>Vector-database mock service</td>
             </tr>
             <tr>
-              <td><code>/search</code>, <code>/v2/rerank</code>, <code>/v1/moderations</code></td>
-              <td>LLMock service endpoints (search, rerank, moderation)</td>
-            </tr>
-            <tr>
               <td><code>/health</code></td>
-              <td>
-                Unified health check: <code>{ "status": "ok", "services": { llm, mcp, ... } }</code>
-                with one entry per mounted service that reports health
-              </td>
+              <td>Unified health check (all services)</td>
             </tr>
             <tr>
               <td><code>/ready</code></td>
-              <td>
-                Readiness probe: always <code>200 { "status": "ready" }</code> once the server is
-                listening; no per-service breakdown
-              </td>
+              <td>Readiness probe: <code>200 { "status": "ready" }</code></td>
             </tr>
             <tr>
               <td><code>/metrics</code></td>
-              <td>Prometheus metrics (404 unless <code>metrics</code> is true)</td>
+              <td>Prometheus metrics (if enabled)</td>
             </tr>
           </tbody>
         </table>
 
         <p>
           Path stripping is automatic &mdash; a request to <code>/mcp/tools/list</code> arrives at
-          the MCP service as <code>/tools/list</code>. The mount prefixes above are the defaults;
-          each section's <code>path</code> key moves it. <code>GET /health</code>,
-          <code>GET /ready</code> and <code>GET /metrics</code> are served without an API key even
-          when <code>auth</code> is configured.
+          the MCP service as <code>/tools/list</code>.
         </p>
 
         <h2>Docker Usage</h2>
@@ -618,7 +592,7 @@ $ npx @copilotkit/aimock convert vidaimock ./templates/</code></pre>
           <code>http://</code> URL to a <code>.json</code> fixture file. The <code>aimock</code> bin
           has no <code>--fixtures</code> flag at all; it loads fixtures through
           <code>--config</code>, whose <code>llm.fixtures</code> is resolved as a filesystem path
-          only. No bin accepts a URL for <code>validate</code>.
+          only.
         </p>
         <p>
           Anything the filesystem or a fixture entry can throw is contained in the report instead of
@@ -670,11 +644,8 @@ dup.json[2]: 2 fixture(s), 0 error(s), 2 warning(s)</code></pre>
           included. stderr still gets the failure: one
           <code>Error: fixture validation failed &mdash; ...</code> line for a run that failed on
           its inputs, or <code>Error: &lt;reason&gt;</code> plus the full help for a usage error.
-          <code>--json --help</code> is a document too:
-          <code>{ "help": "&lt;help text&gt;" }</code>, the help as the one string field,
-          pretty-printed, exit 0, nothing on stderr. Validating a directory holding a file with
-          invalid JSON and a file with one bad entry and a duplicate <code>userMessage</code> (exit
-          1):
+          Validating a directory holding a file with invalid JSON and a file with one bad entry and
+          a duplicate <code>userMessage</code> (exit 1):
         </p>
         <div class="code-block">
           <div class="code-block-header">validate --json <span class="lang-tag">json</span></div>
@@ -900,15 +871,7 @@ dup.json[2]: 2 fixture(s), 0 error(s), 2 warning(s)</code></pre>
           <code>validate</code> keeps no state. It constructs no <code>LLMock</code> and no server,
           touches no journal, match-count, chaos or file store, and reads only the paths it is
           given, so there is nothing for <code>LLMock.reset()</code> or
-          <code>POST /__aimock/reset</code> to clear and nothing they change about its result.
-          Running it against a fixture directory a live server is also serving is safe; the two
-          never share memory. The server applies the same per-fixture rules on its own, to the batch
-          it is handed at that moment: at startup under <code>--validate-on-load</code>, on each
-          <code>--watch</code> reload when that flag is set, on
-          <code>POST /__aimock/fixtures</code> (errors answer <code>400</code>), and in
-          <code>LLMock.addFixturesFromJSON()</code> (errors throw). None of them re-checks the batch
-          against fixtures already loaded, so the cross-load findings this lint reports come from
-          this lint alone. A full reset empties the loaded fixtures and re-validates nothing.
+          <code>POST /__aimock/reset</code> to clear.
         </p>
 
         <h3>Examples</h3>
@@ -921,10 +884,7 @@ dup.json[2]: 2 fixture(s), 0 error(s), 2 warning(s)</code></pre>
 <span class="cm">#   fixtures/examples/mcp/mcp-config.json: skipped (not a fixture file &mdash; an aimock config file (mcp), which "aimock --config" serves and "--fixtures" does not load)</span>
 $ npx @copilotkit/aimock validate ./fixtures/
 
-<span class="cm"># Validate specific files, failing on warnings too. Under --strict the whole</span>
-<span class="cm"># shipped tree exits 1: examples/adk/gemini-agent.json and examples/mastra/agent-workflow.json</span>
-<span class="cm"># repeat a userMessage that example-greeting.json / examples/langchain/agent-loop.json</span>
-<span class="cm"># already match, and that cross-file duplicate is a warning. These paths pass:</span>
+<span class="cm"># Validate specific files, failing on warnings too (--strict on the whole shipped tree exits 1: cross-file duplicate userMessage)</span>
 $ npx @copilotkit/aimock validate --strict ./fixtures/example-greeting.json ./fixtures/examples/llm/
 
 <span class="cm"># Machine-readable report for CI</span>

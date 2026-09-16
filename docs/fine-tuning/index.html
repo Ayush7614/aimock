@@ -273,21 +273,21 @@ cancel   -> cancelled   (any non-terminal job, with a finished_at stamp;
         <p>
           Both list endpoints are cursor pages ordered newest-first: <code>limit</code> defaults to
           <code>20</code> and must be written as plain decimal digits naming an integer from
-          <code>1</code> to <code>100</code> (leading zeros are digits, so <code>007</code> pages at
-          seven), <code>after</code> resumes from an id, and <code>has_more</code> reports whether
-          anything was left behind rather than being a constant. That is what the OpenAI SDK's
-          <code>CursorPage</code> reads when you iterate results. Any other spelling is rejected
-          with <code>400</code> quoting the raw query text you sent, and that includes every
-          spelling <code>Number()</code> would have accepted, whether it would have landed on a
-          different integer (<code>0x10</code> as 16, <code>1e2</code> as 100) or on the very one
-          you meant (<code>%2B5</code>, <code>20.0</code>, a percent-encoded whitespace-padded
-          <code>%2020%20</code>). A literal <code>+</code> must be percent-encoded, since a bare
-          <code>+</code> in a query decodes to a space. An <code>after</code> that matches no item
-          is rejected the same way &mdash; a stale cursor that quietly returned page one would make
-          <code>CursorPage</code> iterate forever. Sending <code>limit</code> or
-          <code>after</code> more than once on one request is also a <code>400</code>, naming the
-          parameter and the number of times it appeared: the spec types each as a single scalar and
-          gives no combining rule, so taking the first would launder the rest.
+          <code>1</code> to <code>100</code>, <code>after</code> resumes from an id, and
+          <code>has_more</code> reports whether anything was left behind rather than being a
+          constant. That is what the OpenAI SDK's <code>CursorPage</code> reads when you iterate
+          results. Any other spelling is rejected with <code>400</code> quoting the raw query text
+          you sent, and that includes every spelling <code>Number()</code> would have accepted,
+          whether it would have landed on a different integer (<code>0x10</code> as 16,
+          <code>1e2</code> as 100) or on the very one you meant (<code>%2B5</code>,
+          <code>20.0</code>, a percent-encoded whitespace-padded <code>%2020%20</code>). A literal
+          <code>+</code> must be percent-encoded, since a bare <code>+</code> in a query decodes to
+          a space. An <code>after</code> that matches no item is rejected the same way &mdash; a
+          stale cursor that quietly returned page one would make <code>CursorPage</code> iterate
+          forever. Sending <code>limit</code> or <code>after</code> more than once on one request is
+          also a <code>400</code>, naming the parameter and the number of times it appeared: the
+          spec types each as a single scalar and gives no combining rule, so taking the first would
+          launder the rest.
         </p>
         <p>
           Only the <code>20</code> default is the vendor&rsquo;s: <code>openai-openapi</code> v2.3.0
@@ -372,50 +372,18 @@ cancel   -> cancelled   (any non-terminal job, with a finished_at stamp;
           <li>
             A <code>suffix</code> that is not a string of 1&ndash;64 code points is rejected with
             <code>400</code>; <code>null</code> means &ldquo;none&rdquo;. A <code>seed</code> that
-            is not an integer in <code>0</code>&ndash;<code>2147483647</code> is rejected the same
-            way; <code>null</code> means &ldquo;generate one&rdquo;
+            is not an integer in <code>0</code>&ndash;<code>2147483647</code> and
+            <code>metadata</code> outside the 16-pair / 64-code-point-key / 512-code-point-value
+            bounds are rejected the same way
           </li>
           <li>
-            <code>metadata</code> earns its own <code>400</code> for each bound it breaks: a value
-            that is not a JSON object or <code>null</code>, more than 16 pairs, a key longer than 64
-            code points, or a value that is not a string of at most 512 code points, the last two
-            naming the offending key
-          </li>
-          <li>
-            <code>integrations</code> is checked entry by entry, and every message names the entry
-            by index (<code>integrations[0].wandb.project</code>): a value that is not an array or
-            <code>null</code>, a list of more than five entries, an entry that is not a JSON object,
+            <code>integrations</code> is checked entry by entry: a list of more than five entries,
             an entry member other than <code>type</code> and <code>wandb</code>, a
-            <code>type</code> other than the string <code>"wandb"</code>, a <code>wandb</code> that
-            is not a JSON object, a <code>wandb</code> member other than <code>project</code>,
-            <code>name</code>, <code>entity</code> and <code>tags</code>, a
-            <code>project</code> that is missing or not a non-empty string, a <code>name</code> or
-            <code>entity</code> that is neither a string nor <code>null</code>, and a
-            <code>tags</code> that is not an array of strings are each a <code>400</code>. The
-            five-entry cap and the two unknown-member rejections are this mock&rsquo;s own; the rest
-            is the shape the spec requires
-          </li>
-          <li>
-            <code>method</code> is checked the same way: a value that is not a JSON object or
-            <code>null</code>, a member other than <code>type</code>, <code>supervised</code>,
-            <code>dpo</code> and <code>reinforcement</code>, a <code>type</code> outside those
-            three, a variant object for a type other than <code>method.type</code>, a variant that
-            is not a JSON object, a variant member other than <code>hyperparameters</code> (and
-            <code>grader</code>, for <code>reinforcement</code>), a
-            <code>reinforcement</code> method whose <code>grader</code> is missing or not a JSON
-            object &mdash; whether or not the <code>reinforcement</code> object itself was sent
-            &mdash; and a variant <code>hyperparameters</code> that is not a JSON object are each a
-            <code>400</code>. Inside a variant&rsquo;s <code>hyperparameters</code> the
-            variant&rsquo;s own table applies, with the same unknown-member and out-of-range
-            rejections as the top-level object: <code>dpo</code> adds <code>beta</code> (greater
-            than <code>0</code>, at most <code>2</code>); <code>reinforcement</code> adds
-            <code>reasoning_effort</code> (exactly one of <code>default</code>, <code>low</code>,
-            <code>medium</code>, <code>high</code>, so <code>"auto"</code> is a
-            <code>400</code> there), <code>compute_multiplier</code> (greater than
-            <code>0.00001</code>, at most <code>10</code>) and <code>eval_interval</code> /
-            <code>eval_samples</code> (integers of at least <code>1</code>). The unknown-member and
-            stray-variant rejections are this mock&rsquo;s own; the required <code>type</code> and
-            <code>grader</code> and the ranges are the spec&rsquo;s
+            <code>wandb</code> member other than <code>project</code>, <code>name</code>,
+            <code>entity</code> and <code>tags</code>, and a <code>project</code> that is missing or
+            not a non-empty string are each a <code>400</code>. The five-entry cap and the two
+            unknown-member rejections are this mock&rsquo;s own; the rest is the shape the spec
+            requires
           </li>
           <li>
             On either list endpoint, a <code>limit</code> that is not plain decimal digits naming an
