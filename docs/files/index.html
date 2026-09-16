@@ -170,10 +170,13 @@
         <p>
           Uploads are validated against the OpenAI <em>create</em> purpose enum. The three
           server-minted output purposes are rejected with a <code>400</code> on upload, exactly as
-          the real API does. They are listed below for parity with the real API's response enum, but
-          nothing in the mock ever mints a file with one: every stored file's
-          <code>purpose</code> came from a validated create purpose, so a returned file object never
-          carries an output purpose and <code>?purpose=batch_output</code> always matches nothing.
+          the real API does. The mock mints one of them itself: the batches endpoint stores a
+          <code>batch_output</code> file named <code>&lt;batch-id&gt;_output.jsonl</code> when a
+          batch completes, and a <code>batch_output</code> file named
+          <code>&lt;batch-id&gt;_error.jsonl</code> when it fails. Those files are ordinary entries
+          in the store, so <code>?purpose=batch_output</code> returns them and
+          <code>GET /v1/files/{id}/content</code> serves their JSONL. The other two response-only
+          purposes are listed for parity with the real API's enum; nothing in the mock mints them.
           The <code>?purpose=</code> list filter is not validated against either list &mdash; the
           real API declares it as a free-form string, so an unrecognised value simply matches
           nothing and returns an empty list with a <code>200</code>. A <code>?purpose=</code> with
