@@ -23,7 +23,7 @@ import { writeErrorResponse } from "./sse-writer.js";
 import { resolveUpstreamUrl } from "./url.js";
 import { applyConfiguredProviderAuth, applyProviderAuth } from "./provider-auth.js";
 import { isAuthenticatedRequest, isRecognizedApiKeyHeader } from "./api-key-auth.js";
-import { getTestId, slugifyTestId, slugifyContext } from "./helpers.js";
+import { getTestId, slugifyTestId, slugifyContext, hasMintedRequestId } from "./helpers.js";
 import { DEFAULT_TEST_ID } from "./constants.js";
 
 /** True when an SSE frame completes an OpenAI stream. */
@@ -134,9 +134,18 @@ const STRIP_HEADERS = new Set([
 ]);
 
 /**
+ * Headers stripped on egress ONLY when aimock minted the value. A
+ * caller-supplied `x-request-id` is the caller's own trace key and forwards
+ * verbatim; the id aimock invents for its access log and journal is
+ * meaningless on a real provider's wire and must not be transmitted.
+ */
+const MINTED_ONLY_STRIP_HEADERS = new Set(["x-request-id"]);
+
+/**
  * Build the header set forwarded to an upstream provider from an incoming
  * request: everything except hop-by-hop, client-set, and mock-internal
- * headers (STRIP_HEADERS, plus the x-aimock-chaos-* prefix family). Shared
+ * headers (STRIP_HEADERS, plus the x-aimock-chaos-* prefix family, plus
+ * MINTED_ONLY_STRIP_HEADERS when aimock minted the value). Shared
  * by the generic recorder proxy and the OpenRouter-video live lifecycle
  * proxy.
  */
@@ -147,6 +156,7 @@ export function buildForwardHeaders(req: http.IncomingMessage): Record<string, s
     if (
       val === undefined ||
       STRIP_HEADERS.has(lower) ||
+      (MINTED_ONLY_STRIP_HEADERS.has(lower) && hasMintedRequestId(req)) ||
       lower.startsWith("x-aimock-chaos-") ||
       (isAuthenticatedRequest(req) && isRecognizedApiKeyHeader(lower))
     ) {
