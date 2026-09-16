@@ -26,7 +26,7 @@ import { proxyAndRecord } from "./recorder.js";
 import type { ProxyCapturedResponse, ProxyOptions } from "./recorder.js";
 import type { Journal } from "./journal.js";
 import type { Logger } from "./logger.js";
-import { applyChaosAsync } from "./chaos.js";
+import { applyChaosAsync, type ChaosAsyncOutcome } from "./chaos.js";
 
 /**
  * ElevenLabs Voice Design record + replay: `POST /v1/text-to-voice/design`
@@ -1039,7 +1039,7 @@ function buildVoiceSlotReq(
  * design/create. `ChaosJournalContext` has no `service` field, so neither these
  * gates nor design/create carry a service tag; there is nothing to mirror.
  */
-function gateVoiceSlotChaos(
+async function gateVoiceSlotChaos(
   req: http.IncomingMessage,
   res: http.ServerResponse,
   syntheticReq: ChatCompletionRequest,
@@ -1048,8 +1048,8 @@ function gateVoiceSlotChaos(
   journal: Journal,
   path: string,
   method: string,
-): Promise<boolean> {
-  return applyChaosAsync(
+): Promise<ChaosAsyncOutcome> {
+  return await applyChaosAsync(
     res,
     fixture,
     defaults.chaos,
