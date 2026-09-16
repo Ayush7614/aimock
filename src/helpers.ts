@@ -1230,10 +1230,19 @@ export function buildContentWithToolCallsCompletion(
 
 const DEFAULT_MAX_BODY_BYTES = 10 * 1024 * 1024; // 10 MB
 
-export function readBody(
+/**
+ * Read a request body as raw bytes, preserving every octet.
+ *
+ * This is the byte-level primitive {@link readBody} is built on: routes that
+ * must not lose bytes (binary file uploads) take the Buffer, everything else
+ * keeps taking the decoded string. Splitting it this way leaves the text path
+ * byte-identical — `readBody` performs exactly the same `Buffer.concat(...)`
+ * + default (utf8) `toString()` it always did, just one call later.
+ */
+export function readBodyBuffer(
   req: http.IncomingMessage,
   maxBytes: number = DEFAULT_MAX_BODY_BYTES,
-): Promise<string> {
+): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
     let totalBytes = 0;
@@ -1252,7 +1261,7 @@ export function readBody(
     req.on("end", () => {
       if (!settled) {
         settled = true;
-        resolve(Buffer.concat(chunks).toString());
+        resolve(Buffer.concat(chunks));
       }
     });
     req.on("error", (err) => {
@@ -1262,6 +1271,84 @@ export function readBody(
       }
     });
   });
+}
+
+/**
+ * A body read with a buffering bound that does NOT cost the caller its socket.
+ *
+ * `buffer` is `null` when the body went over the buffering bound: the bytes
+ * read so far were released and the rest was drained, so the request still
+ * reaches `end` and the route can answer a real status (with CORS) instead of
+ * the client seeing an `ECONNRESET`.
+ */
+export interface BoundedBody {
+  buffer: Buffer | null;
+  /** Bytes seen on the wire, counted past the buffering bound. */
+  bytesRead: number;
+}
+
+/**
+ * Read a request body that may legitimately be over-size, without either
+ * buffering it all or dropping the socket.
+ *
+ * {@link readBodyBuffer} answers an over-size body with `req.destroy()`: no
+ * status line, no body, no CORS headers. That is the right default for routes
+ * whose limit is a pure DoS bound, but it is the wrong answer for a route that
+ * owes the caller a `400` describing what was wrong — the caller cannot read an
+ * error it never receives. So this variant splits the two concerns:
+ *
+ * - `maxBytes` bounds MEMORY. Past it the buffered chunks are dropped and the
+ *   body is only counted, so peak retention never exceeds `maxBytes` no matter
+ *   how large the body is. The caller gets `buffer: null` and answers itself.
+ * - `drainMaxBytes` bounds WORK, and is the only socket drop here: a body that
+ *   keeps coming past it is not worth draining and rejects as `readBodyBuffer`
+ *   would.
+ */
+export function readBodyBufferBounded(
+  req: http.IncomingMessage,
+  maxBytes: number,
+  drainMaxBytes: number,
+): Promise<BoundedBody> {
+  return new Promise((resolve, reject) => {
+    let chunks: Buffer[] | null = [];
+    let totalBytes = 0;
+    let settled = false;
+    req.on("data", (chunk: Buffer) => {
+      if (settled) return;
+      totalBytes += chunk.length;
+      if (chunks !== null && totalBytes > maxBytes) {
+        // Release on the FIRST chunk over the bound, before pushing it: the
+        // bytes are unusable now, and holding them is what would make peak
+        // memory track the attacker's body size instead of `maxBytes`.
+        chunks = null;
+      }
+      if (totalBytes > drainMaxBytes) {
+        settled = true;
+        req.destroy();
+        reject(new Error(`Request body exceeded size limit of ${drainMaxBytes} bytes`));
+        return;
+      }
+      if (chunks !== null) chunks.push(chunk);
+    });
+    req.on("end", () => {
+      if (settled) return;
+      settled = true;
+      resolve({ buffer: chunks === null ? null : Buffer.concat(chunks), bytesRead: totalBytes });
+    });
+    req.on("error", (err) => {
+      if (!settled) {
+        settled = true;
+        reject(err);
+      }
+    });
+  });
+}
+
+export function readBody(
+  req: http.IncomingMessage,
+  maxBytes: number = DEFAULT_MAX_BODY_BYTES,
+): Promise<string> {
+  return readBodyBuffer(req, maxBytes).then((buf) => buf.toString());
 }
 
 // ─── Pattern matching ─────────────────────────────────────────────────────

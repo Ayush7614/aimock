@@ -48,6 +48,7 @@ import {
   isJsonObject,
   getTestId,
   readBody,
+  readBodyBufferBounded,
   resolveResponse,
   resolveStrictMode,
   resolveReasoningForModel,
@@ -114,6 +115,17 @@ import { handleCohere, handleCohereEmbed } from "./cohere.js";
 import { handleSearch, type SearchFixture } from "./search.js";
 import { handleRerank, type RerankFixture } from "./rerank.js";
 import { handleModeration, type ModerationFixture } from "./moderation.js";
+import {
+  handleFilesCreate,
+  handleFilesList,
+  handleFilesRetrieve,
+  handleFilesContent,
+  handleFilesDelete,
+  clearFileStore,
+  FILES_BODY_DRAIN_MAX_BYTES,
+  FILES_BODY_MAX_BYTES,
+  FILES_BODY_OVERSIZED,
+} from "./files.js";
 import { upgradeToWebSocket, type WebSocketConnection } from "./ws-framing.js";
 import { handleWebSocketResponses } from "./ws-responses.js";
 import { handleWebSocketRealtime } from "./ws-realtime.js";
@@ -143,6 +155,8 @@ import {
   VEO_OPERATION_RE,
   GROK_VIDEO_SUBMIT_PATH,
   GROK_VIDEO_STATUS_RE,
+  FILES_ID_RE,
+  FILES_CONTENT_RE,
 } from "./metrics.js";
 import { proxyAndRecord } from "./recorder.js";
 import {
@@ -267,6 +281,12 @@ const HEALTH_PATH = "/health";
 const READY_PATH = "/ready";
 const MODELS_PATH = "/v1/models";
 const REQUESTS_PATH = "/v1/_requests";
+const FILES_PATH = "/v1/files";
+// FILES_ID_RE / FILES_CONTENT_RE are imported from metrics.js, which is where
+// every other shared route regex lives (OpenRouter/Veo/Grok/BytePlus above).
+// They used to be declared in BOTH files: two copies of a route regex drift,
+// and a dispatch regex that disagrees with the metrics path-label regex means
+// a route serves traffic that the metrics label as something else.
 
 const DEFAULT_MODELS = [
   "gpt-4",
@@ -358,6 +378,7 @@ export function performFullReset(fixtures: Fixture[], targets: FullResetTargets 
   fixtures.length = 0;
   falJobs.clear();
   falQueueStates.clear();
+  clearFileStore();
   resetInteractionCounter();
   resetEventIdCounter();
   if (!targets) return;
@@ -2682,6 +2703,83 @@ export async function createServerWithResolvedAuth(
       }));
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ object: "list", data }));
+      return;
+    }
+
+    // Files API mock — dispatch order matters: content RE → id RE → collection.
+    // The id RE's `[^/]+` would otherwise swallow `/content`, and the
+    // collection exact match must not claim an id path.
+    //
+    // Every branch is method-guarded, so an unhandled method on a files path
+    // (`PATCH /v1/files/{id}`, and also `HEAD`, which nothing here implements)
+    // falls through to the shared 404. That is this server's convention, not a
+    // files-specific gap: there is no `405` anywhere in this file, the BytePlus
+    // block above documents the same fallthrough by name, and measured against
+    // a live server `HEAD /health` and `PATCH /v1/models` answer 404 exactly
+    // like their files equivalents. Answering 405 + `Allow` here — or serving
+    // HEAD — would make files the only surface in the mock that behaves that
+    // way, which is a bigger inconsistency than the one it fixes. Changing it
+    // is a server-wide change and belongs in its own pass.
+    const filesContentMatch = pathname.match(FILES_CONTENT_RE);
+    if (filesContentMatch && req.method === "GET") {
+      await handleFilesContent(req, res, filesContentMatch[1], journal, defaults, setCorsHeaders);
+      return;
+    }
+    const filesIdMatch = pathname.match(FILES_ID_RE);
+    if (filesIdMatch && req.method === "GET") {
+      await handleFilesRetrieve(req, res, filesIdMatch[1], journal, defaults, setCorsHeaders);
+      return;
+    }
+    if (filesIdMatch && req.method === "DELETE") {
+      await handleFilesDelete(req, res, filesIdMatch[1], journal, defaults, setCorsHeaders);
+      return;
+    }
+    if (pathname === FILES_PATH && req.method === "GET") {
+      // `purpose` is NOT read here. It used to be, with `searchParams.get`,
+      // which silently first-wins a repeat and hands `""` through for
+      // `?purpose=`; the files module reads all four list parameters itself so
+      // one rule covers them all.
+      await handleFilesList(req, res, journal, defaults, setCorsHeaders);
+      return;
+    }
+    if (pathname === FILES_PATH && req.method === "POST") {
+      try {
+        // A Buffer, not readBody's string: a multipart upload can carry
+        // arbitrary binary and a utf8 decode here would corrupt it before
+        // files.ts ever sees the bytes. Every other route keeps using readBody
+        // unchanged.
+        //
+        // Bounded, not readBodyBuffer: this route must answer a
+        // 400 for a body that is *over* its content cap, and readBodyBuffer's
+        // only answer to over-size is destroying the socket — which the caller
+        // reads as ECONNRESET, with no status and no CORS. Here the bound is
+        // on memory, not on the socket. See the constants' doc comments.
+        const body = await readBodyBufferBounded(
+          req,
+          FILES_BODY_MAX_BYTES,
+          FILES_BODY_DRAIN_MAX_BYTES,
+        );
+        await handleFilesCreate(
+          req,
+          res,
+          body.buffer ?? FILES_BODY_OVERSIZED,
+          journal,
+          defaults,
+          setCorsHeaders,
+        );
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : "Internal error";
+        defaults.logger.error(`POST /v1/files: failed to read body: ${msg}`);
+        if (!res.headersSent) {
+          writeErrorResponse(
+            res,
+            500,
+            JSON.stringify({ error: { message: msg, type: "server_error" } }),
+          );
+        } else if (!res.writableEnded) {
+          res.destroy();
+        }
+      }
       return;
     }
 
