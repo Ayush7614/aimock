@@ -19,6 +19,7 @@
 import type * as http from "node:http";
 import { flattenHeaders, generateId, isJsonObject } from "./helpers.js";
 import { applyChaosAsync, type ChaosAsyncOutcome } from "./chaos.js";
+import { paginate, readMetadata } from "./fine-tuning.js";
 import type { ChaosDefaults } from "./types.js";
 import type { Journal } from "./journal.js";
 import type { Logger } from "./logger.js";
@@ -32,12 +33,21 @@ export interface BatchObject {
   completion_window: string;
   status: "validating" | "in_progress" | "completed" | "cancelled" | "failed";
   created_at: number;
+  metadata?: Record<string, string>;
   output_file_id?: string;
   error_file_id?: string;
   request_counts?: { total: number; completed: number; failed: number };
 }
 
-const VALID_ENDPOINTS = new Set(["/v1/chat/completions", "/v1/embeddings", "/v1/completions"]);
+// The `BatchCreateParams.endpoint` union in the vendored `openai` SDK 4.104.0
+// (`resources/batches.d.ts`): `/v1/responses`, `/v1/chat/completions`,
+// `/v1/embeddings`, `/v1/completions`.
+const VALID_ENDPOINTS = new Set([
+  "/v1/responses",
+  "/v1/chat/completions",
+  "/v1/embeddings",
+  "/v1/completions",
+]);
 
 const batches = new Map<string, BatchObject>();
 const batchPolls = new Map<string, number>();
@@ -197,6 +207,13 @@ export async function handleBatchesCreate(
     );
     return;
   }
+  // Same shared `Metadata` schema the fine-tuning mock validates and echoes.
+  const metadata = readMetadata(body["metadata"]);
+  if (!metadata.ok) {
+    journalBatches(journal, method, path, flattenHeaders(req.headers), 400);
+    writeJson(res, 400, invalid(metadata.message), setCorsHeaders);
+    return;
+  }
 
   const id = generateId("batch");
   const batch: BatchObject = {
@@ -207,7 +224,9 @@ export async function handleBatchesCreate(
     completion_window: "24h",
     status: "validating",
     created_at: Math.floor(Date.now() / 1000),
+    request_counts: { total: 0, completed: 0, failed: 0 },
   };
+  if (metadata.value !== null) batch.metadata = metadata.value;
   batches.set(id, batch);
   batchPolls.set(id, 0);
   defaults.logger.debug(`Batches mock: created ${id}`);
@@ -225,9 +244,31 @@ export async function handleBatchesList(
   const path = req.url ?? "/v1/batches";
   const method = req.method ?? "GET";
   if (await chaosHit(req, journal, defaults, method, path, res, setCorsHeaders)) return;
-  const data = [...batches.values()].sort((a, b) => a.created_at - b.created_at);
+  // Newest-first, mirroring `handleFineTuningList`: `paginate()` documents a
+  // newest-first input, and reversing insertion order is the stable total
+  // order a cursor walk needs (`created_at` has one-second resolution, so a
+  // sort on it cannot order the ties that are the normal case).
+  const data = [...batches.values()].reverse();
+  // `after`/`limit` cursor paging shared with the fine-tuning mock; the real
+  // list response also carries `first_id`/`last_id` (null on an empty page).
+  const result = paginate(data, req.url);
+  if (!result.ok) {
+    journalBatches(journal, method, path, flattenHeaders(req.headers), 400);
+    writeJson(res, 400, invalid(result.message), setCorsHeaders);
+    return;
+  }
+  const page = result.page.data;
   journalBatches(journal, method, path, flattenHeaders(req.headers), 200);
-  writeJson(res, 200, { object: "list", data }, setCorsHeaders);
+  writeJson(
+    res,
+    200,
+    {
+      ...result.page,
+      first_id: page[0]?.id ?? null,
+      last_id: page[page.length - 1]?.id ?? null,
+    },
+    setCorsHeaders,
+  );
 }
 
 export async function handleBatchesRetrieve(

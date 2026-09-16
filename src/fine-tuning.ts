@@ -451,8 +451,8 @@ const DEFAULT_PAGE_LIMIT = 20;
 /** Upper bound we enforce on `limit`. Ours, not the vendor's — see `paginate`. */
 const MAX_PAGE_LIMIT = 100;
 
-type Page<T> = { object: "list"; data: T[]; has_more: boolean };
-type PageResult<T> = { ok: true; page: Page<T> } | { ok: false; message: string };
+export type Page<T> = { object: "list"; data: T[]; has_more: boolean };
+export type PageResult<T> = { ok: true; page: Page<T> } | { ok: false; message: string };
 
 /**
  * The query parameters of a request target.
@@ -588,7 +588,10 @@ function parseDecimalInteger(raw: string): number | null {
  *     response lists the completion event ahead of the earlier
  *     model-created event, which reads as reverse-chronological.
  */
-function paginate<T extends { id: string }>(items: T[], url: string | undefined): PageResult<T> {
+export function paginate<T extends { id: string }>(
+  items: T[],
+  url: string | undefined,
+): PageResult<T> {
   const params = queryParams(url);
   const readLimit = singleParam(params, "limit");
   if (!readLimit.ok) return { ok: false, message: readLimit.message };
@@ -865,7 +868,7 @@ const SEED_MAX = 2147483647;
 /** `FineTuningJob.integrations`: `maxItems: 5`. */
 const MAX_INTEGRATIONS = 5;
 
-type Read<T> = { ok: true; value: T } | { ok: false; message: string };
+export type Read<T> = { ok: true; value: T } | { ok: false; message: string };
 
 /**
  * Length in Unicode CODE POINTS, which is the unit the spec's limits are in.
@@ -927,7 +930,7 @@ function readSeed(value: unknown): Read<number | null> {
  * most 16 pairs, keys at most 64 characters and values at most 512, or `null`.
  * `FineTuningJob` declares `metadata` too, so what is accepted is echoed back.
  */
-function readMetadata(value: unknown): Read<Record<string, string> | null> {
+export function readMetadata(value: unknown): Read<Record<string, string> | null> {
   if (value === undefined || value === null) return { ok: true, value: null };
   if (!isJsonObject(value)) {
     return { ok: false, message: "Invalid parameter: 'metadata' must be a JSON object or null" };
