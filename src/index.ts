@@ -18,7 +18,7 @@ export { Logger } from "./logger.js";
 export type { LogLevel } from "./logger.js";
 
 // Journal
-export { Journal, DEFAULT_TEST_ID } from "./journal.js";
+export { Journal, DEFAULT_TEST_ID, isChatCompletionBody } from "./journal.js";
 
 // Router
 export { matchFixture, matchFixtureDiagnostic, getTextContent } from "./router.js";
@@ -373,6 +373,7 @@ export type {
   Fixture,
   FixtureFile,
   FixtureFileEntry,
+  JournalBody,
   JournalEntry,
   SSEChunk,
   SSEChoice,

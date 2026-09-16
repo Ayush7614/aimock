@@ -786,13 +786,35 @@ export interface FixtureFileEntry {
 
 // Request journal
 
+/**
+ * A recorded request body.
+ *
+ * Most journal entries carry a chat-completion request, but every service
+ * journals through one entry type and several of them record a body that is
+ * not one: the fine-tuning create payload is recorded verbatim so the journal
+ * reports what the caller actually sent, and the journal's own size cap
+ * substitutes a truncation marker for an oversized body. Neither shape has a
+ * `model`/`messages` pair, so typing the field as `ChatCompletionRequest`
+ * alone forces those writers through a cast that claims fields that are not
+ * there — the second member exists so they do not have to lie.
+ *
+ * TypeScript collapses the two for ASSIGNMENT (`ChatCompletionRequest` has an
+ * index signature, so it is itself a `Record<string, unknown>`); the union is
+ * kept two-membered because it is what the field means, not because it narrows
+ * anything. For READING, treat the body as opaque JSON — that is already how
+ * every consumer uses it (the journal cap re-serializes it, `GET
+ * /__aimock/journal` hands it back) — and property-check before reaching for a
+ * chat-request field.
+ */
+export type JournalBody = ChatCompletionRequest | Record<string, unknown>;
+
 export interface JournalEntry {
   id: string;
   timestamp: number;
   method: string;
   path: string;
   headers: Record<string, string>;
-  body: ChatCompletionRequest | null;
+  body: JournalBody | null;
   service?: string;
   response: {
     status: number;
@@ -805,9 +827,12 @@ export interface JournalEntry {
      * configured proxy: chaos-path entries (e.g. chaos on the OpenRouter
      * video lifecycle endpoints; in REPLAY mode their normal 200/400/401/404
      * entries omit source, while record-mode 200s on those endpoints carry
-     * source:"proxy") AND the OpenRouter video models listing synthesized as
-     * the fallback after a FAILED proxy attempt. Absent when the distinction
-     * doesn't apply (e.g. 404/503 fallback where nothing was going to serve).
+     * source:"proxy"), the OpenRouter video models listing synthesized as the
+     * fallback after a FAILED proxy attempt, and the services whose responses
+     * are synthesized outright — every fine-tuning entry carries it, success
+     * and error alike, since that store is aimock's own and no fixture or
+     * proxy ever serves it. Absent when the distinction doesn't apply
+     * (e.g. 404/503 fallback where nothing was going to serve).
      */
     source?: "fixture" | "proxy" | "internal";
     interrupted?: boolean;
