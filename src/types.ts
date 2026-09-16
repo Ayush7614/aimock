@@ -156,6 +156,10 @@ export interface FixtureMatch {
     | "embedding"
     | "audio-gen"
     | "elevenlabs-tts"
+    | "elevenlabs-voice-design"
+    | "elevenlabs-voice"
+    | "elevenlabs-voice-get"
+    | "elevenlabs-voice-delete"
     | "fal-audio"
     | "fal"
     | "realtime"
@@ -405,6 +409,27 @@ export interface ImageResponse {
 // guards, because the optional companion fields below make these shapes
 // structurally overlap (an AudioResponse with `toolCalls`/`content` would also
 // satisfy those guards otherwise).
+export interface VoiceDesignPreview {
+  generated_voice_id: string;
+  // Optional like its siblings below: `voiceDesignToJson` substitutes `""`
+  // when it is absent, so requiring it here made that documented fallback
+  // unreachable from TypeScript.
+  audio_base_64?: string;
+  media_type?: string;
+  duration_secs?: number;
+  language?: string | null;
+}
+
+/**
+ * Convenience shape for `LLMock.onElevenLabsVoiceDesign`. Stored as a
+ * {@link RawJSONResponse} wrapping `{ previews, text }` — the ElevenLabs
+ * `/v1/text-to-voice/design` envelope.
+ */
+export interface VoiceDesignResponse {
+  previews: VoiceDesignPreview[];
+  text?: string;
+}
+
 export interface AudioResponse {
   audio: string | { b64Json: string; contentType?: string };
   format?: string;
@@ -801,6 +826,10 @@ export interface FixtureFileEntry {
       | "embedding"
       | "audio-gen"
       | "elevenlabs-tts"
+      | "elevenlabs-voice-design"
+      | "elevenlabs-voice"
+      | "elevenlabs-voice-get"
+      | "elevenlabs-voice-delete"
       | "fal-audio"
       | "fal"
       | "realtime"

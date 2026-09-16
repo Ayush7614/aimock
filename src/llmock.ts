@@ -16,6 +16,7 @@ import type {
   ResponseFactory,
   TranscriptionResponse,
   VideoResponse,
+  VoiceDesignResponse,
 } from "./types.js";
 import {
   createServer,
@@ -38,6 +39,7 @@ import type { SearchFixture, SearchResult } from "./search.js";
 import type { RerankFixture, RerankResult } from "./rerank.js";
 import type { ModerationFixture, ModerationResult } from "./moderation.js";
 import { imageResponseToFalJson, videoResponseToFalJson } from "./fal.js";
+import { voiceDesignToJson } from "./elevenlabs-voice.js";
 
 export class LLMock {
   private fixtures: Fixture[] = [];
@@ -239,6 +241,13 @@ export class LLMock {
     });
   }
 
+  onElevenLabsVoiceDesign(description: string | RegExp, response: VoiceDesignResponse): this {
+    return this.addFixture({
+      match: { userMessage: description, endpoint: "elevenlabs-voice-design" },
+      response: voiceDesignToJson(response),
+    });
+  }
+
   onFalAudio(prompt: string | RegExp, response: AudioResponse, model?: string): this {
     return this.addFixture({
       match: { userMessage: prompt, endpoint: "fal-audio", ...(model ? { model } : {}) },
@@ -332,9 +341,9 @@ export class LLMock {
     // An injected error is only a valid response for endpoints that can carry
     // an error envelope. Mirror the router's endpoint-compat table
     // (matchFixtureDiagnostic in router.ts): error responses are compatible
-    // with chat / embedding / realtime* / fal and with requests that carry no
-    // endpoint type, but NOT with multimedia endpoints (image, speech, video,
-    // transcription, …). Gating consumption on this prevents an incompatible
+    // with chat / embedding / realtime* / fal / the four elevenlabs-voice*
+    // slots and with requests that carry no endpoint type, but NOT with
+    // multimedia endpoints (image, speech, video, transcription, …). Gating consumption on this prevents an incompatible
     // request from matching the predicate and splicing — and thereby
     // destroying — a one-shot error intended for a different endpoint before
     // the router's own compat check would have skipped it.
@@ -345,7 +354,11 @@ export class LLMock {
         reqEndpoint === "chat" ||
         reqEndpoint === "embedding" ||
         reqEndpoint.startsWith("realtime") ||
-        reqEndpoint === "fal"
+        reqEndpoint === "fal" ||
+        reqEndpoint === "elevenlabs-voice-design" ||
+        reqEndpoint === "elevenlabs-voice" ||
+        reqEndpoint === "elevenlabs-voice-get" ||
+        reqEndpoint === "elevenlabs-voice-delete"
       ) {
         return true;
       }
@@ -465,8 +478,9 @@ export class LLMock {
    * state as well: the Gemini interaction and event-id counters
    * (`resetInteractionCounter` / `resetEventIdCounter` in
    * `./gemini-interactions.js`), the fal.ai job/queue maps (`falJobs`,
-   * `falQueueStates`) and the fine-tuning job store
-   * (`clearFineTuningStore`). With two `LLMock` instances live in one process,
+   * `falQueueStates`), the fine-tuning job store (`clearFineTuningStore`),
+   * and the ElevenLabs Voice Design store (`clearElevenLabsVoices`). With two
+   * `LLMock` instances live in one process,
    * `a.reset()` rewinds the Gemini id sequence that `b` is mid-way through —
    * `b` then re-emits `aimock-int-0` / `evt_1`, ids it has already handed
    * out — and drops `b`'s in-flight fal jobs. Give each instance its own

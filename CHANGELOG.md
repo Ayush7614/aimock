@@ -10,6 +10,8 @@
 - Mock OpenAI fine-tuning jobs — deterministic lifecycle, events, cursor pages (#447)
 - `X-Request-Id` echoed or minted on every response; `?requestId=` filters the journal (#450)
 - `aimock validate` lints fixture files or directories offline, failing on broken files (#453)
+- **ElevenLabs Voice Design record/replay** — `POST /v1/text-to-voice/design` matches fixtures on `voice_description` (via `onElevenLabsVoiceDesign`), `POST /v1/text-to-voice` saves a preview as a permanent voice with a deterministic `voice_id`, and `GET`/`DELETE /v1/voices/{voice_id}` cover slot management (delete is idempotent). Unmatched design/save calls proxy under the existing `elevenlabs` provider key. Preview fixtures embed `audio_base_64` and are larger than JSON-only tapes (#452)
+- ElevenLabs Voice Design: wire-fact provenance block and strict-mode 503 coverage (#454)
 
 ### Changed
 

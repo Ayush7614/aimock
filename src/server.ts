@@ -110,6 +110,13 @@ import {
   BytePlusVideoJobMap,
 } from "./byteplus-video.js";
 import { handleElevenLabsAudio, handleElevenLabsTTS } from "./elevenlabs-audio.js";
+import {
+  handleElevenLabsVoiceDesign,
+  handleElevenLabsVoiceCreate,
+  handleElevenLabsVoiceGet,
+  handleElevenLabsVoiceDelete,
+  clearElevenLabsVoices,
+} from "./elevenlabs-voice.js";
 import { handleFalQueue, falJobs } from "./fal-audio.js";
 import { handleFal, falQueueStates, falWillHandle } from "./fal.js";
 import { handleOllama, handleOllamaGenerate, handleOllamaEmbeddings } from "./ollama.js";
@@ -213,6 +220,9 @@ const GEMINI_PREDICT_RE = /^\/v1beta\/models\/([^:]+):predict$/;
 const ELEVENLABS_SOUND_GENERATION_PATH = "/v1/sound-generation";
 const ELEVENLABS_TTS_RE = /^\/v1\/text-to-speech\/([^/]+)$/;
 const ELEVENLABS_MUSIC_RE = /^\/v1\/music(?:\/(.+))?$/;
+const ELEVENLABS_VOICE_DESIGN_PATH = "/v1/text-to-voice/design";
+const ELEVENLABS_VOICE_CREATE_PATH = "/v1/text-to-voice";
+const ELEVENLABS_VOICE_RE = /^\/v1\/voices\/([^/]+)$/;
 const FAL_QUEUE_SUBMIT_RE = /^\/fal\/queue\/submit\/(.+)$/;
 const FAL_QUEUE_REQUESTS_RE = /^\/fal\/queue\/requests\/(.+)$/;
 const FAL_RUN_RE = /^\/fal\/run\/(.+)$/;
@@ -380,9 +390,10 @@ export interface FullResetTargets {
  * per-test fixture match-counts, i.e. sequence position), the video and fal.ai
  * job/queue state, the fine-tuning store (jobs, their append-only event logs,
  * their poll counts, the create-time suffixes their model names are built from,
- * and the module's monotonic clock), the Gemini interaction/event-id
- * counters, and any runtime chaos override (reverting to the construction-time
- * chaos config), then re-zero the `aimock_fixtures_loaded` gauge.
+ * and the module's monotonic clock), the ElevenLabs Voice Design store, the
+ * Gemini interaction/event-id counters, and any runtime chaos override
+ * (reverting to the construction-time chaos config), then re-zero the
+ * `aimock_fixtures_loaded` gauge.
  *
  * `targets` is `null` when no server is running (an in-process `reset()` before
  * `start()`). The process-global generation state is reset either way, since it
@@ -395,6 +406,7 @@ export function performFullReset(fixtures: Fixture[], targets: FullResetTargets 
   fixtures.length = 0;
   falJobs.clear();
   falQueueStates.clear();
+  clearElevenLabsVoices();
   clearFileStore();
   clearFineTuningStore();
   resetInteractionCounter();
@@ -3799,6 +3811,95 @@ export async function createServerWithResolvedAuth(
       try {
         const raw = await readBody(req);
         await handleElevenLabsAudio(req, res, raw, fixtures, defaults, journal, "sound-generation");
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : "Internal error";
+        if (!res.headersSent) {
+          writeErrorResponse(
+            res,
+            500,
+            JSON.stringify({ error: { message: msg, type: "server_error" } }),
+          );
+        } else if (!res.writableEnded) {
+          res.destroy();
+        }
+      }
+      return;
+    }
+
+    // POST /v1/text-to-voice/design — ElevenLabs Voice Design (must precede create)
+    if (pathname === ELEVENLABS_VOICE_DESIGN_PATH && req.method === "POST") {
+      setCorsHeaders(res);
+      try {
+        const raw = await readBody(req);
+        await handleElevenLabsVoiceDesign(req, res, raw, fixtures, defaults, journal);
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : "Internal error";
+        if (!res.headersSent) {
+          writeErrorResponse(
+            res,
+            500,
+            JSON.stringify({ error: { message: msg, type: "server_error" } }),
+          );
+        } else if (!res.writableEnded) {
+          res.destroy();
+        }
+      }
+      return;
+    }
+
+    // POST /v1/text-to-voice — save a designed preview as a permanent voice
+    if (pathname === ELEVENLABS_VOICE_CREATE_PATH && req.method === "POST") {
+      setCorsHeaders(res);
+      try {
+        const raw = await readBody(req);
+        await handleElevenLabsVoiceCreate(req, res, raw, fixtures, defaults, journal);
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : "Internal error";
+        if (!res.headersSent) {
+          writeErrorResponse(
+            res,
+            500,
+            JSON.stringify({ error: { message: msg, type: "server_error" } }),
+          );
+        } else if (!res.writableEnded) {
+          res.destroy();
+        }
+      }
+      return;
+    }
+
+    // GET|DELETE /v1/voices/{voice_id} — slot management after Voice Design save
+    const elevenLabsVoiceMatch = pathname.match(ELEVENLABS_VOICE_RE);
+    if (elevenLabsVoiceMatch && (req.method === "GET" || req.method === "DELETE")) {
+      setCorsHeaders(res);
+      // The id arrives percent-encoded on the wire while the voice store is
+      // keyed by the id exactly as it appears in JSON, so the raw path segment
+      // made any id carrying a space or a slash permanently unreachable.
+      // `decodeURIComponent` throws `URIError` on a malformed escape — that is
+      // a bad request, not a server fault, so it is answered 400 rather than
+      // falling into the 500 handler below.
+      let voiceId: string;
+      try {
+        voiceId = decodeURIComponent(elevenLabsVoiceMatch[1]);
+      } catch {
+        writeErrorResponse(
+          res,
+          400,
+          JSON.stringify({
+            error: {
+              message: `Invalid voice id '${elevenLabsVoiceMatch[1]}': malformed percent-encoding`,
+              type: "invalid_request_error",
+            },
+          }),
+        );
+        return;
+      }
+      try {
+        if (req.method === "GET") {
+          await handleElevenLabsVoiceGet(req, res, voiceId, fixtures, defaults, journal);
+        } else {
+          await handleElevenLabsVoiceDelete(req, res, voiceId, fixtures, defaults, journal);
+        }
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : "Internal error";
         if (!res.headersSent) {
