@@ -343,9 +343,11 @@ export interface FullResetTargets {
 /**
  * Perform a full reset: clear the fixtures array, the journal (entries *and*
  * per-test fixture match-counts, i.e. sequence position), the video and fal.ai
- * job/queue state, the Gemini interaction/event-id counters, and any runtime
- * chaos override (reverting to the construction-time chaos config), then
- * re-zero the `aimock_fixtures_loaded` gauge.
+ * job/queue state, the fine-tuning store (jobs, their append-only event logs,
+ * their poll counts, the create-time suffixes their model names are built from,
+ * and the module's monotonic clock), the Gemini interaction/event-id
+ * counters, and any runtime chaos override (reverting to the construction-time
+ * chaos config), then re-zero the `aimock_fixtures_loaded` gauge.
  *
  * `targets` is `null` when no server is running (an in-process `reset()` before
  * `start()`). The process-global generation state is reset either way, since it
@@ -2610,9 +2612,30 @@ export async function createServerWithResolvedAuth(
     }
 
     // Fine-tuning jobs — cancel/events REs before id RE.
+    // Cancel takes no payload — the `openai` SDK posts an empty body — but the
+    // body is still read, and discarded, before the handler runs. Reading it is
+    // what applies `readBody`'s 10 MB ceiling: a POST route that never touches
+    // the stream lets node quietly dump whatever the client sends, so this one
+    // route would accept an unbounded upload while the create route beside it
+    // (the sibling pattern followed here, down to the error arm) rejects the
+    // same bytes.
     const ftCancelMatch = pathname.match(FINE_TUNING_CANCEL_RE);
     if (ftCancelMatch && req.method === "POST") {
-      await handleFineTuningCancel(req, res, ftCancelMatch[1], journal, defaults, setCorsHeaders);
+      try {
+        await readBody(req);
+        await handleFineTuningCancel(req, res, ftCancelMatch[1], journal, defaults, setCorsHeaders);
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : "Internal error";
+        if (!res.headersSent) {
+          writeErrorResponse(
+            res,
+            500,
+            JSON.stringify({ error: { message: msg, type: "server_error" } }),
+          );
+        } else if (!res.writableEnded) {
+          res.destroy();
+        }
+      }
       return;
     }
     const ftEventsMatch = pathname.match(FINE_TUNING_EVENTS_RE);

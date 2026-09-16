@@ -464,8 +464,9 @@ export class LLMock {
    * NOT ALL OF THIS IS PER-INSTANCE. `performFullReset` clears module-global
    * state as well: the Gemini interaction and event-id counters
    * (`resetInteractionCounter` / `resetEventIdCounter` in
-   * `./gemini-interactions.js`) and the fal.ai job/queue maps (`falJobs`,
-   * `falQueueStates`). With two `LLMock` instances live in one process,
+   * `./gemini-interactions.js`), the fal.ai job/queue maps (`falJobs`,
+   * `falQueueStates`) and the fine-tuning job store
+   * (`clearFineTuningStore`). With two `LLMock` instances live in one process,
    * `a.reset()` rewinds the Gemini id sequence that `b` is mid-way through —
    * `b` then re-emits `aimock-int-0` / `evt_1`, ids it has already handed
    * out — and drops `b`'s in-flight fal jobs. Give each instance its own

@@ -283,6 +283,14 @@ interface ChaosJournalContext {
   path: string;
   headers: Record<string, string>;
   body: ChatCompletionRequest | null;
+  /**
+   * Service tag copied onto the journal entry, matching what the caller's own
+   * (non-chaos) journal writes use. Without it a chaos-faulted request is
+   * journaled untagged, so `GET /__aimock/journal?service=<name>` silently
+   * misses exactly the requests a chaos test cares about. Optional: callers
+   * that do not tag their normal entries pass nothing.
+   */
+  service?: string;
 }
 
 /**
