@@ -102,8 +102,9 @@
               <td><code>/__aimock/reset</code></td>
               <td>
                 Full reset: fixtures, journal entries, fixture match-counts (sequence position),
-                video + fal.ai job state, the Gemini interaction / event-id counters, every runtime
-                chaos override and the chaos warning latch
+                video + fal.ai job state, the Files, fine-tuning and ElevenLabs voice stores, the
+                Gemini interaction / event-id counters, every runtime chaos override and the chaos
+                warning latch
               </td>
             </tr>
             <tr>
@@ -276,10 +277,24 @@
           job and queue state, the Gemini interaction and event-id counters, every runtime chaos
           override set via <code>POST /__aimock/chaos</code> (every <code>X-Test-Id</code> scope and
           the untagged baseline, reverting to the construction-time chaos config), and this server's
-          latch of once-per-value <code>[chaos]</code> rejection warnings. Only this route clears
-          chaos state: <code>/reset/journal</code>, <code>DELETE /__aimock/fixtures</code> and
-          <code>DELETE /__aimock/chaos</code> leave the latch alone, and only the last of those
-          touches an override.
+          latch of once-per-value <code>[chaos]</code> rejection warnings so the next request
+          reports them again. Only this route clears chaos state: <code>/reset/journal</code>,
+          <code>DELETE /__aimock/fixtures</code> and <code>DELETE /__aimock/chaos</code> leave the
+          latch alone, and only the last of those touches an override. It also clears the three
+          stores that are module-global rather than per-server &mdash; every
+          <a href="/files">Files API</a> upload, every <a href="/fine-tuning">fine-tuning</a> job,
+          and every ElevenLabs Voice Design preview and saved voice &mdash; and sets the
+          <code>aimock_fixtures_loaded</code> gauge to 0.
+        </p>
+        <p>
+          <code>LLMock.reset()</code> runs the same implementation in-process, so it clears
+          everything above. It clears one thing more: the search, rerank and moderation fixtures
+          registered through <code>onSearch()</code> / <code>onRerank()</code> /
+          <code>onModerate()</code>, which the control API has no route to create and so cannot
+          reach. Because the Files, fine-tuning and voice stores and the Gemini counters are
+          module-global, a reset on one <code>LLMock</code> instance clears them for every other
+          instance in the same process, and <code>reset()</code> clears them even before
+          <code>start()</code>.
         </p>
         <div class="code-block">
           <div class="code-block-header">Full reset <span class="lang-tag">shell</span></div>

@@ -612,7 +612,13 @@ $ npx @copilotkit/aimock convert vidaimock ./templates/</code></pre>
             accepts a URL; validate does not) &mdash; download the file and validate the local
             copy</code
           >
-          &mdash; rather than reported as a missing file.
+          &mdash; rather than reported as a missing file. "The server" in that message is the
+          <code>llmock</code> bin (<code>dist/cli.js</code>, the Docker entrypoint): its
+          <code>-f, --fixtures</code> takes a filesystem path or an <code>https://</code> /
+          <code>http://</code> URL to a <code>.json</code> fixture file. The <code>aimock</code> bin
+          has no <code>--fixtures</code> flag at all; it loads fixtures through
+          <code>--config</code>, whose <code>llm.fixtures</code> is resolved as a filesystem path
+          only. No bin accepts a URL for <code>validate</code>.
         </p>
         <p>
           Anything the filesystem or a fixture entry can throw is contained in the report instead of
@@ -635,12 +641,17 @@ $ npx @copilotkit/aimock convert vidaimock ./templates/</code></pre>
           stdout never loses a file. <code>OK</code> is withheld in one case: on a run that failed
           because it loaded no fixtures at all, the file that loaded none reads
           <code>&lt;file&gt;: 0 fixture(s), loaded nothing &mdash; see the run-level error</code>.
-          With <code>--json</code>, stdout carries the report alone and the one-line failure reason
-          goes to stderr. A path given twice is validated twice, because the server loads one set of
-          fixtures per <code>--fixtures</code> it is given; the duplicate fixtures that produces are
-          reported as the server reports them, one finding per fixture and rule. Such a path is
-          printed as <code>&lt;path&gt;[&lt;n&gt;]</code>, numbering its mentions from 1, so each
-          load &mdash; and every cross-file reference to its fixtures &mdash; names one of them:
+          With <code>--json</code>, stdout carries the report alone; stderr carries one line,
+          <code
+            >Error: fixture validation failed &mdash; &lt;first finding&gt; [&lt;counts&gt;].</code
+          >, when the run failed on its inputs. A usage error (no paths, an unknown option) writes
+          <code>Error: &lt;reason&gt;</code>, a blank line, and the full subcommand help to stderr
+          &mdash; in both output modes, not a one-line reason. A path given twice is validated
+          twice, because the server loads one set of fixtures per <code>--fixtures</code> it is
+          given; the duplicate fixtures that produces are reported as the server reports them, one
+          finding per fixture and rule. Such a path is printed as
+          <code>&lt;path&gt;[&lt;n&gt;]</code>, numbering its mentions from 1, so each load &mdash;
+          and every cross-file reference to its fixtures &mdash; names one of them:
         </p>
         <div class="code-block">
           <div class="code-block-header">
@@ -656,9 +667,14 @@ dup.json[2]: 2 fixture(s), 0 error(s), 2 warning(s)</code></pre>
         <h3>The <code>--json</code> Report</h3>
         <p>
           <code>--json</code> writes one document to stdout and nothing else &mdash; a usage error
-          included; the one-line reason a run failed still goes to stderr. Validating a directory
-          holding a file with invalid JSON and a file with one bad entry and a duplicate
-          <code>userMessage</code> (exit 1):
+          included. stderr still gets the failure: one
+          <code>Error: fixture validation failed &mdash; ...</code> line for a run that failed on
+          its inputs, or <code>Error: &lt;reason&gt;</code> plus the full help for a usage error.
+          <code>--json --help</code> is a document too:
+          <code>{ "help": "&lt;help text&gt;" }</code>, the help as the one string field,
+          pretty-printed, exit 0, nothing on stderr. Validating a directory holding a file with
+          invalid JSON and a file with one bad entry and a duplicate <code>userMessage</code> (exit
+          1):
         </p>
         <div class="code-block">
           <div class="code-block-header">validate --json <span class="lang-tag">json</span></div>
@@ -802,7 +818,10 @@ dup.json[2]: 2 fixture(s), 0 error(s), 2 warning(s)</code></pre>
                 The combined pass: <code>fixtures</code> is the total fixture count across every
                 file, and <code>errors</code> holds run-level strings such as
                 <code>"Cross-file validation failed: ..."</code>,
-                <code>"No fixtures loaded from any input"</code>, or the reason a usage error failed
+                <code
+                  >"No fixtures loaded from any input &mdash; the server aborts startup on this
+                  under --validate-on-load/--strict"</code
+                >, or the reason a usage error failed
               </td>
             </tr>
           </tbody>
@@ -833,7 +852,10 @@ dup.json[2]: 2 fixture(s), 0 error(s), 2 warning(s)</code></pre>
             </tr>
             <tr>
               <td><code>-h</code>, <code>--help</code></td>
-              <td>Show the subcommand help</td>
+              <td>
+                Show the subcommand help and exit 0. With <code>--json</code> the help is the one
+                field of a JSON document on stdout: <code>{ "help": "&lt;help text&gt;" }</code>
+              </td>
             </tr>
             <tr>
               <td><code>--</code></td>
@@ -873,6 +895,22 @@ dup.json[2]: 2 fixture(s), 0 error(s), 2 warning(s)</code></pre>
           </tbody>
         </table>
 
+        <h3>Validation State and Reset</h3>
+        <p>
+          <code>validate</code> keeps no state. It constructs no <code>LLMock</code> and no server,
+          touches no journal, match-count, chaos or file store, and reads only the paths it is
+          given, so there is nothing for <code>LLMock.reset()</code> or
+          <code>POST /__aimock/reset</code> to clear and nothing they change about its result.
+          Running it against a fixture directory a live server is also serving is safe; the two
+          never share memory. The server applies the same per-fixture rules on its own, to the batch
+          it is handed at that moment: at startup under <code>--validate-on-load</code>, on each
+          <code>--watch</code> reload when that flag is set, on
+          <code>POST /__aimock/fixtures</code> (errors answer <code>400</code>), and in
+          <code>LLMock.addFixturesFromJSON()</code> (errors throw). None of them re-checks the batch
+          against fixtures already loaded, so the cross-load findings this lint reports come from
+          this lint alone. A full reset empties the loaded fixtures and re-validates nothing.
+        </p>
+
         <h3>Examples</h3>
         <div class="code-block">
           <div class="code-block-header">
@@ -883,8 +921,11 @@ dup.json[2]: 2 fixture(s), 0 error(s), 2 warning(s)</code></pre>
 <span class="cm">#   fixtures/examples/mcp/mcp-config.json: skipped (not a fixture file &mdash; an aimock config file (mcp), which "aimock --config" serves and "--fixtures" does not load)</span>
 $ npx @copilotkit/aimock validate ./fixtures/
 
-<span class="cm"># Validate specific files, failing on warnings too</span>
-$ npx @copilotkit/aimock validate --strict ./fixtures/openai.json ./fixtures/anthropic.json
+<span class="cm"># Validate specific files, failing on warnings too. Under --strict the whole</span>
+<span class="cm"># shipped tree exits 1: examples/adk/gemini-agent.json and examples/mastra/agent-workflow.json</span>
+<span class="cm"># repeat a userMessage that example-greeting.json / examples/langchain/agent-loop.json</span>
+<span class="cm"># already match, and that cross-file duplicate is a warning. These paths pass:</span>
+$ npx @copilotkit/aimock validate --strict ./fixtures/example-greeting.json ./fixtures/examples/llm/
 
 <span class="cm"># Machine-readable report for CI</span>
 $ npx @copilotkit/aimock validate --json ./fixtures/</code></pre>
