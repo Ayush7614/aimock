@@ -51,8 +51,8 @@
         <h1>Chaos Testing</h1>
         <p class="lead">
           aimock provides probabilistic failure injection to test how your application handles
-          unreliable LLM APIs. Three failure modes can be configured at the server, fixture, or
-          per-request level.
+          unreliable LLM APIs. Four probabilistic failure modes and one deterministic delay can be
+          configured at the server, fixture, or per-request level.
         </p>
 
         <h2>Failure Modes</h2>
@@ -85,12 +85,93 @@
               </td>
             </tr>
             <tr>
+              <td><code>rateLimit</code></td>
+              <td>HTTP 429</td>
+              <td>
+                Returns a 429 with
+                <code
+                  >{"error":{"message":"Chaos: rate limit
+                  exceeded","type":"rate_limit_error","code":"chaos_ratelimit"}}</code
+                >
+                plus <code>Retry-After: 1</code> and the static OpenAI-style
+                <code>x-ratelimit-*</code> headers every aimock 429 carries
+              </td>
+            </tr>
+            <tr>
               <td><code>disconnect</code></td>
               <td>Connection destroyed</td>
               <td>Destroys the TCP connection immediately with no response</td>
             </tr>
           </tbody>
         </table>
+        <p>
+          The four modes are rolled from rates. A fifth field, <code>latencyMs</code>, is not a mode
+          and is not rolled: when set it always fires, delaying the request by that many
+          milliseconds <em>before</em> the four rates are drawn, so the delay applies to a request
+          whether or not a fault then fires.
+        </p>
+
+        <h2 id="chaos-fields">Chaos Fields</h2>
+        <p>
+          Every chaos source &mdash; a fixture's <code>chaos</code> block, the server config, the
+          <code>--chaos-*</code> flags, <code>POST /__aimock/chaos</code> and the per-request
+          headers &mdash; accepts the same five fields:
+        </p>
+        <table class="endpoint-table">
+          <thead>
+            <tr>
+              <th>Field</th>
+              <th>Type</th>
+              <th>Bounds</th>
+              <th>Effect</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>dropRate</code></td>
+              <td>rate</td>
+              <td>0&ndash;1</td>
+              <td>Probability of <code>drop</code> (500)</td>
+            </tr>
+            <tr>
+              <td><code>malformedRate</code></td>
+              <td>rate</td>
+              <td>0&ndash;1</td>
+              <td>Probability of <code>malformed</code> (200 with a broken JSON body)</td>
+            </tr>
+            <tr>
+              <td><code>rateLimitRate</code></td>
+              <td>rate</td>
+              <td>0&ndash;1</td>
+              <td>Probability of <code>rateLimit</code> (429)</td>
+            </tr>
+            <tr>
+              <td><code>disconnectRate</code></td>
+              <td>rate</td>
+              <td>0&ndash;1</td>
+              <td>Probability of <code>disconnect</code> (socket destroyed)</td>
+            </tr>
+            <tr>
+              <td><code>latencyMs</code></td>
+              <td>integer</td>
+              <td>0&ndash;30000, whole milliseconds</td>
+              <td>Deterministic delay before the rates are rolled</td>
+            </tr>
+          </tbody>
+        </table>
+        <p>
+          <strong>Reject, never clamp.</strong> A value outside its bounds, a non-finite number, a
+          fractional <code>latencyMs</code>, or a value that is not a number at all is
+          <em>rejected</em> &mdash; it is never rounded or clamped into range, so a fault rate
+          nobody asked for is never substituted for the one they wrote. Each source reports the
+          rejection the loudest way it can: <code>POST /__aimock/chaos</code> answers
+          <code>400</code> and installs nothing; a <code>--chaos-*</code> flag refuses to start the
+          server; a header, fixture or server value is dropped with a <code>[chaos]</code> warning
+          and the next level of precedence applies in its place. The fixture and server warnings are
+          latched &mdash; printed once per distinct bad value per server, not once per request
+          &mdash; and <code>POST /__aimock/reset</code> re-arms the latch; header warnings are not
+          latched, since each request is a new caller.
+        </p>
 
         <h2>Precedence</h2>
         <p>
@@ -103,10 +184,10 @@
           <li><strong>Server-level defaults</strong> (lowest)</li>
         </ol>
         <p>
-          Each level overrides the one below <em>field by field</em>: a fixture that sets only
-          <code>dropRate</code> leaves the server's <code>latencyMs</code> in place, and a request
-          header that sets only <code>x-aimock-chaos-disconnect</code> leaves the rest of the
-          fixture's rates alone.
+          Each level overrides the one below <em>field by field</em> (a field-wise merge): a fixture
+          that sets only <code>dropRate</code> leaves the server's <code>latencyMs</code> in place,
+          and a request header that sets only <code>x-aimock-chaos-disconnect</code> leaves the rest
+          of the fixture's rates alone.
         </p>
         <p>
           Within a single level, modes are rolled in order &mdash; drop, malformed, rateLimit,
@@ -160,7 +241,9 @@
 <span class="op">mock</span>.<span class="fn">setChaos</span>({
   <span class="prop">dropRate</span>: <span class="num">0.1</span>,        <span class="cm">// 10% drop rate</span>
   <span class="prop">malformedRate</span>: <span class="num">0.05</span>,  <span class="cm">// 5% malformed rate</span>
+  <span class="prop">rateLimitRate</span>: <span class="num">0.05</span>,  <span class="cm">// 5% rate-limit (429) rate</span>
   <span class="prop">disconnectRate</span>: <span class="num">0.02</span>, <span class="cm">// 2% disconnect rate</span>
+  <span class="prop">latencyMs</span>: <span class="num">250</span>,       <span class="cm">// always delay 250 ms first</span>
 });
 
 <span class="cm">// Remove all server-level chaos</span>
@@ -240,9 +323,11 @@
           value that is out of range, not a plain decimal (<code>1e3</code>, <code>0x1f</code>,
           <code>Infinity</code>), or fractional where a whole number of milliseconds is required is
           rejected with a warning and simply does not apply &mdash; the level below it (fixture,
-          then server default) still does. The same rule governs values set in a fixture, in the
-          server defaults, on the <code>--chaos-*</code> CLI flags and through
-          <code>POST /__aimock/chaos</code>.
+          then server default) still does. The header spelling is case-insensitive (<code
+            >X-AIMock-Chaos-Latency</code
+          >
+          and <code>x-aimock-chaos-latency</code> are the same header); the value rules are the ones
+          in <a href="#chaos-fields">Chaos Fields</a>.
         </p>
 
         <div class="code-block">
@@ -261,24 +346,63 @@
         </div>
 
         <h2>CLI Flags</h2>
-        <p>Set server-level chaos from the command line:</p>
+        <p>
+          The <code>--chaos-*</code> flags belong to the <code>llmock</code> binary (the
+          fixtures-and-flags CLI), which is also what the Docker image runs. There is one flag per
+          field, each taking the same value as the field &mdash; rates as plain decimals in
+          <code>0&ndash;1</code>, <code>--chaos-latency</code> as whole milliseconds in
+          <code>0&ndash;30000</code>. An out-of-range or unparseable value exits with an
+          <code>Invalid chaos-drop: &hellip;</code> style error before the server starts.
+        </p>
+        <table class="endpoint-table">
+          <thead>
+            <tr>
+              <th>Flag</th>
+              <th>Field</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>--chaos-drop &lt;rate&gt;</code></td>
+              <td><code>dropRate</code></td>
+            </tr>
+            <tr>
+              <td><code>--chaos-malformed &lt;rate&gt;</code></td>
+              <td><code>malformedRate</code></td>
+            </tr>
+            <tr>
+              <td><code>--chaos-ratelimit &lt;rate&gt;</code></td>
+              <td><code>rateLimitRate</code></td>
+            </tr>
+            <tr>
+              <td><code>--chaos-disconnect &lt;rate&gt;</code></td>
+              <td><code>disconnectRate</code></td>
+            </tr>
+            <tr>
+              <td><code>--chaos-latency &lt;ms&gt;</code></td>
+              <td><code>latencyMs</code></td>
+            </tr>
+          </tbody>
+        </table>
 
         <div class="cli-docker-tabs">
           <div class="tab-cli">
             <div class="code-block">
               <div class="code-block-header">
-                CLI chaos flags <span class="lang-tag">shell</span>
+                llmock chaos flags <span class="lang-tag">shell</span>
               </div>
-              <pre><code>$ npx -p @copilotkit/aimock aimock --fixtures ./fixtures \
+              <pre><code>$ npx -p @copilotkit/aimock llmock --fixtures ./fixtures \
   --chaos-drop 0.1 \
   --chaos-malformed 0.05 \
-  --chaos-disconnect 0.02</code></pre>
+  --chaos-ratelimit 0.05 \
+  --chaos-disconnect 0.02 \
+  --chaos-latency 250</code></pre>
             </div>
           </div>
           <div class="tab-docker">
             <div class="code-block">
               <div class="code-block-header">
-                CLI chaos flags <span class="lang-tag">shell</span>
+                Docker chaos flags <span class="lang-tag">shell</span>
               </div>
               <pre><code>$ docker run -d -p 4010:4010 \
   -v ./fixtures:/fixtures \
@@ -286,9 +410,36 @@
   -f /fixtures -h 0.0.0.0 \
   --chaos-drop 0.1 \
   --chaos-malformed 0.05 \
-  --chaos-disconnect 0.02</code></pre>
+  --chaos-ratelimit 0.05 \
+  --chaos-disconnect 0.02 \
+  --chaos-latency 250</code></pre>
             </div>
           </div>
+        </div>
+
+        <p>
+          The <code>aimock</code> binary takes no chaos flags &mdash; its only options are
+          <code>--config</code>, <code>--port</code> and <code>--host</code>. With
+          <code>aimock --config</code>, set the server-level chaos under <code>llm.chaos</code> in
+          the config file (the same five fields, the same bounds), or install it at runtime with
+          <code>POST /__aimock/chaos</code> (see the <a href="/control-api">Control API</a>).
+        </p>
+        <div class="code-block">
+          <div class="code-block-header">aimock.config.json <span class="lang-tag">json</span></div>
+          <pre><code>{
+  <span class="prop">"llm"</span>: {
+    <span class="prop">"fixtures"</span>: <span class="str">"./fixtures"</span>,
+    <span class="prop">"chaos"</span>: {
+      <span class="prop">"dropRate"</span>: <span class="num">0.1</span>,
+      <span class="prop">"rateLimitRate"</span>: <span class="num">0.05</span>,
+      <span class="prop">"latencyMs"</span>: <span class="num">250</span>
+    }
+  }
+}</code></pre>
+        </div>
+        <div class="code-block">
+          <div class="code-block-header">Start from config <span class="lang-tag">shell</span></div>
+          <pre><code>$ npx -p @copilotkit/aimock aimock --config ./aimock.config.json</code></pre>
         </div>
 
         <h2>Proxy Mode</h2>
@@ -297,7 +448,8 @@
           to proxied requests too &mdash; so a staging environment pointed at real upstream APIs
           still sees the failure modes your tests expect. Chaos is rolled <em>once per request</em>,
           after fixture matching, with the same headers&nbsp;&gt;&nbsp;fixture&nbsp;&gt;&nbsp;server
-          precedence.
+          precedence, and a configured <code>latencyMs</code> is awaited before the roll and before
+          upstream is contacted.
         </p>
         <table class="endpoint-table">
           <thead>
@@ -312,6 +464,11 @@
               <td><code>drop</code></td>
               <td>Never &mdash; upstream not contacted</td>
               <td>HTTP 500 chaos body; upstream is not called</td>
+            </tr>
+            <tr>
+              <td><code>rateLimit</code></td>
+              <td>Never &mdash; upstream not contacted</td>
+              <td>HTTP 429 chaos body; upstream is not called</td>
             </tr>
             <tr>
               <td><code>disconnect</code></td>
@@ -362,9 +519,11 @@
 }</code></pre>
         </div>
         <p>
-          The <code>chaosAction</code> values are <code>"drop"</code>, <code>"malformed"</code>, or
-          <code>"disconnect"</code>. The status codes are 500 for drop, 200 for malformed, and 0 for
-          disconnect (connection destroyed).
+          The <code>chaosAction</code> values are <code>"drop"</code>, <code>"malformed"</code>,
+          <code>"rateLimit"</code> and <code>"disconnect"</code>. The recorded status codes are 500
+          for drop, 200 for malformed, 429 for rateLimit, and 0 for disconnect (connection
+          destroyed). A latency delay alone leaves no <code>chaosAction</code>: the entry is the
+          ordinary one for whatever the request then received.
         </p>
 
         <h2>Prometheus Metrics</h2>
