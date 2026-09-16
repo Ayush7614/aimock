@@ -49,6 +49,8 @@ import {
   getTestId,
   readBody,
   readBodyBufferBounded,
+  resolveRequestId,
+  markMintedRequestId,
   resolveResponse,
   resolveStrictMode,
   resolveReasoningForModel,
@@ -315,7 +317,7 @@ const CORS_HEADERS: Record<string, string> = {
   // Response headers are invisible to cross-origin JS unless exposed. The
   // journal's pagination total is a response header (the body stays a bare
   // array for back-compat), so a browser harness needs this to read it.
-  "Access-Control-Expose-Headers": "X-Total-Count",
+  "Access-Control-Expose-Headers": "X-Total-Count, X-Request-Id",
 };
 
 function setCorsHeaders(res: http.ServerResponse): void {
@@ -355,6 +357,7 @@ const JOURNAL_PARAMS: ReadonlySet<string> = new Set([
   "status",
   "service",
   "testId",
+  "requestId",
 ]);
 
 /**
@@ -597,6 +600,7 @@ async function handleControlAPI(
     const methodFilter = searchParams.get("method");
     const serviceFilter = searchParams.get("service");
     const testIdFilter = searchParams.get("testId");
+    const requestIdFilter = searchParams.get("requestId");
 
     let entries: JournalEntry[] = journal.getAll();
     if (methodFilter !== null) {
@@ -614,6 +618,9 @@ async function handleControlAPI(
     }
     if (testIdFilter !== null) {
       entries = entries.filter((e) => journalEntryTestId(e) === testIdFilter);
+    }
+    if (requestIdFilter !== null) {
+      entries = entries.filter((e) => e.headers["x-request-id"] === requestIdFilter);
     }
     // Count AFTER filtering but BEFORE pagination, so a paging caller can tell
     // when it is done. It ships as a header because the body is a bare array
@@ -2146,6 +2153,18 @@ export async function createServerWithResolvedAuth(
   ): Promise<void> {
     // Record start time for metrics
     const startTime = registry ? process.hrtime.bigint() : 0n;
+
+    // Request-id propagation: echo a well-formed caller id, else mint one.
+    // Normalized back onto `req.headers` so every downstream
+    // `flattenHeaders` journal snapshot carries it with zero per-handler
+    // edits, and echoed on the response for trace correlation. A MINTED id is
+    // aimock's own invention and must never reach a real provider, so the
+    // provenance is marked for `buildForwardHeaders` to strip on egress; a
+    // caller-supplied id is the caller's header and forwards untouched.
+    const { id: requestId, generated: requestIdMinted } = resolveRequestId(req.headers);
+    req.headers["x-request-id"] = requestId;
+    markMintedRequestId(req, requestIdMinted);
+    res.setHeader("X-Request-Id", requestId);
 
     // Parse the URL pathname (strip query string)
     const parsedUrl = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
