@@ -348,6 +348,42 @@ export function getStoredFileBytes(id: string): Buffer | undefined {
 }
 
 /**
+ * Register one file in the store and return its wire object. This is the one
+ * insert path: `POST /v1/files` uses it, and so do server-side producers of
+ * files (the Batches mock minting `output_file_id` / `error_file_id`), so a
+ * file minted internally is retrievable through `GET /v1/files/{id}` and
+ * `/content` exactly like an upload. `content` must be an OWNED buffer (see
+ * {@link ParsedUpload.content}) — it is stored as-is, and it must already be
+ * within {@link FILES_MAX_BYTES}: the cap the upload route enforces holds for
+ * every file in the store, so a producer that cannot fit under it fails its
+ * own operation instead of storing the file.
+ */
+export function storeFile(file: {
+  purpose: string;
+  filename: string;
+  content: Buffer;
+}): FileObject {
+  if (file.content.length > FILES_MAX_BYTES) {
+    throw new RangeError(`File content exceeds ${FILES_MAX_BYTES} byte cap`);
+  }
+  const id = generateId("file");
+  const obj: FileObject = {
+    id,
+    object: "file",
+    bytes: file.content.length,
+    created_at: Math.floor(Date.now() / 1000),
+    filename: file.filename,
+    purpose: file.purpose,
+    status: "processed",
+  };
+  fileStore.set(id, obj);
+  // Stored as-is: an owned buffer of exactly the file's bytes, so residency
+  // here is the file's size and nothing more.
+  fileContents.set(id, { bytes: file.content });
+  return obj;
+}
+
+/**
  * Synthetic journal body for an upload — the SAME convention
  * {@link handleTranscription} uses for `multipart/form-data` audio: the entry
  * carries a small object describing the upload that was parsed out of the
@@ -1167,21 +1203,8 @@ export async function handleFilesCreate(
     return;
   }
 
-  const id = generateId("file");
-  const bytes = parsed.content.length;
-  const obj: FileObject = {
-    id,
-    object: "file",
-    bytes,
-    created_at: Math.floor(Date.now() / 1000),
-    filename: parsed.filename,
-    purpose: parsed.purpose,
-    status: "processed",
-  };
-  fileStore.set(id, obj);
-  // Stored as-is: `ParsedUpload.content` is an owned buffer of exactly the
-  // file's bytes, so residency here is the file's size and nothing more.
-  fileContents.set(id, { bytes: parsed.content });
+  const obj = storeFile(parsed);
+  const { id, bytes } = obj;
 
   defaults.logger.debug(`Files mock: stored ${id} (${parsed.filename}, ${bytes} bytes)`);
   journalFiles(journal, method, path, flattenHeaders(req.headers), 200, filesUploadBody(parsed));
