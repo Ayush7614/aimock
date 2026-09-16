@@ -6,6 +6,7 @@
 
 - Chaos `rateLimitRate` / `--chaos-ratelimit`: deterministic 429 with `Retry-After` (#449)
 - Chaos `latencyMs` / `--chaos-latency` now actually delays responses on every path (#449)
+- OpenAI Files API mock — byte-exact uploads, create-purpose enum, CORS on faults (#445)
 - **ElevenLabs Voice Design record/replay** — `POST /v1/text-to-voice/design` matches fixtures on `voice_description` (via `onElevenLabsVoiceDesign`), `POST /v1/text-to-voice` saves a preview as a permanent voice with a deterministic `voice_id`, and `GET`/`DELETE /v1/voices/{voice_id}` cover slot management (delete is idempotent). Unmatched design/save calls proxy under the existing `elevenlabs` provider key. Preview fixtures embed `audio_base_64` and are larger than JSON-only tapes (#452)
 - ElevenLabs Voice Design: wire-fact provenance block and strict-mode 503 coverage (#454)
 
@@ -14,9 +15,18 @@
 - Realtime `OpenAI-Beta: realtime=v1` now returns the real sunset rejection, not a session (#461)
 - `POST /v1/images/variations` now replays the real removal 404; OpenAI deleted it (#462)
 - `ChaosAction` gains `"rateLimit"` — an exhaustive switch over it needs a case (#449)
+- `applyChaosAsync()` returns a `ChaosAsyncOutcome` (`false | "handled" | "unwritable"`) instead of a bare `boolean`, so callers can tell "a chaos action fired and was journalled" from "the response was already dead, nothing happened" — the old `true` meant both. Both non-`false` members are truthy, so the standard `if (await applyChaosAsync(...)) return;` call shape is unchanged; only code that stored the result in an explicitly `boolean`-typed binding needs updating (#449)
+
+### Deprecated
+
+- The exported synchronous `applyChaos()` — it cannot await, so it silently skips the configured chaos latency (`latencyMs` / `--chaos-latency` / `x-aimock-chaos-latency`) while every internal caller is now required to use the async form. It still works and its fault behaviour is unchanged, but it now warns once per process. Library consumers embedding aimock should switch to `await applyChaosAsync(...)` — same arguments, plus the latency (#449)
 
 ### Fixed
 
+- Chaos no longer treats a committed status line as a dead response. `headersSent` was folded in with "the client hung up" and "the body was already ended", so on an already-committed response the configured chaos latency was zeroed and a `disconnect` action — a bare socket teardown that needs no status line of its own — was silently skipped. Only the three actions that write their own status line (`drop`, `malformed`, `rateLimit`) are foreclosed by committed headers now, and when one of them is skipped `applyChaosAsync()` returns `false` rather than a truthy `"unwritable"`, so the ubiquitous `if (await applyChaosAsync(...)) return;` no longer abandons a healthy body the handler was still streaming (#449)
+- Chaos skip logs name what actually happened. A response that was ended normally and whose connection was torn down afterwards is reported as already-ended instead of "the client disconnected", and the `disconnect` action's own `res.destroy()` is reported as aimock's teardown instead of a client hang-up (#449)
+- `aimock_chaos_triggered_total` is incremented AFTER the chaos response is written, not before, so a write that throws no longer leaves behind a metric for bytes that never went out (#449)
+- A request whose chaos latency was cancelled by the client hanging up mid-delay is no longer served or journalled. The chat-completions gate and the two server-side fal gates await the delay and roll the chaos action as separate steps, and did not re-check that the response could still carry bytes once the delay unwound early — so an aborted request still had a full response built, written into a dead socket and recorded in the journal. That phantom entry claimed bytes no client ever received; `journal.getAll()` now stays empty for it, exactly as `applyChaosAsync` already documented (#449)
 - Moderations echoes the request's `model`; default is now `omni-moderation-latest` (#459)
 - Image endpoints default to `gpt-image-1` — `dall-e-2`/`dall-e-3` were removed (#459)
 - AG-UI record/proxy mode forwards the caller's headers and the raw request body to the upstream agent, instead of rebuilding the request from an `Authorization` / `x-api-key` allowlist and a re-serialized payload. An agent whose runtime contract travels in headers — session affinity, per-request agent configuration, a request signature over the body — now keeps it across the hop. `Accept` is forced to `text/event-stream` (AG-UI is an SSE protocol and the recorder can only parse an event stream); `Content-Type` is only defaulted, since the caller owns it and a signature may cover it (#455)

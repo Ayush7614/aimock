@@ -7,6 +7,7 @@ import { loadFixtureFile, loadFixturesFromDir, validateFixtures } from "./fixtur
 import { Logger, type LogLevel } from "./logger.js";
 import { watchFixtures } from "./watcher.js";
 import { AGUIMock } from "./agui-mock.js";
+import { parseChaosField, CHAOS_FIELDS, type ChaosField } from "./chaos.js";
 import { resolveFixturesValue } from "./fixtures-remote.js";
 import { readProviderKeysFromEnv } from "./provider-auth.js";
 import { resolveInboundAuth, selectInboundAuthSource } from "./api-key-auth.js";
@@ -55,7 +56,7 @@ Options:
       --chaos-malformed <rate>  Probability (0-1) of returning malformed JSON
       --chaos-disconnect <rate> Probability (0-1) of destroying connection
       --chaos-ratelimit <rate> Probability (0-1) of 429 with Retry-After
-      --chaos-latency <ms> Delay (0-30000ms) injected before handling
+      --chaos-latency <ms> Delay (0-${CHAOS_FIELDS.latencyMs.max}ms) injected before handling
       AIMOCK_API_KEYS  Comma-separated inbound test API keys (environment only)
       --help                Show this help message
 `.trim();
@@ -230,46 +231,28 @@ let chaos: ChaosConfig | undefined;
     ratelimitStr !== undefined ||
     latencyStr !== undefined
   ) {
+    // Same parser, same TABLE, same reject-never-clamp policy as every other
+    // chaos input (headers, fixture, server default, control API) — see
+    // `ChaosConfig`. The bounds and the integer-vs-rate grammar are read out of
+    // `CHAOS_FIELDS`, never re-typed here, so raising a cap in that one table
+    // moves the flag with it instead of leaving `--chaos-latency` on the old
+    // limit with no compile error.
     chaos = {};
-    if (dropStr !== undefined) {
-      const val = parseFloat(dropStr);
-      if (isNaN(val) || val < 0 || val > 1) {
-        console.error(`Invalid chaos-drop: ${dropStr} (must be 0-1)`);
+    const flagFields: Array<{ flag: string; field: ChaosField; raw: string | undefined }> = [
+      { flag: "chaos-drop", field: "dropRate", raw: dropStr },
+      { flag: "chaos-malformed", field: "malformedRate", raw: malformedStr },
+      { flag: "chaos-disconnect", field: "disconnectRate", raw: disconnectStr },
+      { flag: "chaos-ratelimit", field: "rateLimitRate", raw: ratelimitStr },
+      { flag: "chaos-latency", field: "latencyMs", raw: latencyStr },
+    ];
+    for (const { flag, field, raw } of flagFields) {
+      if (raw === undefined) continue;
+      const val = parseChaosField(field, raw);
+      if (val === undefined) {
+        console.error(`Invalid ${flag}: ${raw} (must be 0-${CHAOS_FIELDS[field].max})`);
         process.exit(1);
       }
-      chaos.dropRate = val;
-    }
-    if (malformedStr !== undefined) {
-      const val = parseFloat(malformedStr);
-      if (isNaN(val) || val < 0 || val > 1) {
-        console.error(`Invalid chaos-malformed: ${malformedStr} (must be 0-1)`);
-        process.exit(1);
-      }
-      chaos.malformedRate = val;
-    }
-    if (disconnectStr !== undefined) {
-      const val = parseFloat(disconnectStr);
-      if (isNaN(val) || val < 0 || val > 1) {
-        console.error(`Invalid chaos-disconnect: ${disconnectStr} (must be 0-1)`);
-        process.exit(1);
-      }
-      chaos.disconnectRate = val;
-    }
-    if (ratelimitStr !== undefined) {
-      const val = parseFloat(ratelimitStr);
-      if (isNaN(val) || val < 0 || val > 1) {
-        console.error(`Invalid chaos-ratelimit: ${ratelimitStr} (must be 0-1)`);
-        process.exit(1);
-      }
-      chaos.rateLimitRate = val;
-    }
-    if (latencyStr !== undefined) {
-      const val = parseFloat(latencyStr);
-      if (isNaN(val) || val < 0 || val > 30000) {
-        console.error(`Invalid chaos-latency: ${latencyStr} (must be 0-30000)`);
-        process.exit(1);
-      }
-      chaos.latencyMs = val;
+      chaos[field] = val;
     }
   }
 }

@@ -552,11 +552,29 @@ export interface RecordedTimings {
 /**
  * Probabilistic chaos injection rates.
  *
- * Rates are evaluated sequentially per request — drop → malformed → disconnect
- * — and the first hit wins. Consequently malformedRate is conditional on drop
- * not firing, and disconnectRate is conditional on neither drop nor malformed
- * firing. A config of `{ dropRate: 0.5, malformedRate: 0.5 }` yields a ~25 %
- * effective malformed rate, not 50 %.
+ * Rates are evaluated sequentially per request — drop → malformed → rateLimit
+ * → disconnect — as four separate draws in that order, and the first draw that
+ * hits wins and short-circuits the rest. Each rate is therefore the probability
+ * that its OWN draw hits GIVEN that no earlier rate fired, not the share of
+ * requests that end in that fault; only `dropRate`, first in the chain, is
+ * unconditional. A config of `{ dropRate: 0.5, malformedRate: 0.5 }` yields a
+ * ~25 % effective malformed rate, not 50 %, and the same compounding applies to
+ * `{ dropRate: 0.5, rateLimitRate: 0.5 }` (~25 % rate limits).
+ */
+/**
+ * Probabilistic (and one deterministic) fault injection knobs.
+ *
+ * VALIDATION — ONE policy, whatever the source. Each field is a finite number
+ * in its range: the rates in [0, 1], `latencyMs` in [0, 30000]. A value outside
+ * it, or one that is not a number at all (`"0.5abc"`, `"Infinity"`, `NaN`), is
+ * REJECTED, never clamped — silent clamping substitutes a fault rate nobody
+ * asked for and hides the misconfiguration that produced it.
+ *
+ * Rejection is reported in the loudest way each source allows, and the three
+ * agree: `POST /__aimock/chaos` answers 400, the `--chaos-*` CLI flags refuse
+ * to start, and a per-request header or a fixture/server value is refused with
+ * a `[chaos]` warning and left unset so the next level of precedence (header >
+ * fixture > server) applies.
  */
 export interface ChaosConfig {
   dropRate?: number;
@@ -566,13 +584,16 @@ export interface ChaosConfig {
    * Deterministic delay (ms) injected before the request is handled.
    * Applied when > 0 — header > fixture > server precedence, same as rates.
    * Unlike rates it is not probabilistic: a set latency always fires so
-   * timeout/retry suites get a stable signal. Clamped to [0, 30000].
+   * timeout/retry suites get a stable signal. Must be in [0, 30000]; a value
+   * outside that range is rejected, not clamped (see above).
    */
   latencyMs?: number;
   /**
-   * Probability of a 429 rate-limit rejection with `Retry-After`.
-   * Evaluated after malformed and before disconnect; first hit wins with
-   * the existing drop → malformed → rateLimit → disconnect order.
+   * Chance of a 429 rate-limit rejection with `Retry-After`, CONDITIONAL on
+   * neither `dropRate` nor `malformedRate` having fired first: it is the third
+   * draw in the drop → malformed → rateLimit → disconnect order, and the first
+   * hit wins. Paired with a 0.5 `dropRate` a 0.5 `rateLimitRate` produces ~25 %
+   * rate limits, not 50 % (see the interface docstring above).
    */
   rateLimitRate?: number;
 }
@@ -596,7 +617,28 @@ export interface ChaosConfig {
 export interface ChaosScope {
   /** Server-wide baseline: the construction config, or the untagged override. */
   base?: ChaosConfig;
-  /** Per-testId overrides, consulted before `base`. */
+  /**
+   * Per-testId overrides, consulted INSTEAD OF `base` — never merged over it.
+   *
+   * An installed override REPLACES the baseline wholesale for that testId: a
+   * server started with `--chaos-latency 500` whose test `t1` installs
+   * `{ dropRate: 1 }` gives `t1` traffic a drop and NO latency, because
+   * `latencyMs` is not restated. To keep a baseline field, restate it in the
+   * override body.
+   *
+   * Replacement — not a field-wise merge — is deliberate, and it is what makes
+   * `POST /__aimock/chaos {}` ("explicitly no chaos for my test") different
+   * from `DELETE /__aimock/chaos` ("forget I said anything, fall back to the
+   * baseline"). Under a merge, `POST {}` would be a no-op and that distinction
+   * would collapse. It also matches the untagged case, where an override
+   * likewise replaces the construction-time config rather than layering on it.
+   *
+   * The two chain links ABOVE this one — fixture chaos over server chaos, and
+   * request headers over both — DO merge field-wise (see `resolveChaosConfig`).
+   * Only the scope lookup replaces, because it selects a config rather than
+   * refining one. `GET /__aimock/chaos` with the same testId always reports the
+   * config actually in effect for that scope, so the replacement is auditable.
+   */
   byTestId?: ReadonlyMap<string, ChaosConfig>;
 }
 
