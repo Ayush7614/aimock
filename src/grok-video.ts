@@ -23,7 +23,7 @@ import {
 import { matchFixtureDiagnostic } from "./router.js";
 import { writeErrorResponse } from "./sse-writer.js";
 import type { Journal } from "./journal.js";
-import { applyChaos } from "./chaos.js";
+import { applyChaosAsync, responseGone } from "./chaos.js";
 import { resolveProgression } from "./fal.js";
 import {
   buildFixtureMatch,
@@ -395,7 +395,7 @@ export async function handleGrokVideoCreate(
   }
 
   if (
-    applyChaos(
+    await applyChaosAsync(
       res,
       fixture,
       defaults.chaos,
@@ -480,7 +480,7 @@ export async function handleGrokVideoCreate(
   const response = await resolveResponse(fixture, syntheticReq);
 
   if (isErrorResponse(response)) {
-    if (res.destroyed || res.writableEnded) return;
+    if (responseGone(res)) return;
     const status = response.status ?? 500;
     journal.add({
       method,
@@ -496,7 +496,7 @@ export async function handleGrokVideoCreate(
   }
 
   if (!isVideoResponse(response)) {
-    if (res.destroyed || res.writableEnded) return;
+    if (responseGone(res)) return;
     journal.add({
       method,
       path,
@@ -514,7 +514,7 @@ export async function handleGrokVideoCreate(
     return;
   }
 
-  if (res.destroyed || res.writableEnded) return;
+  if (responseGone(res)) return;
   journal.add({
     method,
     path,
@@ -583,7 +583,7 @@ export async function handleGrokVideoStatus(
   if (!job) {
     // Grok miss → Sora status, UNCHANGED (byte-for-byte; it sets CORS + rolls
     // chaos itself). Disjoint id namespaces make this unambiguous.
-    handleVideoStatus(req, res, id, journal, defaults, setCorsHeaders, videoStates);
+    await handleVideoStatus(req, res, id, journal, defaults, setCorsHeaders, videoStates);
     return;
   }
 
@@ -594,7 +594,7 @@ export async function handleGrokVideoStatus(
   const method = req.method ?? "GET";
 
   if (
-    applyChaos(
+    await applyChaosAsync(
       res,
       null,
       defaults.chaos,
@@ -652,7 +652,7 @@ export async function handleGrokVideoStatus(
   }
 
   // Replay: guard BEFORE advancing or journaling (file convention).
-  if (res.destroyed || res.writableEnded) return;
+  if (responseGone(res)) return;
   advanceJob(job);
   grokJobs.set(key, job);
   journal.add({
@@ -736,7 +736,7 @@ async function proxyGrokVideoSubmit(args: {
 
   const proxyError = (msg: string): "handled" => {
     defaults.logger.error(`Grok video submit proxy failed: ${msg}`);
-    if (res.destroyed || res.writableEnded) return "handled";
+    if (responseGone(res)) return "handled";
     journal.add({
       method,
       path,
@@ -797,7 +797,7 @@ async function proxyGrokVideoSubmit(args: {
     defaults.logger.warn(
       `Upstream rejected the video submit (${fetched.status}) — relaying the upstream status`,
     );
-    if (res.destroyed || res.writableEnded) return "handled";
+    if (responseGone(res)) return "handled";
     journal.add({
       method,
       path,
@@ -866,7 +866,7 @@ async function proxyGrokVideoSubmit(args: {
     );
   }
 
-  if (res.destroyed || res.writableEnded) return "handled";
+  if (responseGone(res)) return "handled";
   journal.add({
     method,
     path,
@@ -933,7 +933,7 @@ async function proxyGrokVideoRecordPoll(args: {
 
   const proxyError = (msg: string): void => {
     logger.error(`Grok video poll proxy failed: ${msg}`);
-    if (res.destroyed || res.writableEnded) return;
+    if (responseGone(res)) return;
     journalProxy(502);
     writeErrorResponse(
       res,
@@ -974,7 +974,7 @@ async function proxyGrokVideoRecordPoll(args: {
     logger.warn(
       `Upstream rejected the status poll for job ${job.upstreamRequestId} (${fetched.status}) — relaying the upstream status`,
     );
-    if (res.destroyed || res.writableEnded) return;
+    if (responseGone(res)) return;
     journalProxy(fetched.status);
     res.writeHead(fetched.status, { "Content-Type": fetched.contentType ?? "application/json" });
     res.end(fetched.text);
@@ -1006,7 +1006,7 @@ async function proxyGrokVideoRecordPoll(args: {
   const relayBody: Record<string, unknown> = { ...upstreamBody, request_id: job.requestId };
 
   const relayJson = (body: Record<string, unknown>): void => {
-    if (res.destroyed || res.writableEnded) return;
+    if (responseGone(res)) return;
     journalProxy(200);
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify(body));
