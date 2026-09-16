@@ -1,9 +1,27 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { createServer, type ServerInstance } from "../server.js";
-import type { Fixture } from "../types.js";
+import type { ChatCompletionRequest, Fixture, JournalEntry } from "../types.js";
+import { isChatCompletionBody } from "../journal.js";
 import { connectWebSocket } from "./ws-test-client.js";
 
 // --- fixtures ---
+
+/**
+ * The chat request a journal entry recorded.
+ *
+ * `JournalEntry.body` is a union — not every service journals a chat request —
+ * so reading `messages` off one needs a narrowing step. Throwing here names the
+ * problem ("this entry is not a chat request") at the point it exists, instead
+ * of letting a non-chat entry surface as an undefined property inside an
+ * expectation.
+ */
+function chatBodyOf(entry: JournalEntry | null | undefined): ChatCompletionRequest {
+  const body = entry?.body;
+  if (!isChatCompletionBody(body)) {
+    throw new Error(`journal entry has no chat-completion body: ${JSON.stringify(body)}`);
+  }
+  return body;
+}
 
 const textFixture: Fixture = {
   match: { userMessage: "hello" },
@@ -1055,7 +1073,7 @@ describe("WebSocket Gemini Live BidiGenerateContent", () => {
     // Inspect the journal to verify the generated tool_call_id starts with call_
     const entry = instance.journal.getLast();
     expect(entry).not.toBeNull();
-    const messages = entry!.body!.messages;
+    const messages = chatBodyOf(entry).messages;
     const toolMsg = messages.find((m) => m.role === "tool");
     expect(toolMsg).toBeDefined();
     expect(toolMsg!.tool_call_id).toMatch(/^call_/);
@@ -1104,7 +1122,7 @@ describe("WebSocket Gemini Live BidiGenerateContent", () => {
     // Inspect the journal to verify the generated tool_call_id starts with call_
     const entry = instance.journal.getLast();
     expect(entry).not.toBeNull();
-    const messages = entry!.body!.messages;
+    const messages = chatBodyOf(entry).messages;
     const toolMsg = messages.find((m) => m.role === "tool");
     expect(toolMsg).toBeDefined();
     expect(toolMsg!.tool_call_id).toMatch(/^call_/);
