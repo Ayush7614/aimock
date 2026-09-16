@@ -937,6 +937,20 @@ export function validateFixtures(fixtures: Fixture[]): ValidationResult[] {
           message: "chaos.disconnectRate must be between 0 and 1",
         });
       }
+      if (ch.rateLimitRate !== undefined && (ch.rateLimitRate < 0 || ch.rateLimitRate > 1)) {
+        results.push({
+          severity: "error",
+          fixtureIndex: i,
+          message: "chaos.rateLimitRate must be between 0 and 1",
+        });
+      }
+      if (ch.latencyMs !== undefined && (ch.latencyMs < 0 || ch.latencyMs > 30000)) {
+        results.push({
+          severity: "error",
+          fixtureIndex: i,
+          message: "chaos.latencyMs must be between 0 and 30000",
+        });
+      }
     }
 
     // Match field type checks
