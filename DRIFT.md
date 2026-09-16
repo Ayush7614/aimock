@@ -18,22 +18,27 @@ Two-way comparison (mock vs real) can't distinguish between "we need to fix aimo
 ## Running Drift Tests
 
 ```bash
-# All providers (requires all three API keys)
+# Several providers (each key enables only its own legs)
 OPENAI_API_KEY=sk-... ANTHROPIC_API_KEY=sk-... GOOGLE_API_KEY=... pnpm test:drift
 
 # Single provider (others skip automatically)
 OPENAI_API_KEY=sk-... pnpm test:drift
-
-# Strict mode — warnings also fail
-STRICT_DRIFT=1 OPENAI_API_KEY=sk-... pnpm test:drift
 ```
 
-Required environment variables:
+Environment variables the drift legs read (each one gates only the legs listed; an unset variable skips those legs — reported as skipped, never as a failure):
 
-- `OPENAI_API_KEY` — OpenAI API key
-- `ANTHROPIC_API_KEY` — Anthropic API key
-- `GOOGLE_API_KEY` — Google AI API key
+- `OPENAI_API_KEY` — OpenAI Chat Completions, Responses, Embeddings, Transcription, Realtime WS and Responses WS legs, plus the OpenAI model check in `models.drift.ts`
+- `OPENAI_REALTIME_KEY` — optional; used instead of `OPENAI_API_KEY` for the Realtime WS session probes only
+- `ANTHROPIC_API_KEY` — Anthropic Claude Messages legs and capability canaries, plus the Anthropic model check
+- `GOOGLE_API_KEY` — Google Gemini, Gemini Embeddings canary, Gemini Interactions and Gemini Live WS legs, plus the Gemini model check
+- `COHERE_API_KEY` — Cohere Chat and Cohere Rerank legs
+- `OPENROUTER_API_KEY` — OpenRouter chat catalog and video model-family availability legs
+- `FAL_KEY` — fal.ai queue lifecycle canary
 - `ELEVENLABS_API_KEY` — ElevenLabs API key (the one live `/v1/sound-generation` case; every other ElevenLabs case is offline conformance and runs without it)
+- `ARK_API_KEY` — BytePlus Ark authenticated unknown-task canary (the keyless auth-envelope canary runs on every run without it)
+- `ARK_BASE_URL` — optional; regional BytePlus Ark base URL (default `https://ark.ap-southeast.bytepluses.com`)
+- `OLLAMA_HOST` — URL of a running Ollama daemon; gates the Ollama live leg
+- `OLLAMA_MODEL` — optional; model the Ollama leg requests (default `llama3.2`)
 
 Each provider's tests skip independently if its key is not set. You can run drift tests for just one provider.
 
@@ -55,7 +60,7 @@ Currently offline-only: `bedrock-invoke`, `bedrock-invoke-stream`, `bedrock-conv
 ### Severity levels
 
 - **critical** — Test fails. aimock produces a different shape than the real API for a field that both the SDK and real API agree on. This means aimock needs an update.
-- **warning** — Test passes (unless `STRICT_DRIFT=1`). The real API has a field that neither the SDK nor aimock knows about, or the SDK and real API disagree. Usually means a provider added something new.
+- **warning** — Test passes. The real API has a field that neither the SDK nor aimock knows about, or the SDK and real API disagree. Usually means a provider added something new.
 - **info** — Always passes. Known intentional differences (usage fields are always zero, optional fields aimock omits, etc.).
 
 ### Example report output
@@ -86,19 +91,7 @@ API DRIFT DETECTED: OpenAI Chat Completions (non-streaming text)
 
 When a `critical` drift is detected:
 
-1. **Identify the response builder** — the report path tells you which provider and field:
-   - OpenAI Chat Completions → `src/helpers.ts` (`buildTextCompletion`, `buildToolCallCompletion`, `buildTextChunks`, `buildToolCallChunks`)
-   - OpenAI Responses API → `src/responses.ts` (`buildTextResponse`, `buildToolCallResponse`, `buildTextStreamEvents`, `buildToolCallStreamEvents`)
-   - Anthropic Claude → `src/messages.ts` (`buildClaudeTextResponse`, `buildClaudeToolCallResponse`, `buildClaudeTextStreamEvents`, `buildClaudeToolCallStreamEvents`)
-   - Google Gemini → `src/gemini.ts` (`buildGeminiTextResponse`, `buildGeminiToolCallResponse`, `buildGeminiTextStreamChunks`, `buildGeminiToolCallStreamChunks`)
-   - Gemini embedContent → `src/gemini.ts` (embedContent response builder)
-   - Gemini Interactions → `src/gemini-interactions.ts` (`buildInteractionsTextResponse`, `buildInteractionsToolCallResponse`, `buildInteractionsTextSSEEvents`, `buildInteractionsToolCallSSEEvents`)
-   - OpenAI Image Edit → `src/images.ts` (multipart `/v1/images/edits` handler)
-   - OpenAI Audio Translation → `src/transcription.ts` (multipart `/v1/audio/translations` handler)
-   - Ollama Embeddings → `src/ollama.ts` (`/api/embed` + legacy `/api/embeddings` response builder)
-   - Cohere Embed → `src/cohere.ts` (`/v2/embed` response builder)
-   - ElevenLabs TTS → `src/elevenlabs-audio.ts` (`/v1/text-to-speech/{voice_id}` response builder)
-   - ElevenLabs Voice Design → `src/elevenlabs-voice.ts` (`/v1/text-to-voice/design`, `/v1/text-to-voice`, `GET /v1/voices/{id}`, `DELETE /v1/voices/{id}`)
+1. **Identify the response builder** — the report's `Surface:` line is a slug keyed in `SURFACE_REGISTRY` (`src/__tests__/drift/surface-registry.ts`); that entry's `builderFile` and `builderFunctions` name the file and functions to edit, and the report path tells you which field.
 
 2. **Update the builder** — add or modify the field to match the real API shape.
 
@@ -120,7 +113,8 @@ When a `critical` drift is detected:
 4. Create `src/__tests__/drift/<provider>.drift.ts` with 4 test scenarios
 5. Add model listing function to `providers.ts` and model check to `models.drift.ts`
 6. If the provider uses WebSocket, add protocol functions to `ws-providers.ts` and create `ws-<provider>.drift.ts`
-7. Update the allowlist in `schema.ts` if needed
+7. Register the surface in `SURFACE_REGISTRY` (`src/__tests__/drift/surface-registry.ts`) with `provider`, `builderFile`, `builderFunctions`, `typesFile` and a `liveCoverage` of `"live"` or `"none"` (`"none"` requires a `coverageNote`), and pass that slug as the third argument of every `formatDriftReport` call in the new leg — `formatDriftReport` throws on an unregistered slug, and `drift-collector.test.ts` fails on an emitted slug missing from the registry
+8. Update the allowlist in `schema.ts` if needed
 
 ## WebSocket Drift Coverage
 
