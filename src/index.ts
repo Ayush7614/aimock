@@ -19,7 +19,7 @@ export { Logger } from "./logger.js";
 export type { LogLevel } from "./logger.js";
 
 // Journal
-export { Journal, DEFAULT_TEST_ID } from "./journal.js";
+export { Journal, DEFAULT_TEST_ID, isChatCompletionBody } from "./journal.js";
 
 // Router
 export { matchFixture, matchFixtureDiagnostic, getTextContent } from "./router.js";
@@ -88,6 +88,21 @@ export {
   clearFileStore,
 } from "./files.js";
 export type { FileObject } from "./files.js";
+export {
+  handleFineTuningCreate,
+  handleFineTuningList,
+  handleFineTuningRetrieve,
+  handleFineTuningCancel,
+  handleFineTuningEvents,
+  clearFineTuningStore,
+} from "./fine-tuning.js";
+export type {
+  FineTuningJob,
+  FineTuningJobError,
+  FineTuningJobEvent,
+  FineTuningJobHyperparameters,
+  FineTuningJobStatus,
+} from "./fine-tuning.js";
 export type { ServiceFixtures } from "./server.js";
 
 // WebSocket
@@ -390,6 +405,7 @@ export type {
   Fixture,
   FixtureFile,
   FixtureFileEntry,
+  JournalBody,
   JournalEntry,
   SSEChunk,
   SSEChoice,

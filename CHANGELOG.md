@@ -7,6 +7,7 @@
 - Chaos `rateLimitRate` / `--chaos-ratelimit`: deterministic 429 with `Retry-After` (#449)
 - Chaos `latencyMs` / `--chaos-latency` now actually delays responses on every path (#449)
 - OpenAI Files API mock — byte-exact uploads, create-purpose enum, CORS on faults (#445)
+- Mock OpenAI fine-tuning jobs — deterministic lifecycle, events, cursor pages (#447)
 - `aimock validate` lints fixture files or directories offline, failing on broken files (#453)
 
 ### Changed
