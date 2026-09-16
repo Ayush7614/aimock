@@ -125,6 +125,13 @@ import { handleSearch, type SearchFixture } from "./search.js";
 import { handleRerank, type RerankFixture } from "./rerank.js";
 import { handleModeration, type ModerationFixture } from "./moderation.js";
 import {
+  handleBatchesCreate,
+  handleBatchesList,
+  handleBatchesRetrieve,
+  handleBatchesCancel,
+  clearBatchStore,
+} from "./batches.js";
+import {
   handleFilesCreate,
   handleFilesList,
   handleFilesRetrieve,
@@ -301,6 +308,9 @@ const HEALTH_PATH = "/health";
 const READY_PATH = "/ready";
 const MODELS_PATH = "/v1/models";
 const REQUESTS_PATH = "/v1/_requests";
+const BATCHES_PATH = "/v1/batches";
+const BATCHES_ID_RE = /^\/v1\/batches\/([^/]+)$/;
+const BATCHES_CANCEL_RE = /^\/v1\/batches\/([^/]+)\/cancel$/;
 const FILES_PATH = "/v1/files";
 // FILES_ID_RE / FILES_CONTENT_RE are imported from metrics.js, which is where
 // every other shared route regex lives (OpenRouter/Veo/Grok/BytePlus above).
@@ -406,6 +416,7 @@ export function performFullReset(fixtures: Fixture[], targets: FullResetTargets 
   fixtures.length = 0;
   falJobs.clear();
   falQueueStates.clear();
+  clearBatchStore();
   clearElevenLabsVoices();
   clearFileStore();
   clearFineTuningStore();
@@ -2749,6 +2760,68 @@ export async function createServerWithResolvedAuth(
       }));
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ object: "list", data }));
+      return;
+    }
+
+    // Batches API — cancel RE before id RE (the id RE would swallow /cancel).
+    // Cancel takes no payload — the `openai` SDK posts an empty body — but the
+    // body is still read, and discarded, before the handler runs. Reading it is
+    // what applies `readBody`'s 10 MB ceiling: a POST route that never touches
+    // the stream lets node quietly dump whatever the client sends, so this one
+    // route would accept an unbounded upload while the create route beside it
+    // (the sibling pattern followed here, down to the error arm) rejects the
+    // same bytes.
+    const batchesCancelMatch = pathname.match(BATCHES_CANCEL_RE);
+    if (batchesCancelMatch && req.method === "POST") {
+      try {
+        await readBody(req);
+        await handleBatchesCancel(
+          req,
+          res,
+          batchesCancelMatch[1],
+          journal,
+          defaults,
+          setCorsHeaders,
+        );
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : "Internal error";
+        if (!res.headersSent) {
+          writeErrorResponse(
+            res,
+            500,
+            JSON.stringify({ error: { message: msg, type: "server_error" } }),
+          );
+        } else if (!res.writableEnded) {
+          res.destroy();
+        }
+      }
+      return;
+    }
+    const batchesIdMatch = pathname.match(BATCHES_ID_RE);
+    if (batchesIdMatch && req.method === "GET") {
+      await handleBatchesRetrieve(req, res, batchesIdMatch[1], journal, defaults, setCorsHeaders);
+      return;
+    }
+    if (pathname === BATCHES_PATH && req.method === "GET") {
+      await handleBatchesList(req, res, journal, defaults, setCorsHeaders);
+      return;
+    }
+    if (pathname === BATCHES_PATH && req.method === "POST") {
+      try {
+        const raw = await readBody(req);
+        await handleBatchesCreate(req, res, raw, journal, defaults, setCorsHeaders);
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : "Internal error";
+        if (!res.headersSent) {
+          writeErrorResponse(
+            res,
+            500,
+            JSON.stringify({ error: { message: msg, type: "server_error" } }),
+          );
+        } else if (!res.writableEnded) {
+          res.destroy();
+        }
+      }
       return;
     }
 

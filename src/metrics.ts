@@ -255,6 +255,8 @@ export const GROK_VIDEO_STATUS_RE = /^\/v1\/videos\/([^/]+)$/;
  */
 export const BYTEPLUS_VIDEO_SUBMIT_RE = /^(?:\/api\/v3)?\/contents\/generations\/tasks$/;
 export const BYTEPLUS_VIDEO_STATUS_RE = /^(?:\/api\/v3)?\/contents\/generations\/tasks\/([^/]+)$/;
+export const BATCHES_CANCEL_RE = /^\/v1\/batches\/([^/]+)\/cancel$/;
+export const BATCHES_ID_RE = /^\/v1\/batches\/([^/]+)$/;
 export const FILES_CONTENT_RE = /^\/v1\/files\/([^/]+)\/content$/;
 export const FILES_ID_RE = /^\/v1\/files\/([^/]+)$/;
 
@@ -388,6 +390,13 @@ export function normalizePathLabel(pathname: string): string {
   }
   if (BYTEPLUS_VIDEO_SUBMIT_RE.test(pathname)) {
     return "/contents/generations/tasks";
+  }
+
+  if (BATCHES_CANCEL_RE.test(pathname)) {
+    return "/v1/batches/{id}/cancel";
+  }
+  if (pathname !== "/v1/batches" && BATCHES_ID_RE.test(pathname)) {
+    return "/v1/batches/{id}";
   }
 
   // Files API: /v1/files/{id} and /v1/files/{id}/content carry random
