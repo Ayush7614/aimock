@@ -2,8 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- `aimock validate` lints fixture files or directories offline, failing on broken files (#453)
+
 ### Changed
 
+- `aimock -h` is `--help`, matching `aimock convert -h` and `aimock validate -h`; the host override is `--host` only. The `llmock` bin (the Docker entrypoint) keeps its own `-h, --host` (#453)
+- `aimock --config ""`, `--port ""` and `--host ""` are usage errors naming the option, instead of being read as "not given" (#453)
 - Realtime `OpenAI-Beta: realtime=v1` now returns the real sunset rejection, not a session (#461)
 - `POST /v1/images/variations` now replays the real removal 404; OpenAI deleted it (#462)
 

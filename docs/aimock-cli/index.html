@@ -83,9 +83,9 @@ $ docker run -d -p 4010:4010 \
         <p style="color: var(--text-dim); font-size: 0.9em">
           <strong>Note:</strong> The published Docker image (<code>ghcr.io/copilotkit/aimock</code>)
           runs the flag-driven <code>llmock</code> CLI (ENTRYPOINT <code>node dist/cli.js</code>),
-          which does not support <code>--config</code> or the <code>convert</code> subcommand. For
-          config-driven mode, run aimock on your host via <code>npx</code> or install
-          <code>@copilotkit/aimock</code> inside your own image.
+          which does not support <code>--config</code> or the <code>convert</code> and
+          <code>validate</code> subcommands. For config-driven mode, run aimock on your host via
+          <code>npx</code> or install <code>@copilotkit/aimock</code> inside your own image.
         </p>
 
         <h2>Config File Format</h2>
@@ -233,27 +233,57 @@ $ docker run -d -p 4010:4010 \
           </thead>
           <tbody>
             <tr>
-              <td><code>--config</code></td>
-              <td><code>aimock.json</code></td>
-              <td>Path to JSON config file</td>
+              <td><code>-c</code>, <code>--config</code></td>
+              <td>&mdash; (required)</td>
+              <td>
+                Path to JSON config file. There is no default: without it the run exits 1 with
+                <code>Error: --config is required.</code>
+              </td>
             </tr>
             <tr>
-              <td><code>--port</code></td>
-              <td><code>4010</code></td>
-              <td>Port to listen on (overrides config)</td>
+              <td><code>-p</code>, <code>--port</code></td>
+              <td>config <code>port</code>, else <code>0</code></td>
+              <td>Port to listen on (overrides config); <code>0</code> takes an ephemeral port</td>
             </tr>
             <tr>
               <td><code>--host</code></td>
-              <td><code>127.0.0.1</code></td>
-              <td>Host to bind to (overrides config)</td>
+              <td>config <code>host</code>, else <code>127.0.0.1</code></td>
+              <td>
+                Host to bind to (overrides config). Long form only on this bin, where
+                <code>-h</code> is help; the <code>llmock</code> bin keeps its own
+                <code>-h, --host</code>
+              </td>
             </tr>
             <tr>
-              <td><code>--help</code></td>
+              <td><code>-h</code>, <code>--help</code></td>
               <td>&mdash;</td>
               <td>Show help</td>
             </tr>
+            <tr>
+              <td><code>convert &lt;format&gt; &lt;input&gt; [output]</code></td>
+              <td>&mdash;</td>
+              <td>
+                Subcommand: convert third-party mock configs to aimock format (see Fixture
+                Converters below)
+              </td>
+            </tr>
+            <tr>
+              <td>
+                <code>validate [--strict] [--json] [--] &lt;path&gt; [more paths ...]</code>
+              </td>
+              <td>&mdash;</td>
+              <td>
+                Subcommand: validate fixture files or directories offline (see Fixture Validation
+                below)
+              </td>
+            </tr>
           </tbody>
         </table>
+        <p>
+          An option given an empty value is a usage error naming the option (<code
+            >Error: --port requires a non-empty value.</code
+          >), not a silently absent one.
+        </p>
 
         <h2>Single-Port Routing</h2>
         <p>
@@ -379,6 +409,334 @@ $ npx @copilotkit/aimock convert mockllm ./config.yaml ./fixtures/converted.json
 
 <span class="cm"># Print to stdout (omit output path)</span>
 $ npx @copilotkit/aimock convert vidaimock ./templates/</code></pre>
+        </div>
+
+        <h2>Fixture Validation</h2>
+        <p>
+          Lint fixture files offline, without starting a server. Each argument is a fixture file or
+          a directory of them (walked recursively for <code>*.json</code>, like
+          <code>--fixtures &lt;dir&gt;</code>).
+        </p>
+        <p>
+          Files are checked one at a time and then again as one combined set in load order, so the
+          rules that span files &mdash; a <code>userMessage</code> duplicated across two files, an
+          empty catch-all <code>match</code> that is last in its own file but not last overall
+          &mdash; fire here as they do on the server. Cross-file findings are prefixed
+          <code>cross-file:</code>, attributed to the file owning the fixture, and name the other
+          file. One that restates a finding the per-file pass already made against the same fixture
+          never prints a second line: naming the same fixtures it is dropped, and naming others
+          &mdash; a shadow that reaches into another load &mdash; it replaces the per-file wording
+          in place, at the same position.
+        </p>
+        <p>
+          Against the server's <code>--validate-on-load</code> this is stricter in one direction and
+          weaker in another. <strong>Stricter:</strong> there an unreadable, unparseable, or
+          wrong-shape file only warns on stderr and contributes zero fixtures, and startup continues
+          as long as something loaded, whereas here every such file fails the run, so a broken
+          fixture cannot slip into CI unnoticed. The one exception, which matches the loader: a
+          <code>*.json</code> file found by <strong>walking</strong> a directory and having no
+          top-level <code>"fixtures"</code> key at all is not a fixture file (an aimock config,
+          say), so it is passed over with a <code>skipped (...)</code> line instead of failing the
+          run &mdash; a file you name on the command line is still validated, and still fails on the
+          wrong shape. Two walk hazards the server does not survive are refused outright rather than
+          mirrored: a <code>*.json</code> path that is not a regular file (a FIFO, a socket, a
+          device) is a per-file error here, where the server's <code>readFileSync</code> blocks on
+          it forever; and a directory symlink pointing back at a directory already being walked is
+          reported once as a cycle, where the server recurses through it until the kernel returns
+          <code>ELOOP</code> and loads those levels' fixtures over and over.
+          <strong>Equal:</strong> the fixture rules themselves, and the zero-fixture rule &mdash; a
+          run whose inputs yield no fixtures at all is an error, matching the server's startup
+          abort, while a single <code>{"fixtures": []}</code> file alongside files that do load
+          fixtures is fine in both. Equal too in what the inputs expand to: a path named twice, and
+          a directory reached both directly and through an acyclic symlink to it, are validated once
+          per mention, exactly as the server loads one <code>--fixtures</code> source per mention,
+          and each fixture-and-rule pair is reported once &mdash; the count the server logs.
+          <strong>Weaker:</strong> this is a static lint that starts no server and reads local paths
+          only, so it says nothing about binding, remote
+          <code>--fixtures &lt;url&gt;</code> sources, <code>--watch</code> reloads, or any runtime
+          behaviour. An <code>http://</code> or <code>https://</code> path is refused by name
+          &mdash;
+          <code
+            >Remote fixture source: this lint reads local paths only (the server's --fixtures
+            accepts a URL; validate does not) &mdash; download the file and validate the local
+            copy</code
+          >
+          &mdash; rather than reported as a missing file.
+        </p>
+        <p>
+          Anything the filesystem or a fixture entry can throw is contained in the report instead of
+          crashing the run: a malformed entry, an unreadable file or directory, a stat failure, or a
+          symlink cycle each becomes a per-file <code>[error]</code> line and exits 1. One stat
+          failure is deliberately silent: a directory entry that vanishes between the
+          <code>readdir</code> and the <code>stat</code> (<code>ENOENT</code> &mdash; a dangling
+          symlink, or a file deleted mid-walk) is skipped without a finding, exactly as the server's
+          loader skips it; every other stat failure is surfaced. A directory argument that walks
+          cleanly but holds no <code>*.json</code> files is likewise a per-path
+          <code>[error]</code> and exits 1. A crash inside the validator itself is contained too: a
+          per-file one becomes a file-level <code>[error]</code> naming no entry, and one in the
+          combined pass becomes a run-level <code>[error]</code> printed after the per-file output.
+        </p>
+        <p>
+          Errors go to stderr while <code>OK</code> and summary lines go to stdout; warnings follow
+          the exit they produce &mdash; stdout by default, stderr under <code>--strict</code>. Every
+          file gets exactly one stdout line &mdash; including a file that failed fatally, and a file
+          the walk skipped (<code>&lt;file&gt;: skipped (...)</code>) &mdash; so a reader tallying
+          stdout never loses a file. <code>OK</code> is withheld in one case: on a run that failed
+          because it loaded no fixtures at all, the file that loaded none reads
+          <code>&lt;file&gt;: 0 fixture(s), loaded nothing &mdash; see the run-level error</code>.
+          With <code>--json</code>, stdout carries the report alone and the one-line failure reason
+          goes to stderr. A path given twice is validated twice, because the server loads one set of
+          fixtures per <code>--fixtures</code> it is given; the duplicate fixtures that produces are
+          reported as the server reports them, one finding per fixture and rule. Such a path is
+          printed as <code>&lt;path&gt;[&lt;n&gt;]</code>, numbering its mentions from 1, so each
+          load &mdash; and every cross-file reference to its fixtures &mdash; names one of them:
+        </p>
+        <div class="code-block">
+          <div class="code-block-header">
+            A path validated twice <span class="lang-tag">shell</span>
+          </div>
+          <pre><code>$ npx @copilotkit/aimock validate dup.json dup.json
+dup.json[1]: OK (2 fixture(s))
+dup.json[2]: [warning] #0 cross-file: duplicate userMessage 'hi' &mdash; shadows fixture dup.json[1] #0
+dup.json[2]: [warning] #1 cross-file: duplicate userMessage 'bye' &mdash; shadows fixture dup.json[1] #1
+dup.json[2]: 2 fixture(s), 0 error(s), 2 warning(s)</code></pre>
+        </div>
+
+        <h3>The <code>--json</code> Report</h3>
+        <p>
+          <code>--json</code> writes one document to stdout and nothing else &mdash; a usage error
+          included; the one-line reason a run failed still goes to stderr. Validating a directory
+          holding a file with invalid JSON and a file with one bad entry and a duplicate
+          <code>userMessage</code> (exit 1):
+        </p>
+        <div class="code-block">
+          <div class="code-block-header">validate --json <span class="lang-tag">json</span></div>
+          <pre><code>{
+  "strict": false,
+  "failed": true,
+  "files": [
+    {
+      "file": "fixtures/badjson.json",
+      "mention": 1,
+      "fixtures": 0,
+      "errors": [
+        {
+          "message": "Invalid JSON: Expected property name or '}' in JSON at position 1 (line 1 column 2)"
+        }
+      ],
+      "warnings": [],
+      "fatal": "Invalid JSON: Expected property name or '}' in JSON at position 1 (line 1 column 2)"
+    },
+    {
+      "file": "fixtures/mixed.json",
+      "mention": 1,
+      "fixtures": 2,
+      "errors": [
+        {
+          "index": 0,
+          "message": "Invalid fixture entry #0: missing or non-object \"match\" and \"response\" — every entry needs { \"match\": { ... }, \"response\": { ... } }"
+        }
+      ],
+      "warnings": [
+        {
+          "index": 2,
+          "message": "duplicate userMessage 'hi' — shadows fixture 1"
+        }
+      ]
+    }
+  ],
+  "run": {
+    "fixtures": 2,
+    "errors": []
+  }
+}</code></pre>
+        </div>
+        <p>
+          A usage error carries the reason in <code>run.errors</code> (<code
+            >aimock validate --json</code
+          >, exit 1):
+        </p>
+        <div class="code-block">
+          <div class="code-block-header">
+            validate --json, usage error <span class="lang-tag">json</span>
+          </div>
+          <pre><code>{
+  "strict": false,
+  "failed": true,
+  "files": [],
+  "run": {
+    "fixtures": 0,
+    "errors": [
+      "no fixture paths given."
+    ]
+  }
+}</code></pre>
+        </div>
+        <p>
+          A <code>*.json</code> file the walk passed over carries <code>skipped</code> and no
+          findings (<code>aimock validate --json wk/</code>, exit 0):
+        </p>
+        <div class="code-block">
+          <div class="code-block-header">
+            validate --json, a skipped file <span class="lang-tag">json</span>
+          </div>
+          <pre><code>{
+  "strict": false,
+  "failed": false,
+  "files": [
+    {
+      "file": "wk/aimock.json",
+      "mention": 1,
+      "fixtures": 0,
+      "errors": [],
+      "warnings": [],
+      "skipped": "not a fixture file — an aimock config file (llm, services), which \"aimock --config\" serves and \"--fixtures\" does not load"
+    },
+    {
+      "file": "wk/dup.json",
+      "mention": 1,
+      "fixtures": 2,
+      "errors": [],
+      "warnings": []
+    }
+  ],
+  "run": {
+    "fixtures": 2,
+    "errors": []
+  }
+}</code></pre>
+        </div>
+        <table class="endpoint-table">
+          <thead>
+            <tr>
+              <th>Field</th>
+              <th>Meaning</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>failed</code></td>
+              <td>The boolean the exit code follows</td>
+            </tr>
+            <tr>
+              <td><code>strict</code></td>
+              <td>Echoes the <code>--strict</code> flag <code>failed</code> was computed under</td>
+            </tr>
+            <tr>
+              <td><code>files[]</code></td>
+              <td>
+                One entry per path the run touched, in argv / walk order: <code>file</code>,
+                <code>mention</code> (which load of that path this is, 1-based, always present
+                &mdash; human output prints it as <code>&lt;path&gt;[&lt;n&gt;]</code> only when the
+                path repeats), <code>fixtures</code> (how many entries converted),
+                <code>errors</code>, <code>warnings</code>, <code>skipped</code> &mdash; present
+                only when the walk passed the file over &mdash; and <code>fatal</code> &mdash;
+                present only when the file produced no report at all. The <code>fatal</code> reason
+                also appears in <code>errors</code>, so a tally of <code>files[].errors</code>
+                matches the error count on the file's stdout line
+              </td>
+            </tr>
+            <tr>
+              <td><code>files[].errors[]</code>, <code>files[].warnings[]</code></td>
+              <td>
+                A finding always has <code>message</code>. <code>index</code> is the fixture entry
+                it belongs to and is <strong>absent</strong> on a file-level finding.
+                <code>detail</code> carries the raw thrown text when <code>message</code> is a
+                rephrasing of it
+              </td>
+            </tr>
+            <tr>
+              <td><code>run</code></td>
+              <td>
+                The combined pass: <code>fixtures</code> is the total fixture count across every
+                file, and <code>errors</code> holds run-level strings such as
+                <code>"Cross-file validation failed: ..."</code>,
+                <code>"No fixtures loaded from any input"</code>, or the reason a usage error failed
+              </td>
+            </tr>
+          </tbody>
+        </table>
+
+        <h3>Usage</h3>
+        <div class="code-block">
+          <div class="code-block-header">Validate fixtures <span class="lang-tag">shell</span></div>
+          <pre><code>npx @copilotkit/aimock validate [--strict] [--json] [--] &lt;path&gt; [more paths ...]</code></pre>
+        </div>
+
+        <h3>Options</h3>
+        <table class="endpoint-table">
+          <thead>
+            <tr>
+              <th>Flag</th>
+              <th>Description</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>--strict</code></td>
+              <td>Treat warnings as errors (exit 1 on warnings)</td>
+            </tr>
+            <tr>
+              <td><code>--json</code></td>
+              <td>Emit a JSON report instead of human-readable lines</td>
+            </tr>
+            <tr>
+              <td><code>-h</code>, <code>--help</code></td>
+              <td>Show the subcommand help</td>
+            </tr>
+            <tr>
+              <td><code>--</code></td>
+              <td>
+                Stop option parsing; every later argument is a path (use this for a path that begins
+                with <code>-</code>)
+              </td>
+            </tr>
+          </tbody>
+        </table>
+
+        <h3>Exit Codes</h3>
+        <table class="endpoint-table">
+          <thead>
+            <tr>
+              <th>Exit code</th>
+              <th>Meaning</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>0</code></td>
+              <td>All files valid (warnings allowed unless <code>--strict</code>)</td>
+            </tr>
+            <tr>
+              <td><code>1</code></td>
+              <td>
+                Validation errors, unreadable or unparseable files, a <strong>named</strong> path of
+                the wrong shape (a walked one is skipped instead), a malformed fixture entry, a
+                remote <code>http(s)://</code> path, a stat failure or symlink cycle while walking a
+                directory, a <code>*.json</code> path that is not a regular file, a directory
+                holding no <code>*.json</code> files, no fixtures loaded at all,
+                <code>--strict</code> warnings, or a usage error (no paths given, or an unknown
+                option)
+              </td>
+            </tr>
+          </tbody>
+        </table>
+
+        <h3>Examples</h3>
+        <div class="code-block">
+          <div class="code-block-header">
+            Validation examples <span class="lang-tag">shell</span>
+          </div>
+          <pre><code><span class="cm"># Validate a whole fixture directory (recursive). Non-fixture JSON the</span>
+<span class="cm"># walk turns up (aimock configs, say) is skipped with a note, not failed:</span>
+<span class="cm">#   fixtures/examples/mcp/mcp-config.json: skipped (not a fixture file &mdash; an aimock config file (mcp), which "aimock --config" serves and "--fixtures" does not load)</span>
+$ npx @copilotkit/aimock validate ./fixtures/
+
+<span class="cm"># Validate specific files, failing on warnings too</span>
+$ npx @copilotkit/aimock validate --strict ./fixtures/openai.json ./fixtures/anthropic.json
+
+<span class="cm"># Machine-readable report for CI</span>
+$ npx @copilotkit/aimock validate --json ./fixtures/</code></pre>
         </div>
 
         <h2>Docker Compose</h2>
