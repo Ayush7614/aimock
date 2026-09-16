@@ -108,7 +108,7 @@ import {
 } from "./byteplus-video.js";
 import { handleElevenLabsAudio, handleElevenLabsTTS } from "./elevenlabs-audio.js";
 import { handleFalQueue, falJobs } from "./fal-audio.js";
-import { handleFal, falQueueStates } from "./fal.js";
+import { handleFal, falQueueStates, falWillHandle } from "./fal.js";
 import { handleOllama, handleOllamaGenerate, handleOllamaEmbeddings } from "./ollama.js";
 import { handleCohere, handleCohereEmbed } from "./cohere.js";
 import { handleSearch, type SearchFixture } from "./search.js";
@@ -119,7 +119,19 @@ import { handleWebSocketResponses } from "./ws-responses.js";
 import { handleWebSocketRealtime } from "./ws-realtime.js";
 import { handleWebSocketGeminiLive } from "./ws-gemini-live.js";
 import { Logger } from "./logger.js";
-import { applyChaosAction, evaluateChaos, isChaosScope } from "./chaos.js";
+import {
+  applyChaosAction,
+  awaitChaosLatency,
+  describeUnwritableReason,
+  evaluateChaos,
+  responseGoneReason,
+  isChaosScope,
+  resolveChaosConfig,
+  resetChaosWarnings,
+  parseChaosField,
+  CHAOS_FIELDS,
+  CHAOS_FIELD_NAMES,
+} from "./chaos.js";
 import {
   createMetricsRegistry,
   normalizePathLabel,
@@ -1228,7 +1240,52 @@ async function handleCompletions(
   //                            beforeWriteResponse hook (passed only when the
   //                            action is malformed, so the hook doesn't need
   //                            to re-check the action).
-  const chaosAction = evaluateChaos(fixture, defaults.chaos, req.headers, defaults.logger, req.url);
+  // Deterministic latency is injected BEFORE the terminal actions are rolled,
+  // so a configured delay applies to every outcome (served fixture, proxied
+  // response, streamed response, and each chaos failure alike) — and, being
+  // resolved from the same per-testId scope as the rates, never leaks into a
+  // concurrently-running test that did not configure it.
+  // Resolved ONCE and threaded into both the latency await and the action roll:
+  // re-resolving would re-parse the chaos headers and emit every invalid/out-of-range
+  // warning twice per request.
+  const chaosConfig = resolveChaosConfig(
+    fixture,
+    defaults.chaos,
+    req.headers,
+    defaults.logger,
+    req.url,
+  );
+  await awaitChaosLatency(
+    fixture,
+    defaults.chaos,
+    req.headers,
+    defaults.logger,
+    req.url,
+    res,
+    chaosConfig,
+  );
+  // C13: the latency await resolves EARLY when the client hangs up mid-delay
+  // (the timer is cancelled off `res`'s `close`). `applyChaosAsync` re-checks
+  // writability at exactly this point; a SPLIT gate has to do it itself.
+  // Without this the handler carries on and builds, "serves" and JOURNALS a
+  // full response into a dead socket — a phantom entry for bytes no client
+  // ever received.
+  const goneAfterLatency = responseGoneReason(res);
+  if (goneAfterLatency !== null) {
+    defaults.logger.debug(
+      `[chaos] ${method} ${path}: ${describeUnwritableReason(goneAfterLatency)} after the ` +
+        `latency delay — not served, not journalled`,
+    );
+    return;
+  }
+  const chaosAction = evaluateChaos(
+    fixture,
+    defaults.chaos,
+    req.headers,
+    defaults.logger,
+    req.url,
+    chaosConfig,
+  );
   const chaosContext = { method, path, headers: flatHeaders, body };
 
   if (chaosAction === "drop" || chaosAction === "disconnect" || chaosAction === "rateLimit") {
@@ -1240,6 +1297,7 @@ async function handleCompletions(
       chaosContext,
       fixture ? "fixture" : "proxy",
       defaults.registry,
+      defaults.logger,
     );
     return;
   }
@@ -1253,6 +1311,7 @@ async function handleCompletions(
       chaosContext,
       "fixture",
       defaults.registry,
+      defaults.logger,
     );
     return;
   }
@@ -1320,6 +1379,7 @@ async function handleCompletions(
                   chaosContext,
                   "proxy",
                   defaults.registry,
+                  defaults.logger,
                 );
                 return true;
               },
@@ -3586,29 +3646,85 @@ export async function createServerWithResolvedAuth(
       try {
         falBody = req.method === "POST" || req.method === "PUT" ? await readBody(req) : "";
         const raw = falBody;
-        const chaosAction = evaluateChaos(
-          null,
-          defaults.chaos,
-          req.headers,
-          defaults.logger,
-          req.url,
-        );
-        if (chaosAction) {
-          applyChaosAction(
-            chaosAction,
-            res,
+        // Chaos is rolled EXACTLY ONCE per fal request. This gate owns the roll
+        // only when the general handler is actually going to own the request;
+        // if `handleFal` would return "passthrough" the request continues to
+        // the legacy `/fal/queue/...` / `/fal/run/...` routes below, and THEIR
+        // `applyChaosAsync` (or the queue-requests gate) is the single roll.
+        // Rolling here unconditionally would double-roll every passthrough
+        // (observed: 0.72 effective drop rate for a configured 0.5).
+        //
+        // The deterministic latency is awaited BEFORE the roll, so a configured
+        // delay applies to every outcome on this path — served state, proxied
+        // response and each chaos failure alike — exactly as the completions
+        // path does, and resolved from the same per-testId scope as the rates.
+        //
+        // `source` is "internal": the roll happens before any fixture match or
+        // upstream call, so nothing was going to serve this but aimock's own
+        // fal logic. Mirrors the veo/grok/openrouter lifecycle gates.
+        if (falWillHandle(req, pathname)) {
+          // Resolved ONCE and threaded into both the latency await and the
+          // action roll — re-resolving would re-parse the chaos headers and
+          // warn twice per request. `res` is passed so a client that hangs up
+          // mid-delay CANCELS the pending timer instead of leaving the handler
+          // waiting out the full latency. Both mirror the completions path.
+          const chaosConfig = resolveChaosConfig(
             null,
-            journal,
-            {
-              method: req.method ?? "GET",
-              path: pathname,
-              headers: flattenHeaders(req.headers),
-              body: { model: "", messages: [] },
-            },
-            "fixture",
-            defaults.registry,
+            defaults.chaos,
+            req.headers,
+            defaults.logger,
+            req.url,
           );
-          return;
+          await awaitChaosLatency(
+            null,
+            defaults.chaos,
+            req.headers,
+            defaults.logger,
+            req.url,
+            res,
+            chaosConfig,
+          );
+          // C13: the latency await resolves EARLY when the client hangs up
+          // mid-delay (the timer is cancelled off `res`'s `close`).
+          // `applyChaosAsync` re-checks writability at exactly this point; a
+          // SPLIT gate has to do it itself. Without this the handler carries
+          // on and builds, "serves" and JOURNALS a full response into a dead
+          // socket — a phantom entry for bytes no client ever received.
+          const goneAfterLatency = responseGoneReason(res);
+          if (goneAfterLatency !== null) {
+            defaults.logger.debug(
+              `[chaos] ${req.method ?? "GET"} ${pathname}: ` +
+                `${describeUnwritableReason(goneAfterLatency)} after the latency delay — ` +
+                `not served, not journalled`,
+            );
+            return;
+          }
+          const chaosAction = evaluateChaos(
+            null,
+            defaults.chaos,
+            req.headers,
+            defaults.logger,
+            req.url,
+            chaosConfig,
+          );
+          if (chaosAction) {
+            applyChaosAction(
+              chaosAction,
+              res,
+              null,
+              journal,
+              {
+                method: req.method ?? "GET",
+                path: pathname,
+                headers: flattenHeaders(req.headers),
+                body: { model: "", messages: [] },
+              },
+              "internal",
+              defaults.registry,
+              defaults.logger,
+            );
+            return;
+          }
         }
         const outcome = await handleFal(req, res, raw, pathname, fixtures, defaults, journal);
         if (outcome === "handled") return;
@@ -3660,12 +3776,52 @@ export async function createServerWithResolvedAuth(
       try {
         const raw =
           req.method === "POST" || req.method === "PUT" ? (falBody ?? (await readBody(req))) : "{}";
+        // Status / cancel / result are pure state lookups: `handleFalQueue`
+        // rolls no chaos for them, so this gate is their single roll. Latency
+        // first, then the roll — same order as every other handler path.
+        // `source` is "internal" (no fixture, no upstream: aimock's own queue
+        // state was going to serve this), matching the veo status gate.
+        // Resolved ONCE and threaded into both the latency await and the action
+        // roll; `res` makes the delay cancellable on client disconnect. Same
+        // shape as the completions path and the `x-fal-target-host` gate above.
+        const chaosConfig = resolveChaosConfig(
+          null,
+          defaults.chaos,
+          req.headers,
+          defaults.logger,
+          req.url,
+        );
+        await awaitChaosLatency(
+          null,
+          defaults.chaos,
+          req.headers,
+          defaults.logger,
+          req.url,
+          res,
+          chaosConfig,
+        );
+        // C13: the latency await resolves EARLY when the client hangs up
+        // mid-delay (the timer is cancelled off `res`'s `close`).
+        // `applyChaosAsync` re-checks writability at exactly this point; a
+        // SPLIT gate has to do it itself. Without this the handler carries on
+        // and builds, "serves" and JOURNALS a full response into a dead
+        // socket — a phantom entry for bytes no client ever received.
+        const goneAfterLatency = responseGoneReason(res);
+        if (goneAfterLatency !== null) {
+          defaults.logger.debug(
+            `[chaos] ${req.method ?? "GET"} ${pathname}: ` +
+              `${describeUnwritableReason(goneAfterLatency)} after the latency delay — ` +
+              `not served, not journalled`,
+          );
+          return;
+        }
         const chaosAction = evaluateChaos(
           null,
           defaults.chaos,
           req.headers,
           defaults.logger,
           req.url,
+          chaosConfig,
         );
         if (chaosAction) {
           applyChaosAction(
@@ -3679,8 +3835,9 @@ export async function createServerWithResolvedAuth(
               headers: flattenHeaders(req.headers),
               body: { model: "", messages: [] },
             },
-            "fixture",
+            "internal",
             defaults.registry,
+            defaults.logger,
           );
           return;
         }

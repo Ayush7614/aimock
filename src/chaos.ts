@@ -463,14 +463,227 @@ export function resolveChaosLatencyMs(
   rawHeaders?: http.IncomingHttpHeaders,
   logger?: Logger,
   url?: string,
+  resolved?: ChaosConfig,
 ): number {
-  const config = resolveChaosConfig(fixture, serverDefaults, rawHeaders, logger, url);
+  const config = resolved ?? resolveChaosConfig(fixture, serverDefaults, rawHeaders, logger, url);
   return config.latencyMs ?? 0;
 }
 
 /**
+ * Why a response can no longer carry chaos bytes. These are NOT the same
+ * event, and they do NOT foreclose the same actions — a caller that treats
+ * them alike either logs a lie or skips work it could still have done:
+ *
+ * - `"chaos-disconnected"` — WE destroyed it, via the `disconnect` chaos
+ *   action. From the outside that is indistinguishable from a client hang-up,
+ *   so the response is marked on the way out and reported apart from one.
+ * - `"already-ended"` — the body was ended by someone else on this handler.
+ *   The client got a response, just not ours. Checked BEFORE `destroyed`,
+ *   because a normally-ended response whose connection is torn down afterwards
+ *   is an ended response, not a disconnect; the old order blamed the client
+ *   for a response it had received in full.
+ * - `"client-gone"` — the socket was destroyed with nothing ended on it. The
+ *   client hung up; whatever we were about to send is undeliverable and must
+ *   not be journalled.
+ * - `"headers-sent"` — a status line is already committed. NOT death: the
+ *   connection may well still be healthy. Only the actions that need a status
+ *   line of their own (`drop`, `malformed`, `rateLimit`) are foreclosed —
+ *   `disconnect` is a bare `res.destroy()` and still works, and the
+ *   deterministic latency is still meaningful.
+ *
+ * The first three are collectively "gone": see {@link responseGone}.
+ */
+export type ResponseUnwritableReason =
+  | "chaos-disconnected"
+  | "already-ended"
+  | "client-gone"
+  | "headers-sent";
+
+/**
+ * Responses this module destroyed itself, through the `disconnect` chaos
+ * action. A `WeakSet` rather than a marker property on the response: it adds
+ * nothing to the object's shape (so a `ServerResponse` test double stays a
+ * faithful stand-in) and the entry goes away with the response.
+ */
+const chaosDisconnectedResponses = new WeakSet<http.ServerResponse>();
+
+/**
+ * The reason this response can no longer carry a fresh status line, or `null`
+ * while it can. Checked most-specific first: our own teardown, then an ended
+ * body, then a destroyed socket, then a committed status line.
+ */
+export function responseUnwritableReason(
+  res: http.ServerResponse,
+): ResponseUnwritableReason | null {
+  if (chaosDisconnectedResponses.has(res)) return "chaos-disconnected";
+  if (res.writableEnded) return "already-ended";
+  if (res.destroyed) return "client-gone";
+  if (res.headersSent) return "headers-sent";
+  return null;
+}
+
+/**
+ * The reason this response is GONE — dead for every purpose, chaos or not —
+ * or `null` while anything at all can still be done with it. `"headers-sent"`
+ * is deliberately NOT one of these.
+ */
+export function responseGoneReason(
+  res: http.ServerResponse,
+): Exclude<ResponseUnwritableReason, "headers-sent"> | null {
+  const reason = responseUnwritableReason(res);
+  return reason === null || reason === "headers-sent" ? null : reason;
+}
+
+/**
+ * True once nothing can be delivered on this response at all: the client hung
+ * up, the body was already ended, or our own `disconnect` action destroyed it.
+ *
+ * This is the predicate the streaming surfaces guard their post-`await` writes
+ * with (`grok-video.ts`, `veo-video.ts` — which hand-rolled
+ * `res.destroyed || res.writableEnded`, i.e. this minus the chaos-teardown
+ * case), and the one the SPLIT chaos gates in `src/server.ts` — the ones that
+ * call `awaitChaosLatency` and `evaluateChaos` separately instead of going
+ * through `applyChaosAsync` — have to re-check themselves after the await.
+ * Without that check a client that hangs up mid-delay still gets a full
+ * response built, "served" into a dead socket and JOURNALLED (C13).
+ */
+export function responseGone(res: http.ServerResponse): boolean {
+  return responseGoneReason(res) !== null;
+}
+
+/**
+ * True once the response can no longer carry a FRESH STATUS LINE, for any of
+ * the reasons {@link responseUnwritableReason} enumerates — {@link
+ * responseGone} plus `headers-sent`. Guard a `writeHead` with this; decide
+ * whether there is any point continuing at all with `responseGone`.
+ */
+export function responseUnwritable(res: http.ServerResponse): boolean {
+  return responseUnwritableReason(res) !== null;
+}
+
+/** Human-readable gloss per reason, so a skipped chaos action logs what actually happened. */
+const UNWRITABLE_DESCRIPTION: Record<ResponseUnwritableReason, string> = {
+  "chaos-disconnected": "the chaos disconnect action had already destroyed it",
+  "already-ended": "the response was already ended",
+  "client-gone": "the client disconnected",
+  "headers-sent": "a status line was already committed",
+};
+
+/** The gloss for one reason. Exported so the split gates in `src/server.ts` log the same words. */
+export function describeUnwritableReason(reason: ResponseUnwritableReason): string {
+  return UNWRITABLE_DESCRIPTION[reason];
+}
+
+/**
+ * What {@link applyChaosAsync} reports back. Read it as the ANSWER TO ONE
+ * QUESTION — "must the caller stop?" — because that is how every call site
+ * spells it: `if (await applyChaosAsync(...)) return;`.
+ *
+ * - `false` — the caller CARRIES ON and serves the request. Either no chaos
+ *   fired, or the action that was rolled could not be applied and was skipped
+ *   without touching the response (a body action on a headers-sent response).
+ *   A skip must never abandon a healthy body the handler was about to finish.
+ * - `"handled"` — a terminal chaos action was applied and journalled; the
+ *   response is spoken for.
+ * - `"unwritable"` — the response was GONE by the time the latency delay
+ *   finished (client hung up, body already ended, or our own `disconnect`
+ *   destroyed it). Nothing was written, nothing was journalled, no metric was
+ *   counted — and there is nothing left to serve, so the caller stops.
+ *
+ * Both non-`false` members are truthy strings, so every existing call site
+ * keeps its meaning while callers that want the reason can read it.
+ */
+export type ChaosAsyncOutcome = false | "handled" | "unwritable";
+
+/**
+ * Whether {@link applyChaosAction} actually did the thing. `"skipped"` means
+ * the response could not take that particular action (see
+ * {@link ResponseUnwritableReason}) and NOTHING happened: no write, no journal
+ * entry, no metric. It is not a failure — it is the caller's cue that the
+ * request is still its to finish.
+ */
+export type ChaosActionOutcome = "applied" | "skipped";
+
+/**
+ * Await the deterministic latency delay configured for this request, if any.
+ * Fixed (never randomised or jittered) so replay stays deterministic. Returns
+ * immediately when no latency is configured. Handlers that roll the chaos dice
+ * themselves (branching on the action before dispatching) call this first;
+ * handlers that just need "delay, then maybe fail" use `applyChaosAsync`.
+ *
+ * Pass `res` so a client that hangs up mid-delay CANCELS the pending timer
+ * (via the cancellable `delay(ms, signal)` helper) instead of leaving it armed
+ * for up to the 30s cap. The wait resolves early on disconnect — callers must
+ * re-check the response is still writable afterwards, which every chaos write
+ * path does through `responseUnwritable`.
+ *
+ * The disconnect signal is taken from the RESPONSE, not the request: an
+ * `IncomingMessage` is auto-destroyed as soon as its body has been fully read,
+ * so `req.destroyed` / `req`'s `close` event fire on every healthy request and
+ * would cancel the delay for everyone. `res`'s `close` before a write can only
+ * mean the connection was terminated prematurely.
+ */
+export async function awaitChaosLatency(
+  fixture: Fixture | null,
+  serverDefaults?: ChaosDefaults,
+  rawHeaders?: http.IncomingHttpHeaders,
+  logger?: Logger,
+  url?: string,
+  res?: http.ServerResponse,
+  resolved?: ChaosConfig,
+): Promise<void> {
+  const delayMs = resolveChaosLatencyMs(fixture, serverDefaults, rawHeaders, logger, url, resolved);
+  if (delayMs <= 0) return;
+
+  // `res` is optional: without anything to listen on, fall back to a plain wait.
+  if (!res) {
+    await delay(delayMs);
+    return;
+  }
+
+  const controller = new AbortController();
+  const onClose = (): void => controller.abort();
+  // Subscribe and unsubscribe must be guarded the SAME way: a test double may
+  // carry only part of the EventEmitter surface, and an unconditional
+  // `res.off(...)` in the `finally` would throw a TypeError out of an
+  // otherwise-normal completion — turning the delay into a rejection. So we
+  // only ever remove what we actually added, through the remover we verified
+  // exists at subscribe time (`off` is the modern alias of `removeListener`;
+  // a double carrying neither simply keeps the short-lived per-request
+  // listener rather than blowing up the caller).
+  let unsubscribe: (() => void) | undefined;
+  // GONE, not merely unwritable: a response whose status line is already
+  // committed is still live, and its configured delay is still meaningful.
+  // Aborting on `headersSent` zeroed the latency for every post-headers gate.
+  if (responseGone(res)) {
+    controller.abort();
+  } else if (typeof res.once === "function") {
+    res.once("close", onClose);
+    if (typeof res.off === "function") unsubscribe = () => res.off("close", onClose);
+    else if (typeof res.removeListener === "function")
+      unsubscribe = () => res.removeListener("close", onClose);
+  }
+  try {
+    await delay(delayMs, controller.signal);
+  } finally {
+    unsubscribe?.();
+  }
+}
+
+/**
  * Evaluate chaos config and return the triggered action, or null if none.
- * Checks in order: drop, malformed, rateLimit, disconnect — first hit wins.
+ *
+ * THE RATES DO NOT ROLL INDEPENDENTLY. Each is a separate `Math.random()` draw
+ * taken in a fixed order — drop → malformed → rateLimit → disconnect — and the
+ * first draw that hits returns immediately, so the ones after it are never
+ * rolled at all. A rate is therefore the probability that ITS draw hits GIVEN
+ * that no earlier rate fired, not the share of requests that end in that fault.
+ * Only `dropRate`, first in the chain, is unconditional.
+ *
+ * Worked example: `{ dropRate: 0.5, rateLimitRate: 0.5 }` yields ~50 % drops
+ * and ~25 % rate limits (0.5 x 0.5 — half the requests never reach the second
+ * draw), not 50 % of each. To exercise two faults at their nominal frequency,
+ * configure them on separate requests rather than in one config.
  */
 export function evaluateChaos(
   fixture: Fixture | null,
@@ -478,8 +691,9 @@ export function evaluateChaos(
   rawHeaders?: http.IncomingHttpHeaders,
   logger?: Logger,
   url?: string,
+  resolved?: ChaosConfig,
 ): ChaosAction | null {
-  const config = resolveChaosConfig(fixture, serverDefaults, rawHeaders, logger, url);
+  const config = resolved ?? resolveChaosConfig(fixture, serverDefaults, rawHeaders, logger, url);
 
   if (config.dropRate !== undefined && config.dropRate > 0 && Math.random() < config.dropRate) {
     return "drop";
@@ -512,8 +726,35 @@ export function evaluateChaos(
 /**
  * Async chaos entrypoint: awaits the deterministic latency delay (when
  * configured) BEFORE rolling terminal actions. Returns true when a terminal
- * action fired (caller returns early), false to proceed. Existing sync
- * `applyChaos` callers are untouched — this is additive.
+ * action fired (caller returns early), false to proceed.
+ *
+ * This is the ONLY entrypoint that honours `latencyMs`, so it is the one every
+ * route handler must use: `src/__tests__/chaos-async-call-sites.test.ts` fails
+ * the build if any module outside this file rolls chaos without an awaited
+ * latency dominating the roll. That guard skips this file wholesale — it
+ * defines the primitives — so the `applyChaos(...)` delegation below is neither
+ * checked by it nor a control for it. The guard proves it is not vacuous its
+ * own way: synthetic fixtures for each evasion shape, a floor on the number of
+ * files scanned and chaos imports resolved, and a reconciliation of its name
+ * sets against this file's real exports.
+ *
+ * The delay is tied to the response socket, so a client that disconnects during
+ * it cancels the timer. When that happens (or the response went away for any
+ * other reason while we waited) the dice are never rolled: returns
+ * `"unwritable"` so the caller returns early, with nothing written and nothing
+ * journalled — a response that was never sent must not appear in the journal.
+ *
+ * A response that merely has its HEADERS SENT is NOT gone, and is not
+ * short-circuited: the delay is still awaited and the dice are still rolled.
+ * `disconnect` needs no status line and is applied; the three body actions
+ * are skipped and the call reports `false`, because the caller still has a
+ * healthy response to finish and `if (outcome) return;` would abandon it.
+ *
+ * The return value is a {@link ChaosAsyncOutcome}, not a boolean, so callers
+ * can tell "chaos fired" from "the response was already dead" — two outcomes
+ * the old `true` conflated. Both are truthy, so the standard call shape
+ * `if (await applyChaosAsync(...)) return;` keeps working unchanged; a caller
+ * that cares compares against `"handled"` / `"unwritable"`.
  */
 export async function applyChaosAsync(
   res: http.ServerResponse,
@@ -526,10 +767,22 @@ export async function applyChaosAsync(
   source: "fixture" | "proxy" | "internal",
   registry?: MetricsRegistry,
   logger?: Logger,
-): Promise<boolean> {
-  const delayMs = resolveChaosLatencyMs(fixture, serverDefaults, rawHeaders, logger, requestUrl);
-  if (delayMs > 0) {
-    await new Promise((resolve) => setTimeout(resolve, delayMs));
+): Promise<ChaosAsyncOutcome> {
+  // Resolve ONCE per request: the latency await and the terminal-action roll
+  // share the same config, so headers are parsed (and warned about) exactly once.
+  const resolved = resolveChaosConfig(fixture, serverDefaults, rawHeaders, logger, requestUrl);
+  await awaitChaosLatency(fixture, serverDefaults, rawHeaders, logger, requestUrl, res, resolved);
+  // Only a GONE response short-circuits here. `headers-sent` falls through to
+  // the roll: `disconnect` still applies to it, and a body action that cannot
+  // is skipped inside `applyChaosAction`, which reports `false` so the caller
+  // finishes the body it was already streaming.
+  const gone = responseGoneReason(res);
+  if (gone !== null) {
+    logger?.debug(
+      `[chaos] not applying chaos to ${context.method} ${context.path}: ` +
+        `${UNWRITABLE_DESCRIPTION[gone]} — nothing written, nothing journalled`,
+    );
+    return "unwritable";
   }
   return applyChaos(
     res,
@@ -542,7 +795,10 @@ export async function applyChaosAsync(
     source,
     registry,
     logger,
-  );
+    resolved,
+  )
+    ? "handled"
+    : false;
 }
 
 interface ChaosJournalContext {
@@ -555,6 +811,14 @@ interface ChaosJournalContext {
 /**
  * Apply chaos to a request. Returns true if chaos was applied (caller should
  * return early), false if the request should proceed normally.
+ *
+ * Synchronous, and therefore SKIPS the configured `latencyMs` delay — it cannot
+ * await. It IS exported (the async wrapper and this module's tests call it by
+ * name), but it is not the public surface: no handler may call it —
+ * `src/__tests__/chaos-async-call-sites.test.ts` fails the build if one does —
+ * and the barrel deliberately publishes `applyChaosDeprecated` under the name
+ * `applyChaos` instead, so library consumers who still call it are told about
+ * the latency gap. See both below.
  *
  * `requestUrl` is the RAW `req.url` (query string included) — chaos scoping
  * resolves the testId from it exactly as `getTestId` does, so `?testId=` tagged
@@ -576,11 +840,87 @@ export function applyChaos(
   source: "fixture" | "proxy" | "internal",
   registry?: MetricsRegistry,
   logger?: Logger,
+  resolved?: ChaosConfig,
 ): boolean {
-  const action = evaluateChaos(fixture, serverDefaults, rawHeaders, logger, requestUrl);
+  const action = evaluateChaos(fixture, serverDefaults, rawHeaders, logger, requestUrl, resolved);
   if (!action) return false;
-  applyChaosAction(action, res, fixture, journal, context, source, registry);
-  return true;
+  // "Rolled" is not "applied": an action the response could not take is a
+  // no-op, and reporting it as a hit would make the caller abandon a request
+  // nothing has answered.
+  return (
+    applyChaosAction(action, res, fixture, journal, context, source, registry, logger) === "applied"
+  );
+}
+
+/**
+ * One-shot latch for the deprecation notice below: warn once per process, not
+ * per request.
+ *
+ * PER PROCESS, and deliberately not cleared by `resetChaosWarnings` /
+ * `performFullReset` — unlike `warnedStaticRejections`, which IS per server and
+ * IS cleared. The two latches guard different kinds of fact. A rejected static
+ * chaos value describes THIS server's configuration, which a reset may change,
+ * so a reset suite must hear about it again. This notice describes the
+ * EMBEDDER'S CODE — a call site that still imports the sync `applyChaos` — and
+ * a `reset()` cannot change that: re-emitting it per test would print the same
+ * unchanged migration instruction once per test with nothing new to say. The
+ * deprecation policy (`docs/deprecation-policy/index.html`) is about which
+ * upstream endpoints aimock keeps mocking and says nothing about notice
+ * frequency, so the choice is ours; the message states it ("Warned once per
+ * process.") so nobody reads the single line as "it only happened once".
+ */
+let warnedSyncApplyChaos = false;
+
+/**
+ * Public, deprecated wrapper around the synchronous {@link applyChaos}. The
+ * barrel (`src/index.ts`) exports this under the name `applyChaos`, which has
+ * been part of the published API since v1.10.0 — removing it outright would
+ * break embedders silently, so it stays and says so instead.
+ *
+ * @deprecated Use {@link applyChaosAsync}. The synchronous form cannot await,
+ * so it silently ignores the configured chaos latency (`latencyMs`,
+ * `--chaos-latency`, `x-aimock-chaos-latency`): the fault rates still roll, but
+ * no delay is injected. Every fault behaviour is otherwise identical.
+ */
+export function applyChaosDeprecated(
+  res: http.ServerResponse,
+  fixture: Fixture | null,
+  serverDefaults: ChaosDefaults | undefined,
+  rawHeaders: http.IncomingHttpHeaders,
+  requestUrl: string | undefined,
+  journal: Journal,
+  context: ChaosJournalContext,
+  source: "fixture" | "proxy" | "internal",
+  registry?: MetricsRegistry,
+  logger?: Logger,
+): boolean {
+  if (!warnedSyncApplyChaos) {
+    warnedSyncApplyChaos = true;
+    const notice =
+      "applyChaos() is deprecated and ignores the configured chaos latency " +
+      "(latencyMs / --chaos-latency / x-aimock-chaos-latency): it is synchronous and " +
+      "cannot await the delay. Use `await applyChaosAsync(...)` instead — same arguments, " +
+      "same fault behaviour, plus the latency. (Warned once per process.)";
+    // Route through the caller's logger when there is one: every other line
+    // this module emits honours it, and a raw console.warn ignores the
+    // configured log level and bypasses whatever the embedder captures. The
+    // `console.warn` fallback (with the prefix `Logger` would have added) keeps
+    // the notice visible for the many call sites that pass no logger at all.
+    if (logger) logger.warn(notice);
+    else console.warn(`[aimock] ${notice}`);
+  }
+  return applyChaos(
+    res,
+    fixture,
+    serverDefaults,
+    rawHeaders,
+    requestUrl,
+    journal,
+    context,
+    source,
+    registry,
+    logger,
+  );
 }
 
 /**
@@ -591,8 +931,32 @@ export function applyChaos(
  *
  * `source` is required (not optional) so callers can't silently omit it on
  * one branch and journal an ambiguous entry. Pass `"fixture"` when a fixture
- * matched (or would have) and `"proxy"` when the request was headed for the
- * proxy path.
+ * matched (or would have), `"proxy"` when the request was headed for the proxy
+ * path, and `"internal"` — the value most call sites pass — for aimock's own
+ * built-in endpoints, which are neither.
+ *
+ * A chaos action can be dispatched an arbitrarily long time after the request
+ * arrived (up to the 30s latency cap), by which point the client may be gone.
+ * Writing to a destroyed socket is silently lost, so counting the action and
+ * journalling a status the client never received would be a lie. When the
+ * response cannot take THIS action this is a no-op: no metric, no journal
+ * entry, no write, and the return value says `"skipped"`. The journal
+ * vocabulary has no "aborted" chaos status — the entry is omitted rather than
+ * invented.
+ *
+ * "Cannot take this action" is per-action, not one bit. A GONE response
+ * (client hung up, body ended, already chaos-destroyed) forecloses everything.
+ * A response whose HEADERS ARE SENT forecloses only the three actions that
+ * write a status line of their own — `disconnect` is a bare `res.destroy()`
+ * and is applied normally.
+ *
+ * `logger` is REQUIRED (not optional, not defaulted) because every branch
+ * above can decline to act, and a skip nobody can see is the bug this
+ * parameter exists to prevent: one call site had quietly omitted it. It is
+ * typed `Logger | undefined` rather than `Logger` because the public,
+ * deprecated `applyChaos` wrapper's own logger is optional and threads through
+ * here — arity is what the compiler enforces, and that is what catches the
+ * omission.
  */
 export function applyChaosAction(
   action: ChaosAction,
@@ -601,10 +965,18 @@ export function applyChaosAction(
   journal: Journal,
   context: ChaosJournalContext,
   source: "fixture" | "proxy" | "internal",
-  registry?: MetricsRegistry,
-): void {
-  if (registry) {
-    registry.incrementCounter("aimock_chaos_triggered_total", { action, source });
+  registry: MetricsRegistry | undefined,
+  logger: Logger | undefined,
+): ChaosActionOutcome {
+  const unwritable = responseUnwritableReason(res);
+  // `headers-sent` blocks only the actions that need a status line; every
+  // other reason means the response is gone and blocks all of them.
+  if (unwritable !== null && (unwritable !== "headers-sent" || action !== "disconnect")) {
+    logger?.debug(
+      `[chaos] skipping ${action} on ${context.method} ${context.path}: ` +
+        `${UNWRITABLE_DESCRIPTION[unwritable]} — no metric, no journal entry, no write`,
+    );
+    return "skipped";
   }
 
   switch (action) {
@@ -624,7 +996,7 @@ export function applyChaosAction(
           },
         }),
       );
-      return;
+      break;
     }
     case "malformed": {
       journal.add({
@@ -633,20 +1005,19 @@ export function applyChaosAction(
       });
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end("{malformed json: <<<chaos>>>");
-      return;
+      break;
     }
     case "rateLimit": {
       journal.add({
         ...context,
         response: { status: 429, fixture, chaosAction: "rateLimit", source },
       });
-      res.writeHead(429, {
-        "Content-Type": "application/json",
-        "Retry-After": "1",
-        "x-ratelimit-remaining": "0",
-        "x-ratelimit-reset": "1",
-      });
-      res.end(
+      // Route through writeErrorResponse() so the chaos 429 carries the same
+      // OpenAI-shaped rate-limit header set (Retry-After + RATE_LIMIT_HEADERS)
+      // as every other 429 in the repo, instead of a second hand-rolled set.
+      writeErrorResponse(
+        res,
+        429,
         JSON.stringify({
           error: {
             message: "Chaos: rate limit exceeded",
@@ -655,20 +1026,29 @@ export function applyChaosAction(
           },
         }),
       );
-      return;
+      break;
     }
     case "disconnect": {
       journal.add({
         ...context,
         response: { status: 0, fixture, chaosAction: "disconnect", source },
       });
+      // Marked BEFORE the teardown so anything reacting to `close` already
+      // sees this as OUR disconnect rather than a client hang-up.
+      chaosDisconnectedResponses.add(res);
       res.destroy();
-      return;
+      break;
     }
     default: {
       const _exhaustive: never = action;
       void _exhaustive;
-      return;
+      return "skipped";
     }
   }
+
+  // Counted AFTER the write, never before: a write that throws (a socket torn
+  // down between the guard above and the call) must not leave behind a metric
+  // for bytes that never went out.
+  registry?.incrementCounter("aimock_chaos_triggered_total", { action, source });
+  return "applied";
 }

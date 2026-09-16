@@ -56,7 +56,7 @@ import { writeEventStream } from "./aws-event-stream.js";
 import { createInterruptionSignal } from "./interruption.js";
 import type { Journal } from "./journal.js";
 import type { Logger } from "./logger.js";
-import { applyChaos } from "./chaos.js";
+import { applyChaosAsync } from "./chaos.js";
 import { proxyAndRecord } from "./recorder.js";
 
 // ─── Bedrock Claude request types ────────────────────────────────────────────
@@ -531,7 +531,7 @@ export async function handleBedrock(
   }
 
   if (
-    applyChaos(
+    await applyChaosAsync(
       res,
       fixture,
       defaults.chaos,
@@ -1373,7 +1373,7 @@ export async function handleBedrockStream(
   }
 
   if (
-    applyChaos(
+    await applyChaosAsync(
       res,
       fixture,
       defaults.chaos,
