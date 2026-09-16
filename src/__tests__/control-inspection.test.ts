@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import * as http from "node:http";
 import type { Fixture, ChatCompletionRequest } from "../types.js";
 import { createServer, type ServerInstance } from "../server.js";
@@ -414,6 +414,103 @@ describe("GET/POST/DELETE /__aimock/chaos", () => {
       headers: { "X-Test-Id": "t1" },
     });
     expect(after.status).toBe(200);
+  });
+
+  // The scope lookup is a SELECTION, not a field-wise merge: a scoped override
+  // stands in for the baseline entirely. Pinned because the alternative reading
+  // — layering the override over the baseline — is the intuitive one, and it is
+  // wrong here.
+  it("a scoped override replaces the baseline wholesale instead of merging into it", async () => {
+    instance = await createServer(
+      [{ match: { userMessage: "hello" }, response: { content: "Hi" } }],
+      {
+        chaos: { latencyMs: 2000 },
+      },
+    );
+    const put = await request(`${instance.url}/__aimock/chaos`, "POST", {
+      body: { dropRate: 1 },
+      headers: { "X-Test-Id": "t1" },
+    });
+    // The baseline latency is GONE for t1 — not merged in — and the 200 body
+    // says so, so the readback is the contract, not a summary of it.
+    expect(put.json).toEqual({ chaos: { dropRate: 1 } });
+    expect(
+      (await request(`${instance.url}/__aimock/chaos`, "GET", { headers: { "X-Test-Id": "t1" } }))
+        .json,
+    ).toEqual({ chaos: { dropRate: 1 } });
+    // ...while the untagged baseline still has it.
+    expect((await request(`${instance.url}/__aimock/chaos`, "GET")).json).toEqual({
+      chaos: { latencyMs: 2000 },
+    });
+
+    // And on the wire: t1's drop fires without waiting out the baseline's 2s.
+    // The bound is deliberately loose (a merge would take >= 2000ms).
+    const started = Date.now();
+    const t1 = await request(`${instance.url}/v1/chat/completions`, "POST", {
+      body: chatRequest("hello"),
+      headers: { "X-Test-Id": "t1" },
+    });
+    expect(t1.status).toBe(500);
+    expect(Date.now() - started).toBeLessThan(1000);
+  });
+
+  // `POST {}` and `DELETE` are different operations — "explicitly no chaos for
+  // my test" vs "forget I said anything". A field-wise merge would make
+  // `POST {}` a no-op and collapse the two, so this pins the difference.
+  it("a scoped POST {} means no chaos for that test, not 'inherit the baseline'", async () => {
+    instance = await createServer(
+      [{ match: { userMessage: "hello" }, response: { content: "Hi" } }],
+      {
+        chaos: { dropRate: 1 },
+      },
+    );
+    expect(
+      (
+        await request(`${instance.url}/__aimock/chaos`, "POST", {
+          body: {},
+          headers: { "X-Test-Id": "t1" },
+        })
+      ).json,
+    ).toEqual({ chaos: {} });
+
+    const t1 = await request(`${instance.url}/v1/chat/completions`, "POST", {
+      body: chatRequest("hello"),
+      headers: { "X-Test-Id": "t1" },
+    });
+    expect(t1.status).toBe(200);
+    // The baseline is untouched for everyone else.
+    const untagged = await request(`${instance.url}/v1/chat/completions`, "POST", {
+      body: chatRequest("hello"),
+    });
+    expect(untagged.status).toBe(500);
+  });
+
+  // Replacement is the contract, but losing a baseline rate silently is not:
+  // the install names every field it drops.
+  it("warns when a scoped install drops a field the baseline had set", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      instance = await createServer([], { chaos: { latencyMs: 500 }, logLevel: "warn" });
+      await request(`${instance.url}/__aimock/chaos`, "POST", {
+        body: { dropRate: 1 },
+        headers: { "X-Test-Id": "t1" },
+      });
+      const lines = warn.mock.calls.map((args) => args.join(" "));
+      const dropWarning = lines.find((line) => line.includes("latencyMs=500"));
+      expect(dropWarning).toBeDefined();
+      expect(dropWarning).toContain("t1");
+      expect(dropWarning).toContain("wholesale");
+
+      // A restated field is not reported as lost.
+      warn.mockClear();
+      await request(`${instance.url}/__aimock/chaos`, "POST", {
+        body: { dropRate: 1, latencyMs: 500 },
+        headers: { "X-Test-Id": "t2" },
+      });
+      expect(warn.mock.calls.map((args) => args.join(" ")).join("\n")).not.toContain("latencyMs=");
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it("POST /__aimock/reset clears per-testId overrides too", async () => {

@@ -109,7 +109,7 @@ import {
 } from "./byteplus-video.js";
 import { handleElevenLabsAudio, handleElevenLabsTTS } from "./elevenlabs-audio.js";
 import { handleFalQueue, falJobs } from "./fal-audio.js";
-import { handleFal, falQueueStates } from "./fal.js";
+import { handleFal, falQueueStates, falWillHandle } from "./fal.js";
 import { handleOllama, handleOllamaGenerate, handleOllamaEmbeddings } from "./ollama.js";
 import { handleCohere, handleCohereEmbed } from "./cohere.js";
 import { handleSearch, type SearchFixture } from "./search.js";
@@ -131,7 +131,19 @@ import { handleWebSocketResponses } from "./ws-responses.js";
 import { handleWebSocketRealtime } from "./ws-realtime.js";
 import { handleWebSocketGeminiLive } from "./ws-gemini-live.js";
 import { Logger } from "./logger.js";
-import { applyChaosAction, awaitChaosLatency, evaluateChaos, isChaosScope } from "./chaos.js";
+import {
+  applyChaosAction,
+  awaitChaosLatency,
+  describeUnwritableReason,
+  evaluateChaos,
+  responseGoneReason,
+  isChaosScope,
+  resolveChaosConfig,
+  resetChaosWarnings,
+  parseChaosField,
+  CHAOS_FIELDS,
+  CHAOS_FIELD_NAMES,
+} from "./chaos.js";
 import {
   createMetricsRegistry,
   normalizePathLabel,
@@ -371,6 +383,11 @@ export function performFullReset(fixtures: Fixture[], targets: FullResetTargets 
   resetEventIdCounter();
   if (!targets) return;
   targets.journal.clear();
+  // Chaos warning latches are per-server state too: a suite that resets between
+  // tests must see a bad static chaos value reported again, not inherit the
+  // latch the previous test left armed. Scoped by the server's logger, so this
+  // clears THIS server's latch and cannot re-arm a concurrent server's.
+  resetChaosWarnings(targets.defaults.logger);
   // Drop any runtime chaos override installed via POST /__aimock/chaos, so the
   // server returns to the chaos configuration it was STARTED with. Reset is the
   // isolation barrier every parallel harness leans on; chaos leaking past it
@@ -478,10 +495,17 @@ function writeBlankTestId(res: http.ServerResponse): true {
   return true;
 }
 
-/** The chaos config in effect for one testId: its override, else the baseline. */
+/**
+ * The chaos config in effect for one testId: its override, else the baseline —
+ * one or the other, never the two merged. Mirrors `resolveScopedDefaults` in
+ * chaos.ts, so what `GET /__aimock/chaos` reports for a scope is exactly what
+ * that scope's traffic is evaluated against.
+ */
 function effectiveChaos(defaults: HandlerDefaults, scopeId: string): ChaosConfig {
-  const scoped = defaults.chaosByTestId?.get(scopeId);
-  if (scoped) return scoped;
+  // `has`, not truthiness — an installed-but-empty override is a selection (see
+  // `resolveScopedDefaults`), so it must shadow the baseline here too or `GET`
+  // would report a config the traffic is not evaluated against.
+  if (defaults.chaosByTestId?.has(scopeId)) return defaults.chaosByTestId.get(scopeId) ?? {};
   const current = defaults.chaos;
   if (!current) return {};
   return isChaosScope(current) ? (current.base ?? {}) : current;
@@ -676,6 +700,15 @@ async function handleControlAPI(
   // override installed by test `t1` applies only to traffic resolving to `t1`.
   // An untagged call sets the server-wide baseline. `POST /__aimock/reset`
   // drops all of it, restoring the chaos config the server was STARTED with.
+  //
+  // REPLACES WHOLESALE — the body is not merged over the config it shadows. A
+  // server started with `--chaos-latency 500` that is sent `{ "dropRate": 1 }`
+  // for `t1` gives `t1` drops and NO latency: restate `latencyMs` to keep it.
+  // That is what makes `POST {}` ("explicitly no chaos") different from
+  // `DELETE` ("fall back to what I was shadowing"); under a merge, `POST {}`
+  // would be a no-op. The 200 body echoes the config actually in effect for the
+  // scope, and any field that WAS in effect and is not restated is named in a
+  // warning, so a dropped baseline rate is never silent.
   if (subPath === "/chaos" && req.method === "POST") {
     const scopeId = chaosScopeId(req);
     if (scopeId === null) return writeBlankTestId(res);
@@ -705,41 +738,55 @@ async function handleControlAPI(
       res.end(JSON.stringify({ error: "Invalid body: expected a JSON object" }));
       return true;
     }
-    const allowed = [
-      "dropRate",
-      "malformedRate",
-      "disconnectRate",
-      "latencyMs",
-      "rateLimitRate",
-    ] as const;
+    // The set of fields and their bounds come from `CHAOS_FIELDS`, and each
+    // value is validated by the same `parseChaosField` every other chaos source
+    // uses. Re-typing the limits here is how this endpoint used to accept
+    // `{ latencyMs: 250.5 }` with a 200 and echo it back from `GET`, while the
+    // resolver silently discarded it at request time as a non-integer: the
+    // control API reported a config the traffic never saw.
     for (const key of Object.keys(parsed)) {
-      if (!(allowed as readonly string[]).includes(key)) {
+      if (!(CHAOS_FIELD_NAMES as readonly string[]).includes(key)) {
         res.writeHead(400, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: `Unknown chaos field: '${key}'` }));
         return true;
       }
     }
     const next: ChaosConfig = {};
-    for (const key of allowed) {
+    for (const key of CHAOS_FIELD_NAMES) {
       const value = parsed[key];
       if (value === undefined) continue;
-      if (key === "latencyMs") {
-        if (typeof value !== "number" || Number.isNaN(value) || value < 0 || value > 30000) {
-          res.writeHead(400, { "Content-Type": "application/json" });
-          res.end(
-            JSON.stringify({ error: `Invalid '${key}': must be a number between 0 and 30000` }),
-          );
-          return true;
-        }
-        next[key] = value;
-        continue;
-      }
-      if (typeof value !== "number" || Number.isNaN(value) || value < 0 || value > 1) {
+      // JSON body: the field must be a number. A numeric STRING is a
+      // client-side type error here, not a wire spelling to be parsed — the
+      // header API is the surface that takes text.
+      const accepted = typeof value === "number" ? parseChaosField(key, value) : undefined;
+      if (accepted === undefined) {
+        const shape = CHAOS_FIELDS[key].integer ? "a whole number of ms" : "a number";
         res.writeHead(400, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: `Invalid '${key}': must be a number between 0 and 1` }));
+        res.end(
+          JSON.stringify({
+            error: `Invalid '${key}': must be ${shape} between 0 and ${CHAOS_FIELDS[key].max}`,
+          }),
+        );
         return true;
       }
-      next[key] = value;
+      next[key] = accepted;
+    }
+    // The install REPLACES what was in effect for this scope; it does not merge
+    // over it. Name every field that was in effect and is not restated, so a
+    // baseline rate a test silently loses (the classic case: a server-wide
+    // `--chaos-latency` vanishing under a scoped `{ dropRate: 1 }`) shows up in
+    // the log instead of as a mystery in the timings.
+    const shadowed = effectiveChaos(defaults, scopeId);
+    const droppedFields = (Object.keys(shadowed) as (keyof ChaosConfig)[]).filter(
+      (key) => shadowed[key] !== undefined && next[key] === undefined,
+    );
+    if (droppedFields.length > 0) {
+      const lost = droppedFields.map((key) => `${key}=${shadowed[key]}`).join(", ");
+      defaults.logger.warn(
+        `[chaos] POST /__aimock/chaos (testId '${scopeId}') replaces the chaos config for this ` +
+          `scope wholesale, it is not merged: ${lost} no longer applies here. ` +
+          `Restate the field in the body to keep it.`,
+      );
     }
     defaults.chaosByTestId?.set(scopeId, next);
     res.writeHead(200, { "Content-Type": "application/json" });
@@ -1254,8 +1301,47 @@ async function handleCompletions(
   // response, streamed response, and each chaos failure alike) — and, being
   // resolved from the same per-testId scope as the rates, never leaks into a
   // concurrently-running test that did not configure it.
-  await awaitChaosLatency(fixture, defaults.chaos, req.headers, defaults.logger, req.url);
-  const chaosAction = evaluateChaos(fixture, defaults.chaos, req.headers, defaults.logger, req.url);
+  // Resolved ONCE and threaded into both the latency await and the action roll:
+  // re-resolving would re-parse the chaos headers and emit every invalid/out-of-range
+  // warning twice per request.
+  const chaosConfig = resolveChaosConfig(
+    fixture,
+    defaults.chaos,
+    req.headers,
+    defaults.logger,
+    req.url,
+  );
+  await awaitChaosLatency(
+    fixture,
+    defaults.chaos,
+    req.headers,
+    defaults.logger,
+    req.url,
+    res,
+    chaosConfig,
+  );
+  // C13: the latency await resolves EARLY when the client hangs up mid-delay
+  // (the timer is cancelled off `res`'s `close`). `applyChaosAsync` re-checks
+  // writability at exactly this point; a SPLIT gate has to do it itself.
+  // Without this the handler carries on and builds, "serves" and JOURNALS a
+  // full response into a dead socket — a phantom entry for bytes no client
+  // ever received.
+  const goneAfterLatency = responseGoneReason(res);
+  if (goneAfterLatency !== null) {
+    defaults.logger.debug(
+      `[chaos] ${method} ${path}: ${describeUnwritableReason(goneAfterLatency)} after the ` +
+        `latency delay — not served, not journalled`,
+    );
+    return;
+  }
+  const chaosAction = evaluateChaos(
+    fixture,
+    defaults.chaos,
+    req.headers,
+    defaults.logger,
+    req.url,
+    chaosConfig,
+  );
   const chaosContext = { method, path, headers: flatHeaders, body };
 
   if (chaosAction === "drop" || chaosAction === "disconnect" || chaosAction === "rateLimit") {
@@ -1267,6 +1353,7 @@ async function handleCompletions(
       chaosContext,
       fixture ? "fixture" : "proxy",
       defaults.registry,
+      defaults.logger,
     );
     return;
   }
@@ -1280,6 +1367,7 @@ async function handleCompletions(
       chaosContext,
       "fixture",
       defaults.registry,
+      defaults.logger,
     );
     return;
   }
@@ -1347,6 +1435,7 @@ async function handleCompletions(
                   chaosContext,
                   "proxy",
                   defaults.registry,
+                  defaults.logger,
                 );
                 return true;
               },
@@ -3690,29 +3779,85 @@ export async function createServerWithResolvedAuth(
       try {
         falBody = req.method === "POST" || req.method === "PUT" ? await readBody(req) : "";
         const raw = falBody;
-        const chaosAction = evaluateChaos(
-          null,
-          defaults.chaos,
-          req.headers,
-          defaults.logger,
-          req.url,
-        );
-        if (chaosAction) {
-          applyChaosAction(
-            chaosAction,
-            res,
+        // Chaos is rolled EXACTLY ONCE per fal request. This gate owns the roll
+        // only when the general handler is actually going to own the request;
+        // if `handleFal` would return "passthrough" the request continues to
+        // the legacy `/fal/queue/...` / `/fal/run/...` routes below, and THEIR
+        // `applyChaosAsync` (or the queue-requests gate) is the single roll.
+        // Rolling here unconditionally would double-roll every passthrough
+        // (observed: 0.72 effective drop rate for a configured 0.5).
+        //
+        // The deterministic latency is awaited BEFORE the roll, so a configured
+        // delay applies to every outcome on this path — served state, proxied
+        // response and each chaos failure alike — exactly as the completions
+        // path does, and resolved from the same per-testId scope as the rates.
+        //
+        // `source` is "internal": the roll happens before any fixture match or
+        // upstream call, so nothing was going to serve this but aimock's own
+        // fal logic. Mirrors the veo/grok/openrouter lifecycle gates.
+        if (falWillHandle(req, pathname)) {
+          // Resolved ONCE and threaded into both the latency await and the
+          // action roll — re-resolving would re-parse the chaos headers and
+          // warn twice per request. `res` is passed so a client that hangs up
+          // mid-delay CANCELS the pending timer instead of leaving the handler
+          // waiting out the full latency. Both mirror the completions path.
+          const chaosConfig = resolveChaosConfig(
             null,
-            journal,
-            {
-              method: req.method ?? "GET",
-              path: pathname,
-              headers: flattenHeaders(req.headers),
-              body: { model: "", messages: [] },
-            },
-            "fixture",
-            defaults.registry,
+            defaults.chaos,
+            req.headers,
+            defaults.logger,
+            req.url,
           );
-          return;
+          await awaitChaosLatency(
+            null,
+            defaults.chaos,
+            req.headers,
+            defaults.logger,
+            req.url,
+            res,
+            chaosConfig,
+          );
+          // C13: the latency await resolves EARLY when the client hangs up
+          // mid-delay (the timer is cancelled off `res`'s `close`).
+          // `applyChaosAsync` re-checks writability at exactly this point; a
+          // SPLIT gate has to do it itself. Without this the handler carries
+          // on and builds, "serves" and JOURNALS a full response into a dead
+          // socket — a phantom entry for bytes no client ever received.
+          const goneAfterLatency = responseGoneReason(res);
+          if (goneAfterLatency !== null) {
+            defaults.logger.debug(
+              `[chaos] ${req.method ?? "GET"} ${pathname}: ` +
+                `${describeUnwritableReason(goneAfterLatency)} after the latency delay — ` +
+                `not served, not journalled`,
+            );
+            return;
+          }
+          const chaosAction = evaluateChaos(
+            null,
+            defaults.chaos,
+            req.headers,
+            defaults.logger,
+            req.url,
+            chaosConfig,
+          );
+          if (chaosAction) {
+            applyChaosAction(
+              chaosAction,
+              res,
+              null,
+              journal,
+              {
+                method: req.method ?? "GET",
+                path: pathname,
+                headers: flattenHeaders(req.headers),
+                body: { model: "", messages: [] },
+              },
+              "internal",
+              defaults.registry,
+              defaults.logger,
+            );
+            return;
+          }
         }
         const outcome = await handleFal(req, res, raw, pathname, fixtures, defaults, journal);
         if (outcome === "handled") return;
@@ -3764,12 +3909,52 @@ export async function createServerWithResolvedAuth(
       try {
         const raw =
           req.method === "POST" || req.method === "PUT" ? (falBody ?? (await readBody(req))) : "{}";
+        // Status / cancel / result are pure state lookups: `handleFalQueue`
+        // rolls no chaos for them, so this gate is their single roll. Latency
+        // first, then the roll — same order as every other handler path.
+        // `source` is "internal" (no fixture, no upstream: aimock's own queue
+        // state was going to serve this), matching the veo status gate.
+        // Resolved ONCE and threaded into both the latency await and the action
+        // roll; `res` makes the delay cancellable on client disconnect. Same
+        // shape as the completions path and the `x-fal-target-host` gate above.
+        const chaosConfig = resolveChaosConfig(
+          null,
+          defaults.chaos,
+          req.headers,
+          defaults.logger,
+          req.url,
+        );
+        await awaitChaosLatency(
+          null,
+          defaults.chaos,
+          req.headers,
+          defaults.logger,
+          req.url,
+          res,
+          chaosConfig,
+        );
+        // C13: the latency await resolves EARLY when the client hangs up
+        // mid-delay (the timer is cancelled off `res`'s `close`).
+        // `applyChaosAsync` re-checks writability at exactly this point; a
+        // SPLIT gate has to do it itself. Without this the handler carries on
+        // and builds, "serves" and JOURNALS a full response into a dead
+        // socket — a phantom entry for bytes no client ever received.
+        const goneAfterLatency = responseGoneReason(res);
+        if (goneAfterLatency !== null) {
+          defaults.logger.debug(
+            `[chaos] ${req.method ?? "GET"} ${pathname}: ` +
+              `${describeUnwritableReason(goneAfterLatency)} after the latency delay — ` +
+              `not served, not journalled`,
+          );
+          return;
+        }
         const chaosAction = evaluateChaos(
           null,
           defaults.chaos,
           req.headers,
           defaults.logger,
           req.url,
+          chaosConfig,
         );
         if (chaosAction) {
           applyChaosAction(
@@ -3783,8 +3968,9 @@ export async function createServerWithResolvedAuth(
               headers: flattenHeaders(req.headers),
               body: { model: "", messages: [] },
             },
-            "fixture",
+            "internal",
             defaults.registry,
+            defaults.logger,
           );
           return;
         }

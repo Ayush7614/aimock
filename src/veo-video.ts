@@ -23,7 +23,7 @@ import {
 import { matchFixtureDiagnostic } from "./router.js";
 import { writeErrorResponse } from "./sse-writer.js";
 import type { Journal } from "./journal.js";
-import { applyChaosAsync } from "./chaos.js";
+import { applyChaosAsync, responseGone } from "./chaos.js";
 import { resolveProgression } from "./fal.js";
 import {
   buildFixtureMatch,
@@ -386,7 +386,7 @@ export async function handleVeoVideoCreate(
   const response = await resolveResponse(fixture, syntheticReq);
 
   if (isErrorResponse(response)) {
-    if (res.destroyed || res.writableEnded) return;
+    if (responseGone(res)) return;
     const status = response.status ?? 500;
     journal.add({
       method,
@@ -402,7 +402,7 @@ export async function handleVeoVideoCreate(
   }
 
   if (!isVideoResponse(response)) {
-    if (res.destroyed || res.writableEnded) return;
+    if (responseGone(res)) return;
     journal.add({
       method,
       path,
@@ -418,7 +418,7 @@ export async function handleVeoVideoCreate(
     return;
   }
 
-  if (res.destroyed || res.writableEnded) return;
+  if (responseGone(res)) return;
   journal.add({
     method,
     path,
@@ -571,7 +571,7 @@ export async function handleVeoVideoStatus(
 
   // Guard BEFORE advancing or journaling (file convention): a disconnected
   // client consumes no progression step or TTL refresh.
-  if (res.destroyed || res.writableEnded) return;
+  if (responseGone(res)) return;
   advanceVeoJob(job);
   // Refresh the TTL on every replay poll (delete-before-set also moves the
   // entry to the back of the FIFO eviction order).
@@ -645,7 +645,7 @@ async function proxyVeoVideoSubmit(args: {
 
   const proxyError = (msg: string): "handled" => {
     defaults.logger.error(`Veo video submit proxy failed: ${msg}`);
-    if (res.destroyed || res.writableEnded) return "handled";
+    if (responseGone(res)) return "handled";
     journal.add({
       method,
       path,
@@ -711,7 +711,7 @@ async function proxyVeoVideoSubmit(args: {
     defaults.logger.warn(
       `Upstream rejected the Veo video submit (${fetched.status}) — relaying the upstream status`,
     );
-    if (res.destroyed || res.writableEnded) return "handled";
+    if (responseGone(res)) return "handled";
     journal.add({
       method,
       path,
@@ -795,7 +795,7 @@ async function proxyVeoVideoSubmit(args: {
     );
   }
 
-  if (res.destroyed || res.writableEnded) return "handled";
+  if (responseGone(res)) return "handled";
   journal.add({
     method,
     path,
@@ -863,7 +863,7 @@ async function proxyVeoVideoRecordPoll(args: {
 
   const proxyError = (msg: string): void => {
     logger.error(`Veo video poll proxy failed: ${msg}`);
-    if (res.destroyed || res.writableEnded) return;
+    if (responseGone(res)) return;
     journalProxy(502);
     writeErrorResponse(
       res,
@@ -908,7 +908,7 @@ async function proxyVeoVideoRecordPoll(args: {
     logger.warn(
       `Upstream rejected the Veo status poll for operation ${job.upstreamOperationName} (${fetched.status}) — relaying the upstream status`,
     );
-    if (res.destroyed || res.writableEnded) return;
+    if (responseGone(res)) return;
     journalProxy(fetched.status);
     res.writeHead(fetched.status, { "Content-Type": fetched.contentType ?? "application/json" });
     res.end(fetched.text);
@@ -941,7 +941,7 @@ async function proxyVeoVideoRecordPoll(args: {
   const relayBody: Record<string, unknown> = { ...upstreamBody, name: job.operationName };
 
   const relayJson = (): void => {
-    if (res.destroyed || res.writableEnded) return;
+    if (responseGone(res)) return;
     journalProxy(200);
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify(relayBody));
