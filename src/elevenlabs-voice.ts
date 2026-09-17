@@ -19,6 +19,7 @@ import {
   strictOverrideField,
   strictNoMatchMessage,
   strictNoMatchLogLine,
+  wouldProxyMiss,
 } from "./helpers.js";
 import { releaseOneShotError } from "./fixture-loader.js";
 import { selectFixtureForServing } from "./router.js";
@@ -326,6 +327,25 @@ function writeJson(res: http.ServerResponse, status: number, payload: unknown): 
   res.end(JSON.stringify(payload));
 }
 
+/**
+ * The journal `source` for a chaos fault on a request no fixture answers — the
+ * same rule `src/server.ts` applies, via the shared {@link wouldProxyMiss}:
+ * the miss is aimock's own answer, "internal", unless record mode has an
+ * ElevenLabs upstream to forward it to AND strict mode (server default or the
+ * per-request `X-AIMock-Strict` header) is not refusing it first. Both halves
+ * used to be hardcoded — design/create said "proxy" with no record config at
+ * all, and the slot routes said "internal" while record mode was about to
+ * proxy the very same miss.
+ */
+function noFixtureSource(
+  defaults: HandlerDefaults,
+  headers: http.IncomingHttpHeaders,
+): "proxy" | "internal" {
+  return wouldProxyMiss(resolveStrictMode(defaults.strict, headers), defaults.record, "elevenlabs")
+    ? "proxy"
+    : "internal";
+}
+
 function parseJsonObject(
   body: string,
   req: http.IncomingMessage,
@@ -339,13 +359,6 @@ function parseJsonObject(
     parsed = JSON.parse(body);
   } catch (parseErr) {
     const detail = parseErr instanceof Error ? parseErr.message : "unknown";
-    journal.add({
-      method,
-      path,
-      headers: flattenHeaders(req.headers),
-      body: null,
-      response: { status: 400, fixture: null },
-    });
     writeErrorResponse(
       res,
       400,
@@ -357,17 +370,18 @@ function parseJsonObject(
         },
       }),
     );
-    return null;
-  }
-
-  if (!isJsonObject(parsed)) {
     journal.add({
       method,
       path,
       headers: flattenHeaders(req.headers),
+      service: "elevenlabs-voice",
       body: null,
       response: { status: 400, fixture: null },
     });
+    return null;
+  }
+
+  if (!isJsonObject(parsed)) {
     writeErrorResponse(
       res,
       400,
@@ -378,6 +392,14 @@ function parseJsonObject(
         },
       }),
     );
+    journal.add({
+      method,
+      path,
+      headers: flattenHeaders(req.headers),
+      service: "elevenlabs-voice",
+      body: null,
+      response: { status: 400, fixture: null },
+    });
     return null;
   }
 
@@ -416,17 +438,6 @@ async function missPath(
   if (effectiveStrict) {
     const strictMessage = strictNoMatchMessage(skippedBySequenceOrTurn);
     defaults.logger.error(strictNoMatchLogLine(method, path, skippedBySequenceOrTurn));
-    journal.add({
-      method,
-      path,
-      headers: flattenHeaders(req.headers),
-      body: syntheticReq,
-      response: {
-        status: 503,
-        fixture: null,
-        ...strictOverrideField(defaults.strict, req.headers),
-      },
-    });
     writeErrorResponse(
       res,
       503,
@@ -438,6 +449,18 @@ async function missPath(
         },
       }),
     );
+    journal.add({
+      method,
+      path,
+      headers: flattenHeaders(req.headers),
+      service: "elevenlabs-voice",
+      body: syntheticReq,
+      response: {
+        status: 503,
+        fixture: null,
+        ...strictOverrideField(defaults.strict, req.headers),
+      },
+    });
     return "handled";
   }
 
@@ -459,6 +482,7 @@ async function missPath(
         method,
         path,
         headers: flattenHeaders(req.headers),
+        service: "elevenlabs-voice",
         body: syntheticReq,
         response: { status: res.statusCode ?? 200, fixture: null, source: "proxy" },
       });
@@ -478,17 +502,6 @@ function writeNoMatch(
   path: string,
   method: string,
 ): void {
-  journal.add({
-    method,
-    path,
-    headers: flattenHeaders(req.headers),
-    body: syntheticReq,
-    response: {
-      status: 404,
-      fixture: null,
-      ...strictOverrideField(defaults.strict, req.headers),
-    },
-  });
   writeErrorResponse(
     res,
     404,
@@ -500,6 +513,18 @@ function writeNoMatch(
       },
     }),
   );
+  journal.add({
+    method,
+    path,
+    headers: flattenHeaders(req.headers),
+    service: "elevenlabs-voice",
+    body: syntheticReq,
+    response: {
+      status: 404,
+      fixture: null,
+      ...strictOverrideField(defaults.strict, req.headers),
+    },
+  });
 }
 
 /**
@@ -625,13 +650,6 @@ export async function handleElevenLabsVoiceDesign(
   );
 
   if (description === undefined) {
-    journal.add({
-      method,
-      path,
-      headers: flattenHeaders(req.headers),
-      body: syntheticReq,
-      response: { status: 400, fixture: null },
-    });
     writeErrorResponse(
       res,
       400,
@@ -642,6 +660,14 @@ export async function handleElevenLabsVoiceDesign(
         },
       }),
     );
+    journal.add({
+      method,
+      path,
+      headers: flattenHeaders(req.headers),
+      service: "elevenlabs-voice",
+      body: syntheticReq,
+      response: { status: 400, fixture: null },
+    });
     return;
   }
 
@@ -666,8 +692,14 @@ export async function handleElevenLabsVoiceDesign(
       req.headers,
       req.url,
       journal,
-      { method, path, headers: flattenHeaders(req.headers), body: syntheticReq },
-      fixture ? "fixture" : "proxy",
+      {
+        method,
+        path,
+        headers: flattenHeaders(req.headers),
+        body: syntheticReq,
+        service: "elevenlabs-voice",
+      },
+      fixture ? "fixture" : noFixtureSource(defaults, req.headers),
       defaults.registry,
       defaults.logger,
     )
@@ -701,19 +733,20 @@ export async function handleElevenLabsVoiceDesign(
     // nothing else can answer.
     // Code points, not `.length`: see `VOICE_DESCRIPTION_MIN_LENGTH`.
     if ([...description].length < VOICE_DESCRIPTION_MIN_LENGTH) {
-      journal.add({
-        method,
-        path,
-        headers: flattenHeaders(req.headers),
-        body: syntheticReq,
-        response: { status: 422, fixture: null },
-      });
       writeValidationError(
         res,
         ["body", "voice_description"],
         `String should have at least ${VOICE_DESCRIPTION_MIN_LENGTH} characters`,
         "string_too_short",
       );
+      journal.add({
+        method,
+        path,
+        headers: flattenHeaders(req.headers),
+        service: "elevenlabs-voice",
+        body: syntheticReq,
+        response: { status: 422, fixture: null },
+      });
       return;
     }
 
@@ -725,27 +758,21 @@ export async function handleElevenLabsVoiceDesign(
 
   if (isErrorResponse(response)) {
     const status = response.status ?? 500;
+    writeErrorResponse(res, status, serializeErrorResponse(response), {
+      retryAfter: response.retryAfter,
+    });
     journal.add({
       method,
       path,
       headers: flattenHeaders(req.headers),
+      service: "elevenlabs-voice",
       body: syntheticReq,
       response: { status, fixture },
-    });
-    writeErrorResponse(res, status, serializeErrorResponse(response), {
-      retryAfter: response.retryAfter,
     });
     return;
   }
 
   if (!isJSONResponse(response)) {
-    journal.add({
-      method,
-      path,
-      headers: flattenHeaders(req.headers),
-      body: syntheticReq,
-      response: { status: 500, fixture },
-    });
     writeErrorResponse(
       res,
       500,
@@ -756,18 +783,27 @@ export async function handleElevenLabsVoiceDesign(
         },
       }),
     );
+    journal.add({
+      method,
+      path,
+      headers: flattenHeaders(req.headers),
+      service: "elevenlabs-voice",
+      body: syntheticReq,
+      response: { status: 500, fixture },
+    });
     return;
   }
 
   const status = replayStatus(response);
+  writeJson(res, status, response.json);
   journal.add({
     method,
     path,
     headers: flattenHeaders(req.headers),
+    service: "elevenlabs-voice",
     body: syntheticReq,
     response: { status, fixture },
   });
-  writeJson(res, status, response.json);
 }
 
 export async function handleElevenLabsVoiceCreate(
@@ -815,13 +851,6 @@ export async function handleElevenLabsVoiceCreate(
   );
 
   if (missing) {
-    journal.add({
-      method,
-      path,
-      headers: flattenHeaders(req.headers),
-      body: syntheticReq,
-      response: { status: 400, fixture: null },
-    });
     writeErrorResponse(
       res,
       400,
@@ -832,6 +861,14 @@ export async function handleElevenLabsVoiceCreate(
         },
       }),
     );
+    journal.add({
+      method,
+      path,
+      headers: flattenHeaders(req.headers),
+      service: "elevenlabs-voice",
+      body: syntheticReq,
+      response: { status: 400, fixture: null },
+    });
     return;
   }
 
@@ -856,8 +893,14 @@ export async function handleElevenLabsVoiceCreate(
       req.headers,
       req.url,
       journal,
-      { method, path, headers: flattenHeaders(req.headers), body: syntheticReq },
-      fixture ? "fixture" : "proxy",
+      {
+        method,
+        path,
+        headers: flattenHeaders(req.headers),
+        body: syntheticReq,
+        service: "elevenlabs-voice",
+      },
+      fixture ? "fixture" : noFixtureSource(defaults, req.headers),
       defaults.registry,
       defaults.logger,
     )
@@ -895,32 +938,34 @@ export async function handleElevenLabsVoiceCreate(
     // bounds have never been probed. The `msg` string is AUTHORED, like its
     // design sibling's.
     if (tooShort) {
-      journal.add({
-        method,
-        path,
-        headers: flattenHeaders(req.headers),
-        body: syntheticReq,
-        response: { status: 422, fixture: null },
-      });
       writeValidationError(
         res,
         ["body", tooShort],
         "String should have at least 1 character",
         "string_too_short",
       );
+      journal.add({
+        method,
+        path,
+        headers: flattenHeaders(req.headers),
+        service: "elevenlabs-voice",
+        body: syntheticReq,
+        response: { status: 422, fixture: null },
+      });
       return;
     }
 
     const voice = buildSyntheticVoice(parsed);
     rememberElevenLabsVoice(voice, defaults.logger);
+    writeJson(res, 200, voice);
     journal.add({
       method,
       path,
       headers: flattenHeaders(req.headers),
+      service: "elevenlabs-voice",
       body: syntheticReq,
       response: { status: 200, fixture: null },
     });
-    writeJson(res, 200, voice);
     return;
   }
 
@@ -928,27 +973,21 @@ export async function handleElevenLabsVoiceCreate(
 
   if (isErrorResponse(response)) {
     const status = response.status ?? 500;
+    writeErrorResponse(res, status, serializeErrorResponse(response), {
+      retryAfter: response.retryAfter,
+    });
     journal.add({
       method,
       path,
       headers: flattenHeaders(req.headers),
+      service: "elevenlabs-voice",
       body: syntheticReq,
       response: { status, fixture },
-    });
-    writeErrorResponse(res, status, serializeErrorResponse(response), {
-      retryAfter: response.retryAfter,
     });
     return;
   }
 
   if (!isJSONResponse(response)) {
-    journal.add({
-      method,
-      path,
-      headers: flattenHeaders(req.headers),
-      body: syntheticReq,
-      response: { status: 500, fixture },
-    });
     writeErrorResponse(
       res,
       500,
@@ -959,6 +998,14 @@ export async function handleElevenLabsVoiceCreate(
         },
       }),
     );
+    journal.add({
+      method,
+      path,
+      headers: flattenHeaders(req.headers),
+      service: "elevenlabs-voice",
+      body: syntheticReq,
+      response: { status: 500, fixture },
+    });
     return;
   }
 
@@ -991,14 +1038,15 @@ export async function handleElevenLabsVoiceCreate(
     }
   }
 
+  writeJson(res, status, response.json);
   journal.add({
     method,
     path,
     headers: flattenHeaders(req.headers),
+    service: "elevenlabs-voice",
     body: syntheticReq,
     response: { status, fixture },
   });
-  writeJson(res, status, response.json);
 }
 
 /**
@@ -1034,13 +1082,15 @@ function buildVoiceSlotReq(
  * ON a fixture (`Fixture.chaos`, folded in by `chaos.ts`): passing null here
  * dropped a fixture-level `chaos` block on the floor for these two routes
  * while design/create honoured the identical block. The journal source follows
- * the same fixture/no-fixture split design/create use, except that a slot-route
- * miss is answered by this process rather than proxied, so it stays "internal".
+ * the same fixture/no-fixture split design/create use, via the same
+ * {@link noFixtureSource}: "internal" when this process answers the miss,
+ * "proxy" when record mode has an ElevenLabs upstream and would forward it.
  *
  * `applyChaosAsync` reads the per-testId chaos scope off `req.url`, which is
  * why the raw url — not the fallback `path` — is what it is handed, matching
- * design/create. `ChaosJournalContext` has no `service` field, so neither these
- * gates nor design/create carry a service tag; there is nothing to mirror.
+ * design/create. The context carries `service: "elevenlabs-voice"` like every
+ * other journal write in this module, so a faulted request stays selectable by
+ * `GET /__aimock/journal?service=elevenlabs-voice`.
  */
 async function gateVoiceSlotChaos(
   req: http.IncomingMessage,
@@ -1059,8 +1109,14 @@ async function gateVoiceSlotChaos(
     req.headers,
     req.url,
     journal,
-    { method, path, headers: flattenHeaders(req.headers), body: syntheticReq },
-    fixture ? "fixture" : "internal",
+    {
+      method,
+      path,
+      headers: flattenHeaders(req.headers),
+      body: syntheticReq,
+      service: "elevenlabs-voice",
+    },
+    fixture ? "fixture" : noFixtureSource(defaults, req.headers),
     defaults.registry,
     defaults.logger,
   );
@@ -1094,17 +1150,6 @@ function writeVoiceSlotStrictRefusal(
   skippedBySequenceOrTurn: number,
 ): void {
   defaults.logger.error(strictNoMatchLogLine(method, path, skippedBySequenceOrTurn));
-  journal.add({
-    method,
-    path,
-    headers: flattenHeaders(req.headers),
-    body: syntheticReq,
-    response: {
-      status: 503,
-      fixture: null,
-      ...strictOverrideField(defaults.strict, req.headers),
-    },
-  });
   writeErrorResponse(
     res,
     503,
@@ -1119,6 +1164,18 @@ function writeVoiceSlotStrictRefusal(
       },
     }),
   );
+  journal.add({
+    method,
+    path,
+    headers: flattenHeaders(req.headers),
+    service: "elevenlabs-voice",
+    body: syntheticReq,
+    response: {
+      status: 503,
+      fixture: null,
+      ...strictOverrideField(defaults.strict, req.headers),
+    },
+  });
 }
 
 /**
@@ -1155,6 +1212,7 @@ async function proxyVoiceSlotMiss(
     method,
     path,
     headers: flattenHeaders(req.headers),
+    service: "elevenlabs-voice",
     body: syntheticReq,
     response: { status: res.statusCode ?? 200, fixture: null, source: "proxy" },
   });
@@ -1190,27 +1248,21 @@ async function replayVoiceSlotFixture(
 
   if (isErrorResponse(response)) {
     const status = response.status ?? 500;
+    writeErrorResponse(res, status, serializeErrorResponse(response), {
+      retryAfter: response.retryAfter,
+    });
     journal.add({
       method,
       path,
       headers: flattenHeaders(req.headers),
+      service: "elevenlabs-voice",
       body: syntheticReq,
       response: { status, fixture },
-    });
-    writeErrorResponse(res, status, serializeErrorResponse(response), {
-      retryAfter: response.retryAfter,
     });
     return null;
   }
 
   if (!isJSONResponse(response)) {
-    journal.add({
-      method,
-      path,
-      headers: flattenHeaders(req.headers),
-      body: syntheticReq,
-      response: { status: 500, fixture },
-    });
     writeErrorResponse(
       res,
       500,
@@ -1221,18 +1273,27 @@ async function replayVoiceSlotFixture(
         },
       }),
     );
+    journal.add({
+      method,
+      path,
+      headers: flattenHeaders(req.headers),
+      service: "elevenlabs-voice",
+      body: syntheticReq,
+      response: { status: 500, fixture },
+    });
     return null;
   }
 
   const status = replayStatus(response);
+  writeJson(res, status, response.json);
   journal.add({
     method,
     path,
     headers: flattenHeaders(req.headers),
+    service: "elevenlabs-voice",
     body: syntheticReq,
     response: { status, fixture },
   });
-  writeJson(res, status, response.json);
   return status;
 }
 
@@ -1325,14 +1386,15 @@ export async function handleElevenLabsVoiceGet(
   }
 
   const serveStored = (voice: Record<string, unknown>): void => {
+    writeJson(res, 200, voice);
     journal.add({
       method,
       path,
       headers: flattenHeaders(req.headers),
+      service: "elevenlabs-voice",
       body: syntheticReq,
       response: { status: 200, fixture: null },
     });
-    writeJson(res, 200, voice);
   };
 
   // IN RECORD MODE THE LOCAL STORE IS NOT AUTHORITATIVE, the same guard DELETE
@@ -1390,13 +1452,6 @@ export async function handleElevenLabsVoiceGet(
     }
   }
 
-  journal.add({
-    method,
-    path,
-    headers: flattenHeaders(req.headers),
-    body: syntheticReq,
-    response: { status: 404, fixture: null, ...strictOverrideField(defaults.strict, req.headers) },
-  });
   writeErrorResponse(
     res,
     404,
@@ -1408,6 +1463,14 @@ export async function handleElevenLabsVoiceGet(
       },
     }),
   );
+  journal.add({
+    method,
+    path,
+    headers: flattenHeaders(req.headers),
+    service: "elevenlabs-voice",
+    body: syntheticReq,
+    response: { status: 404, fixture: null, ...strictOverrideField(defaults.strict, req.headers) },
+  });
 }
 
 /**
@@ -1494,10 +1557,12 @@ export async function handleElevenLabsVoiceDelete(
 
   if (stored && !defaults.record) {
     elevenLabsVoices.delete(voiceId);
+    writeJson(res, 200, { status: "ok" });
     journal.add({
       method,
       path,
       headers: flattenHeaders(req.headers),
+      service: "elevenlabs-voice",
       body: syntheticReq,
       response: {
         status: 200,
@@ -1505,7 +1570,6 @@ export async function handleElevenLabsVoiceDelete(
         ...strictOverrideField(defaults.strict, req.headers),
       },
     });
-    writeJson(res, 200, { status: "ok" });
     return;
   }
 
@@ -1557,12 +1621,13 @@ export async function handleElevenLabsVoiceDelete(
   }
 
   elevenLabsVoices.delete(voiceId);
+  writeJson(res, 200, { status: "ok" });
   journal.add({
     method,
     path,
     headers: flattenHeaders(req.headers),
+    service: "elevenlabs-voice",
     body: syntheticReq,
     response: { status: 200, fixture: null, ...strictOverrideField(defaults.strict, req.headers) },
   });
-  writeJson(res, 200, { status: "ok" });
 }
