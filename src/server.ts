@@ -171,6 +171,8 @@ import {
 import {
   createMetricsRegistry,
   normalizePathLabel,
+  DESTROYED_STATUS_LABEL,
+  FAL_ROUTE_RE,
   BYTEPLUS_VIDEO_STATUS_RE,
   BYTEPLUS_VIDEO_SUBMIT_RE,
   OPENROUTER_VIDEO_CONTENT_RE,
@@ -233,7 +235,6 @@ const ELEVENLABS_VOICE_RE = /^\/v1\/voices\/([^/]+)$/;
 const FAL_QUEUE_SUBMIT_RE = /^\/fal\/queue\/submit\/(.+)$/;
 const FAL_QUEUE_REQUESTS_RE = /^\/fal\/queue\/requests\/(.+)$/;
 const FAL_RUN_RE = /^\/fal\/run\/(.+)$/;
-const FAL_PREFIX_RE = /^\/fal(?:\/.*)?$/;
 const DEFAULT_CHUNK_SIZE = 20;
 
 // OpenAI-compatible endpoint suffixes for path prefix normalization.
@@ -2189,9 +2190,61 @@ export async function createServerWithResolvedAuth(
     markMintedRequestId(req, requestIdMinted);
     res.setHeader("X-Request-Id", requestId);
 
+    let pathname = "";
+
+    // Instrument response completion for metrics. The callbacks read pathname
+    // via closure after normalizeCompatPath has rewritten it, so metrics
+    // record the canonical /v1/... path. Registered BEFORE the URL is parsed:
+    // a request whose `Host` header will not parse is answered 500 by the
+    // top-level catch, and hooking after the parse left that response
+    // uncounted. It reaches `normalizePathLabel` with the empty pre-parse
+    // pathname and lands in `{unknown}`, like every other pre-routing reject.
+    //
+    // Two terminal events, one count. `finish` fires only when the body was
+    // ended; a response torn down by `res.destroy()` — the `disconnect` chaos
+    // action, a body-cap reset, a catch-arm teardown — never finishes and only
+    // ever emits `close`. Those were invisible to `/metrics`, so the request
+    // total under-counted by exactly the failures worth watching. `close`
+    // also follows every `finish`, hence the guard: a normal response counts
+    // once, under its status; a destroyed one counts once, as `destroyed`.
+    if (registry) {
+      let recorded = false;
+      const recordOutcome = (status: string): void => {
+        if (recorded) return;
+        recorded = true;
+        try {
+          // Read the mount table at record time, not at start: `LLMock.mount()`
+          // after `start()` pushes onto this same array, and a snapshot taken
+          // here at startup labelled that (correctly routed) traffic `{unknown}`.
+          const normalizedPath = normalizePathLabel(
+            pathname,
+            mounts ? mounts.map((m) => m.path) : [],
+          );
+          const method = req.method ?? "UNKNOWN";
+          registry.incrementCounter("aimock_requests_total", {
+            method,
+            path: normalizedPath,
+            status,
+          });
+          const elapsed = Number(process.hrtime.bigint() - startTime) / 1e9;
+          registry.observeHistogram(
+            "aimock_request_duration_seconds",
+            { method, path: normalizedPath },
+            elapsed,
+          );
+        } catch (err) {
+          defaults.logger.warn("metrics instrumentation error", err);
+        }
+      };
+      res.on("finish", () => recordOutcome(String(res.statusCode)));
+      res.on("close", () => {
+        if (!res.writableFinished) recordOutcome(DESTROYED_STATUS_LABEL);
+      });
+    }
+
     // Parse the URL pathname (strip query string)
     const parsedUrl = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
-    let pathname = parsedUrl.pathname;
+    pathname = parsedUrl.pathname;
     // Capture the ORIGINAL path before normalizeCompatPath rewrites it — the
     // OpenRouter `/api/v1/` base is the detection signal and would otherwise be
     // erased (`/api/v1/chat/completions` → `/v1/chat/completions`).
@@ -2207,32 +2260,6 @@ export async function createServerWithResolvedAuth(
     // the user who asked for it.
     const isBytePlusArk =
       defaults.record?.providers.byteplus !== undefined && originalPathname.startsWith("/api/v3/");
-
-    // Instrument response completion for metrics. The finish callback reads
-    // pathname via closure after normalizeCompatPath has rewritten it, so
-    // metrics record the canonical /v1/... path.
-    if (registry) {
-      res.on("finish", () => {
-        try {
-          const normalizedPath = normalizePathLabel(pathname);
-          const method = req.method ?? "UNKNOWN";
-          const status = String(res.statusCode);
-          registry.incrementCounter("aimock_requests_total", {
-            method,
-            path: normalizedPath,
-            status,
-          });
-          const elapsed = Number(process.hrtime.bigint() - startTime) / 1e9;
-          registry.observeHistogram(
-            "aimock_request_duration_seconds",
-            { method, path: normalizedPath },
-            elapsed,
-          );
-        } catch (err) {
-          defaults.logger.warn("metrics instrumentation error", err);
-        }
-      });
-    }
 
     // Browser CORS preflights do not carry application credentials. A bare
     // OPTIONS is still a route request and must pass the normal auth boundary.
@@ -4042,7 +4069,7 @@ export async function createServerWithResolvedAuth(
     // (queue.fal.run, fal.run, rest.fal.ai, rest.alpha.fal.ai).
     // Matches the requestMiddleware path-mirror convention used by
     // @fal-ai/client when proxyUrl can't be honoured server-side.
-    if (FAL_PREFIX_RE.test(pathname) && req.headers["x-fal-target-host"]) {
+    if (FAL_ROUTE_RE.test(pathname) && req.headers["x-fal-target-host"]) {
       setCorsHeaders(res);
       try {
         falBody = req.method === "POST" || req.method === "PUT" ? await readBody(req) : "";
