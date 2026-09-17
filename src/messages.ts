@@ -27,7 +27,7 @@ import {
   isToolCallResponse,
   isContentWithToolCallsResponse,
   isErrorResponse,
-  resolveFixtureBlocks,
+  resolveFixtureBlockOutcome,
   flattenHeaders,
   isJsonObject,
   getTestId,
@@ -902,7 +902,8 @@ function buildClaudeContentWithToolCallsStreamEvents(
     // order. Anthropic is fully tool-first capable — a `toolCall` block can take
     // a lower `index` than a `text` block. Content-block indices are assigned in
     // encounter order, continuing from any leading thinking/redacted blocks.
-    const ordered = resolveFixtureBlocks(blocks);
+    const outcome = resolveFixtureBlockOutcome(blocks);
+    const ordered = outcome.ordered;
 
     for (const block of ordered) {
       if (block.type === "text") {
@@ -974,7 +975,10 @@ function buildClaudeContentWithToolCallsStreamEvents(
     events.push({
       type: "message_delta",
       delta: {
-        stop_reason: claudeStopReason(overrides?.finishReason, "tool_use"),
+        stop_reason: claudeStopReason(
+          overrides?.finishReason,
+          outcome.hasToolCalls ? "tool_use" : "end_turn",
+        ),
         stop_sequence: null,
       },
       usage: { output_tokens: claudeUsage(overrides).output_tokens },
@@ -1119,13 +1123,16 @@ function buildClaudeContentWithToolCallsResponse(
     };
   };
 
+  let blockHasTools: boolean | undefined;
   if (blocks && blocks.length > 0) {
     // NEW PATH: the non-streaming `content[]` array is positionally observable,
     // so emit `text`/`tool_use` content blocks in the fixture's ARRAY ORDER
     // (after any leading redacted/thinking blocks). A toolCall block before a
     // text block therefore yields a tool_use ahead of the text — matching the
     // streaming path for the same `blocks` fixture.
-    const ordered = resolveFixtureBlocks(blocks);
+    const outcome = resolveFixtureBlockOutcome(blocks);
+    const ordered = outcome.ordered;
+    blockHasTools = outcome.hasToolCalls;
     for (const block of ordered) {
       if (block.type === "text") {
         contentBlocks.push({ type: "text", text: block.text });
@@ -1149,7 +1156,10 @@ function buildClaudeContentWithToolCallsResponse(
     role: overrides?.role ?? "assistant",
     content: contentBlocks,
     model: overrides?.model ?? model,
-    stop_reason: claudeStopReason(overrides?.finishReason, "tool_use"),
+    stop_reason: claudeStopReason(
+      overrides?.finishReason,
+      blockHasTools === false ? "end_turn" : "tool_use",
+    ),
     stop_sequence: null,
     usage: claudeUsage(overrides),
   };

@@ -36,7 +36,7 @@ import {
   buildContentWithToolCallsCompletion,
   buildUsageChunk,
   resolveUsage,
-  resolveFixtureBlocks,
+  resolveFixtureBlockOutcome,
   extractOverrides,
   isTextResponse,
   isToolCallResponse,
@@ -1818,21 +1818,12 @@ async function handleCompletions(
       effectiveStrict,
       defaults.logger,
     );
-    // Resolve the ordered streaming blocks ONCE, BEFORE recording success in the
-    // journal. resolveFixtureBlocks validates and can throw on a malformed
-    // `blocks` array; doing it here (rather than inside the chunk builder AND a
-    // second time for the usage estimate, both of which previously ran AFTER
-    // journal.add) guarantees a malformed fixture never leaves a spurious
-    // status-200 journal entry. The single resolved array is reused for both
-    // chunk emission and the completion-token estimate — the builder re-normalizes
-    // it idempotently (a can't-fail pass on already-validated blocks), so this is
-    // the only resolution that can throw. Only the streaming path consumes blocks
-    // (the non-streaming builder ignores them), so gate on `stream` to leave the
-    // non-streaming path's behavior byte-identical.
+    // Validate authoritative blocks before recording success in either mode.
+    // Reuse their normalized payload for nonstream responses and usage estimates.
     const streaming = body.stream === true;
-    const streamingBlocks =
-      streaming && response.blocks && response.blocks.length > 0
-        ? resolveFixtureBlocks(response.blocks)
+    const blockOutcome =
+      response.blocks && response.blocks.length > 0
+        ? resolveFixtureBlockOutcome(response.blocks)
         : undefined;
     const journalEntry = journal.add({
       method: req.method ?? "POST",
@@ -1843,33 +1834,34 @@ async function handleCompletions(
     });
     if (!streaming) {
       const completion = buildContentWithToolCallsCompletion(
-        response.content ?? "",
-        response.toolCalls ?? [],
+        blockOutcome?.content ?? response.content ?? "",
+        blockOutcome?.toolCalls ?? response.toolCalls ?? [],
         responseModel,
         effReasoning,
-        overrides,
+        blockOutcome
+          ? {
+              ...overrides,
+              finishReason:
+                overrides?.finishReason ?? (blockOutcome.hasToolCalls ? "tool_calls" : "stop"),
+            }
+          : overrides,
         body.messages,
       );
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify(shapeORCompletion(completion, overrides)));
     } else {
       const chunks = buildContentWithToolCallsChunks(
-        response.content ?? "",
-        response.toolCalls ?? [],
+        blockOutcome?.content ?? response.content ?? "",
+        blockOutcome?.toolCalls ?? response.toolCalls ?? [],
         responseModel,
         chunkSize,
         effReasoning,
         overrides,
-        streamingBlocks,
+        blockOutcome?.ordered,
       );
-      // Build usage chunk for stream_options.include_usage (always for OpenRouter).
-      // When the fixture is blocks-driven, the streamed text comes from the
-      // ordered blocks (content/toolCalls are ignored by the chunk builder), so
-      // the completion-token estimate must derive from the SAME block text —
-      // otherwise a blocks-only fixture reports ~1 completion token. Reuse the
-      // single pre-resolved `streamingBlocks` (no second resolveFixtureBlocks).
-      const completionText = streamingBlocks
-        ? streamingBlocks.map((b) => (b.type === "text" ? b.text : b.name + b.arguments)).join("")
+      // Estimate usage from the same authoritative payload sent to the client.
+      const completionText = blockOutcome
+        ? blockOutcome.content + blockOutcome.toolCalls.map((tc) => tc.name + tc.arguments).join("")
         : (response.content ?? "") +
           (response.toolCalls ?? []).map((tc) => tc.name + tc.arguments).join("");
       const usageChunk = emitStreamingUsage
