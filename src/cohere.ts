@@ -38,7 +38,7 @@ import {
   flattenHeaders,
   isJsonObject,
   getTestId,
-  resolveFixtureBlocks,
+  resolveFixtureBlockOutcome,
   resolveResponse,
   resolveStrictMode,
   resolveReasoningForModel,
@@ -337,7 +337,8 @@ function buildCohereContentWithToolCallsResponse(
   // `content` + `toolCalls` inputs unchanged.
   // Resolve the blocks exactly once (pure: validate + copy, no id-gen) and
   // reuse the single result for BOTH the tool-call and text derivation below.
-  const resolvedBlocks = blocks && blocks.length > 0 ? resolveFixtureBlocks(blocks) : undefined;
+  const outcome = blocks && blocks.length > 0 ? resolveFixtureBlockOutcome(blocks) : undefined;
+  const resolvedBlocks = outcome?.ordered;
 
   const effectiveToolCalls: ToolCall[] = resolvedBlocks
     ? resolvedBlocks
@@ -388,7 +389,10 @@ function buildCohereContentWithToolCallsResponse(
 
   return {
     id: overrides?.id ?? generateMessageId(),
-    finish_reason: cohereFinishReason(overrides?.finishReason, "TOOL_CALL"),
+    finish_reason: cohereFinishReason(
+      overrides?.finishReason,
+      outcome && !outcome.hasToolCalls ? "COMPLETE" : "TOOL_CALL",
+    ),
     message: {
       role: "assistant",
       content: contentBlocks,
@@ -668,7 +672,8 @@ function buildCohereContentWithToolCallsStreamEvents(
     // Cohere v2 events are ordered, so tool-first is wire-expressible. The
     // tool-plan-delta is emitted once before the first toolCall block (Cohere
     // requires it preceding tool calls). Legacy fixtures (no blocks) skip this.
-    const resolved = resolveFixtureBlocks(blocks);
+    const outcome = resolveFixtureBlockOutcome(blocks);
+    const resolved = outcome.ordered;
     let toolPlanEmitted = false;
     let toolIdx = 0;
     resolved.forEach((block) => {
@@ -739,7 +744,10 @@ function buildCohereContentWithToolCallsStreamEvents(
     events.push({
       type: "message-end",
       delta: {
-        finish_reason: cohereFinishReason(overrides?.finishReason, "TOOL_CALL"),
+        finish_reason: cohereFinishReason(
+          overrides?.finishReason,
+          outcome.hasToolCalls ? "TOOL_CALL" : "COMPLETE",
+        ),
         usage: cohereUsage(overrides),
       },
     });
