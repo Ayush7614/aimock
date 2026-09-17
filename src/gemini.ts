@@ -34,7 +34,7 @@ import {
   isJsonObject,
   getContext,
   getTestId,
-  resolveFixtureBlocks,
+  resolveFixtureBlockOutcome,
   resolveResponse,
   resolveStrictMode,
   resolveReasoningForModel,
@@ -517,11 +517,15 @@ function buildGeminiContentWithToolCallsStreamChunks(
     // its text part. Gemini's ordered `parts` make this fully expressible. The
     // terminal block carries the finishReason regardless of its type. Legacy
     // fixtures (no `blocks`) never enter here — see the else branch below.
-    const resolved = resolveFixtureBlocks(blocks);
+    const outcome = resolveFixtureBlockOutcome(blocks);
+    const resolved = outcome.ordered;
     resolved.forEach((block, i) => {
       const isLast = i === resolved.length - 1;
       const finishReason = isLast
-        ? geminiFinishReason(overrides?.finishReason, "FUNCTION_CALL")
+        ? geminiFinishReason(
+            overrides?.finishReason,
+            outcome.hasToolCalls ? "FUNCTION_CALL" : "STOP",
+          )
         : undefined;
       if (block.type === "toolCall") {
         const part = parseToolCallPart(
@@ -626,12 +630,15 @@ function buildGeminiContentWithToolCallsResponse(
     parts.push({ text: reasoning, thought: true });
   }
 
+  let blockHasTools: boolean | undefined;
   if (blocks && blocks.length > 0) {
     // NEW PATH: the non-streaming `parts[]` array is positionally observable, so
     // emit parts in the fixture's ARRAY ORDER (after any leading thought part).
     // A toolCall block before a text block therefore yields a functionCall part
     // ahead of the text — matching the streaming path for the same `blocks`.
-    const resolved = resolveFixtureBlocks(blocks);
+    const outcome = resolveFixtureBlockOutcome(blocks);
+    const resolved = outcome.ordered;
+    blockHasTools = outcome.hasToolCalls;
     for (const block of resolved) {
       if (block.type === "toolCall") {
         parts.push(
@@ -651,7 +658,10 @@ function buildGeminiContentWithToolCallsResponse(
     candidates: [
       {
         content: { role: "model", parts },
-        finishReason: geminiFinishReason(overrides?.finishReason, "FUNCTION_CALL"),
+        finishReason: geminiFinishReason(
+          overrides?.finishReason,
+          blockHasTools === false ? "STOP" : "FUNCTION_CALL",
+        ),
         index: 0,
       },
     ],
