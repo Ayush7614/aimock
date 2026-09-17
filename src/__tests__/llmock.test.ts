@@ -1,5 +1,6 @@
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import * as http from "node:http";
+import * as net from "node:net";
 import { resolve, join } from "node:path";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -1563,3 +1564,142 @@ describe("LLMock", () => {
     });
   });
 });
+
+describe("LLMock — journal reports the truth (F4)", () => {
+  let mock: LLMock | null = null;
+
+  afterEach(async () => {
+    if (mock) {
+      try {
+        await mock.stop();
+      } catch {
+        // already stopped
+      }
+      mock = null;
+    }
+  });
+
+  function rawRequest(port: number, text: string): Promise<string> {
+    return new Promise((resolve, reject) => {
+      const socket = net.connect(port, "127.0.0.1", () => socket.write(text));
+      let buf = "";
+      socket.on("data", (d) => (buf += d));
+      socket.on("end", () => resolve(buf));
+      socket.on("error", reject);
+    });
+  }
+
+  it("clearRequests() empties the journal but keeps fixture match-counts", async () => {
+    mock = new LLMock();
+    const fixture = { match: { userMessage: "hi" }, response: { content: "Hello" } };
+    mock.addFixture(fixture);
+    await mock.start();
+
+    await post(mock.url, chatBody("hi"));
+    expect(mock.journal.size).toBe(1);
+    expect(mock.journal.getFixtureMatchCount(fixture)).toBe(1);
+
+    mock.clearRequests();
+    expect(mock.journal.size).toBe(0);
+    // Pre-fix: clearRequests() called journal.clear(), rewinding this to 0.
+    expect(mock.journal.getFixtureMatchCount(fixture)).toBe(1);
+  });
+
+  it("GET /__aimock/journal?testId= matches the id the request was actually scoped under (repeated header)", async () => {
+    mock = new LLMock();
+    mock.onMessage("hi", { content: "Hello" });
+    const url = await mock.start();
+    const port = Number(new URL(url).port);
+
+    // http.request() cannot send a duplicated header; write the wire bytes.
+    const dupHeaders = `X-Test-Id: a\r\nX-Test-Id: a\r\n`;
+    const chaos = JSON.stringify({ latencyMs: 1 });
+    const installed = await rawRequest(
+      port,
+      `POST /__aimock/chaos HTTP/1.1\r\nHost: x\r\n${dupHeaders}` +
+        `Content-Type: application/json\r\nContent-Length: ${Buffer.byteLength(chaos)}\r\n` +
+        `Connection: close\r\n\r\n${chaos}`,
+    );
+    expect(installed.startsWith("HTTP/1.1 200")).toBe(true);
+    // Node folds the repeated header to "a, a"; that is the scope the override
+    // landed under — visible to a caller that sends the folded string, and NOT
+    // to one that sends the bare "a".
+    const seenFolded = await fetch(`${url}/__aimock/chaos`, { headers: { "X-Test-Id": "a, a" } });
+    expect(((await seenFolded.json()) as { chaos: { latencyMs?: number } }).chaos.latencyMs).toBe(
+      1,
+    );
+    const seenBare = await fetch(`${url}/__aimock/chaos`, { headers: { "X-Test-Id": "a" } });
+    expect(
+      ((await seenBare.json()) as { chaos: { latencyMs?: number } }).chaos.latencyMs,
+    ).toBeUndefined();
+
+    const body = JSON.stringify(chatBody("hi", false));
+    const reply = await rawRequest(
+      port,
+      `POST /v1/chat/completions HTTP/1.1\r\nHost: x\r\n${dupHeaders}` +
+        `Content-Type: application/json\r\nContent-Length: ${Buffer.byteLength(body)}\r\n` +
+        `Connection: close\r\n\r\n${body}`,
+    );
+    expect(reply.startsWith("HTTP/1.1 200")).toBe(true);
+    expect(mock.getLastRequest()?.headers["x-test-id"]).toBe("a, a");
+
+    // The journal filter agrees with the scope: the folded id finds the chat
+    // request (the chaos control calls are not journaled), the bare id does not.
+    const folded = await fetch(`${url}/__aimock/journal?testId=${encodeURIComponent("a, a")}`);
+    expect(folded.status).toBe(200);
+    const foldedEntries = (await folded.json()) as { path: string }[];
+    expect(foldedEntries.map((e) => e.path)).toEqual(["/v1/chat/completions"]);
+    // Pre-fix: the filter split on "," and reported this request under "a",
+    // a scope it was never counted or chaos-evaluated in.
+    const bare = await fetch(`${url}/__aimock/journal?testId=a`);
+    expect(bare.status).toBe(200);
+    expect(await bare.json()).toEqual([]);
+  });
+
+  it("GET /__aimock/journal?testId= finds a request whose single X-Test-Id legitimately contains a comma", async () => {
+    mock = new LLMock();
+    mock.onMessage("hi", { content: "Hello" });
+    const url = await mock.start();
+
+    const res = await fetch(`${url}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Test-Id": "run-7,shard-2" },
+      body: JSON.stringify(chatBody("hi", false)),
+    });
+    expect(res.status).toBe(200);
+
+    // Pre-fix: the filter compared "run-7" (first comma token) against the
+    // full id and returned [] — a regression for any harness with commas in ids.
+    const found = await fetch(
+      `${url}/__aimock/journal?testId=${encodeURIComponent("run-7,shard-2")}`,
+    );
+    expect(found.status).toBe(200);
+    expect(((await found.json()) as unknown[]).length).toBe(1);
+    const prefix = await fetch(`${url}/__aimock/journal?testId=run-7`);
+    expect(await prefix.json()).toEqual([]);
+  });
+
+  it("the 'Fixture matched' debug line names a predicate fixture instead of printing {}", async () => {
+    const lines: string[] = [];
+    const spy = vi.spyOn(console, "log").mockImplementation((...args: unknown[]) => {
+      lines.push(args.map(String).join(" "));
+    });
+    try {
+      mock = new LLMock({ logLevel: "debug" });
+      mock.addFixture({
+        match: { predicate: (req) => /pred/.test(String(req.messages.at(-1)?.content)) },
+        response: { content: "P" },
+      });
+      await mock.start();
+      await post(mock.url, chatBody("hello pred", false));
+    } finally {
+      spy.mockRestore();
+    }
+    const matched = lines.find((l) => l.includes("Fixture matched"));
+    expect(matched).toBeDefined();
+    // Pre-fix: JSON.stringify drops the function → "Fixture matched: {}".
+    expect(matched).not.toContain("Fixture matched: {}");
+    expect(matched).toContain("[predicate]");
+  });
+});
+

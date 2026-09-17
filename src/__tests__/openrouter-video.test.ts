@@ -1299,9 +1299,11 @@ describe("OpenRouter video — logger observability", () => {
       body: JSON.stringify({ model: "m/v", prompt: "boom" }),
     });
     expect(res.status).toBe(500);
-    expect(errorSpy.mock.calls.some((c) => c.join(" ").includes("openrouter-video submit"))).toBe(
-      true,
-    );
+    expect(
+      errorSpy.mock.calls.some((c) =>
+        c.join(" ").includes("POST /api/v1/videos: Response factory threw: factory boom"),
+      ),
+    ).toBe(true);
   });
 
   test("submit error 500s carry CORS headers", async () => {

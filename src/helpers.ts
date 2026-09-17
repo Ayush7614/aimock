@@ -1285,6 +1285,21 @@ export function buildContentWithToolCallsCompletion(
 const DEFAULT_MAX_BODY_BYTES = 10 * 1024 * 1024; // 10 MB
 
 /**
+ * A body read that stopped because the CLIENT sent more bytes than the route
+ * allows. The socket is already destroyed when this rejects, so no status line
+ * ever reaches the caller — but the fault is the caller's, and error arms that
+ * journal and log the failure need to say so. Carrying the classification on
+ * the error type (rather than re-matching the message text) is what lets them:
+ * the message is unchanged from the plain `Error` this replaced.
+ */
+export class RequestBodyTooLargeError extends Error {
+  constructor(readonly maxBytes: number) {
+    super(`Request body exceeded size limit of ${maxBytes} bytes`);
+    this.name = "RequestBodyTooLargeError";
+  }
+}
+
+/**
  * Read a request body as raw bytes, preserving every octet.
  *
  * This is the byte-level primitive {@link readBody} is built on: routes that
@@ -1307,7 +1322,7 @@ export function readBodyBuffer(
       if (totalBytes > maxBytes) {
         settled = true;
         req.destroy();
-        reject(new Error(`Request body exceeded size limit of ${maxBytes} bytes`));
+        reject(new RequestBodyTooLargeError(maxBytes));
         return;
       }
       chunks.push(chunk);
@@ -1379,7 +1394,7 @@ export function readBodyBufferBounded(
       if (totalBytes > drainMaxBytes) {
         settled = true;
         req.destroy();
-        reject(new Error(`Request body exceeded size limit of ${drainMaxBytes} bytes`));
+        reject(new RequestBodyTooLargeError(drainMaxBytes));
         return;
       }
       if (chunks !== null) chunks.push(chunk);
@@ -1759,12 +1774,14 @@ export function buildEmbeddingResponse(
  * inline (truncated) so a content match remains recognisable; the whole string
  * is capped to keep the log line bounded.
  */
+const DESCRIBE_MATCH_MAX = 160;
+
 export function describeMatch(match: FixtureMatch, index: number): string {
   const parts: string[] = [];
   for (const [key, value] of Object.entries(match)) {
     if (value === undefined) continue;
     if (typeof value === "function") {
-      parts.push(`${key}(fn)`);
+      parts.push(key === "predicate" ? "[predicate]" : `${key}[fn]`);
     } else if (value instanceof RegExp) {
       parts.push(`${key}(${value})`);
     } else if (typeof value === "string") {
@@ -1772,11 +1789,21 @@ export function describeMatch(match: FixtureMatch, index: number): string {
       parts.push(`${key}(${JSON.stringify(v)})`);
     } else if (Array.isArray(value)) {
       parts.push(`${key}(${value.length} item${value.length === 1 ? "" : "s"})`);
+    } else if (typeof value === "object" && value !== null) {
+      // `String(obj)` is "[object Object]"; show the (bounded) JSON instead.
+      const json = JSON.stringify(value);
+      parts.push(`${key}(${json.length > 40 ? `${json.slice(0, 40)}…` : json})`);
     } else {
       parts.push(`${key}=${String(value)}`);
     }
   }
   const keys = parts.length > 0 ? parts.join(", ") : "no matchers";
   const prefix = index >= 0 ? `#${index} ` : "";
-  return `${prefix}{ ${keys} }`.slice(0, 160);
+  const full = `${prefix}{ ${keys} }`;
+  if (full.length <= DESCRIBE_MATCH_MAX) return full;
+  // Cut at a matcher boundary (never mid-token) and mark the elision; a lone
+  // oversized matcher is hard-cut but still marked.
+  const head = full.slice(0, DESCRIBE_MATCH_MAX - 4);
+  const cut = head.lastIndexOf(", ");
+  return `${cut > 0 ? head.slice(0, cut) : head}, … }`;
 }

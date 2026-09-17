@@ -908,6 +908,12 @@ export interface JournalEntry {
     source?: "fixture" | "proxy" | "internal";
     interrupted?: boolean;
     interruptReason?: string;
+    /**
+     * The handler crashed AFTER the response completed. The client received
+     * `status` in full, so this is not an interruption; the message is what
+     * the crash said.
+     */
+    error?: string;
     chaosAction?: ChaosAction;
     /** When the X-AIMock-Strict header overrode the server default. */
     strictOverride?: boolean;

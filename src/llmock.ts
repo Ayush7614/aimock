@@ -414,8 +414,12 @@ export class LLMock {
     return this.journal.getLast();
   }
 
+  /**
+   * Clear the request journal. Fixture match-counts (sequencing state) are
+   * left intact — use `resetMatchCounts()` for those.
+   */
   clearRequests(): void {
-    this.journal.clear();
+    this.journal.clearEntries();
   }
 
   resetMatchCounts(testId?: string): this {
