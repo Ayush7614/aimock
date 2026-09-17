@@ -20,7 +20,8 @@ import {
   strictNoMatchMessage,
   strictNoMatchLogLine,
 } from "./helpers.js";
-import { matchFixtureDiagnostic } from "./router.js";
+import { releaseOneShotError } from "./fixture-loader.js";
+import { selectFixtureForServing } from "./router.js";
 import { writeErrorResponse } from "./sse-writer.js";
 import { proxyAndRecord } from "./recorder.js";
 import type { ProxyCapturedResponse, ProxyOptions } from "./recorder.js";
@@ -646,7 +647,7 @@ export async function handleElevenLabsVoiceDesign(
 
   const testId = getTestId(req);
   const matchCounts = journal.getFixtureMatchCountsForTest(testId);
-  const { fixture, skippedBySequenceOrTurn } = matchFixtureDiagnostic(
+  const { fixture, skippedBySequenceOrTurn } = selectFixtureForServing(
     fixtures,
     syntheticReq,
     matchCounts,
@@ -671,6 +672,7 @@ export async function handleElevenLabsVoiceDesign(
       defaults.logger,
     )
   ) {
+    releaseOneShotError(fixtures, fixture);
     return;
   }
 
@@ -835,7 +837,7 @@ export async function handleElevenLabsVoiceCreate(
 
   const testId = getTestId(req);
   const matchCounts = journal.getFixtureMatchCountsForTest(testId);
-  const { fixture, skippedBySequenceOrTurn } = matchFixtureDiagnostic(
+  const { fixture, skippedBySequenceOrTurn } = selectFixtureForServing(
     fixtures,
     syntheticReq,
     matchCounts,
@@ -860,6 +862,7 @@ export async function handleElevenLabsVoiceCreate(
       defaults.logger,
     )
   ) {
+    releaseOneShotError(fixtures, fixture);
     return;
   }
 
@@ -1069,7 +1072,7 @@ async function gateVoiceSlotChaos(
  * message names strict mode, so a strict 503 is never mistaken for the route's
  * own 404.
  *
- * `skippedBySequenceOrTurn` is the count `matchFixtureDiagnostic` handed the
+ * `skippedBySequenceOrTurn` is the count `selectFixtureForServing` handed the
  * caller. Both slot routes are fixture routes now, so a candidate fixture CAN
  * be skipped by sequence/turn state here exactly as on create — hardcoding 0
  * told every such refusal "no fixture matched" when the truth was "a fixture
@@ -1288,7 +1291,7 @@ export async function handleElevenLabsVoiceGet(
   // the gate; see {@link gateVoiceSlotChaos}.
   const testId = getTestId(req);
   const matchCounts = journal.getFixtureMatchCountsForTest(testId);
-  const { fixture, skippedBySequenceOrTurn } = matchFixtureDiagnostic(
+  const { fixture, skippedBySequenceOrTurn } = selectFixtureForServing(
     fixtures,
     syntheticReq,
     matchCounts,
@@ -1300,6 +1303,7 @@ export async function handleElevenLabsVoiceGet(
   }
 
   if (await gateVoiceSlotChaos(req, res, syntheticReq, fixture, defaults, journal, path, method)) {
+    releaseOneShotError(fixtures, fixture);
     return;
   }
 
@@ -1452,7 +1456,7 @@ export async function handleElevenLabsVoiceDelete(
   // do, so a fixture-level `chaos` block reaches the gate.
   const testId = getTestId(req);
   const matchCounts = journal.getFixtureMatchCountsForTest(testId);
-  const { fixture, skippedBySequenceOrTurn } = matchFixtureDiagnostic(
+  const { fixture, skippedBySequenceOrTurn } = selectFixtureForServing(
     fixtures,
     syntheticReq,
     matchCounts,
@@ -1464,6 +1468,7 @@ export async function handleElevenLabsVoiceDelete(
   }
 
   if (await gateVoiceSlotChaos(req, res, syntheticReq, fixture, defaults, journal, path, method)) {
+    releaseOneShotError(fixtures, fixture);
     return;
   }
 

@@ -1563,6 +1563,42 @@ describe("LLMock", () => {
       expect(res.data).toContain("factory response");
     });
   });
+
+  describe("nextRequestError is consumed when SERVED, not when evaluated", () => {
+    it("survives a request that a behind-the-count turnIndex fixture wins, then fires", async () => {
+      mock = new LLMock();
+      // turnIndex 0 is BEHIND a request carrying one assistant bubble
+      // (assistantCount = 1), so selectByTurnIndex prefers it over the
+      // unpositioned one-shot even though the one-shot's predicate matched.
+      mock.onTurn(0, "hello", { content: "Scripted turn" });
+      await mock.start();
+
+      mock.nextRequestError(503, { message: "Overloaded", type: "server_error" });
+
+      const behind = await post(mock.url, {
+        model: "gpt-4",
+        stream: false,
+        messages: [
+          { role: "user", content: "hello" },
+          { role: "assistant", content: "Scripted turn" },
+          { role: "user", content: "hello" },
+        ],
+      });
+      expect(behind.status).toBe(200);
+      expect(behind.data).toContain("Scripted turn");
+
+      // The one-shot was NOT served above, so it must still be pending: at
+      // assistantCount = 0 the exact-turn tie is broken by registration order
+      // and the front-inserted one-shot wins.
+      const next = await post(mock.url, chatBody("hello", false));
+      expect(next.status).toBe(503);
+      expect(JSON.parse(next.data).error.message).toBe("Overloaded");
+
+      // …and it is gone once served.
+      const after = await post(mock.url, chatBody("hello", false));
+      expect(after.status).toBe(200);
+    });
+  });
 });
 
 describe("LLMock — journal reports the truth (F4)", () => {
@@ -1703,3 +1739,119 @@ describe("LLMock — journal reports the truth (F4)", () => {
   });
 });
 
+describe("LLMock — one-shot error is claimed at SELECTION, exactly once (G5/G8)", () => {
+  let mock: LLMock | null = null;
+
+  afterEach(async () => {
+    if (mock) {
+      await mock.stop();
+      mock = null;
+    }
+  });
+
+  it("G5: an OpenRouter models[] fallback request serves the one-shot instead of burning it", async () => {
+    mock = new LLMock();
+    mock.onMessage("route", { content: "plain ok" });
+    await mock.start();
+    mock.nextRequestError(503, { message: "Injected", type: "server_error" });
+
+    // Pre-fix: the primary candidate resolved the one-shot (consuming it via
+    // its factory), fell through to the fallback candidate and served a 200 —
+    // the injected error was never served, and the next request was 200 too.
+    const fallback = await postTo(mock.url, "/api/v1/chat/completions", {
+      model: "primary/bad",
+      models: ["primary/bad", "fallback/good"],
+      messages: [{ role: "user", content: "route" }],
+    });
+    expect(fallback.status).toBe(503);
+    expect(JSON.parse(fallback.data).error.message).toBe("Injected");
+
+    const next = await post(mock.url, chatBody("route", false));
+    expect(next.status).toBe(200);
+  });
+
+  it("G8: two concurrent requests under chaos latency — exactly one receives the one-shot", async () => {
+    mock = new LLMock({ chaos: { latencyMs: 300 } });
+    mock.onMessage("route", { content: "plain ok" });
+    await mock.start();
+    mock.nextRequestError(503, { message: "Injected", type: "server_error" });
+
+    // Pre-fix: both requests selected the one-shot before the latency await
+    // and both factories returned the error (the second's splice was a no-op).
+    const body = chatBody("route", false);
+    const [a, b] = await Promise.all([post(mock.url, body), post(mock.url, body)]);
+    const statuses = [a.status, b.status].sort();
+    expect(statuses).toEqual([200, 503]);
+
+    const after = await post(mock.url, chatBody("route", false));
+    expect(after.status).toBe(200);
+  });
+});
+
+describe("LLMock — a claimed one-shot error is RELEASED when it is never served (H2/H3)", () => {
+  let mock: LLMock | null = null;
+
+  afterEach(async () => {
+    if (mock) {
+      await mock.stop();
+      mock = null;
+    }
+  });
+
+  /** `post` above cannot send headers, and the chaos gate is header-driven. */
+  function chat(url: string, headers: Record<string, string> = {}, signal?: AbortSignal) {
+    return fetch(`${url}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...headers },
+      body: JSON.stringify(chatBody("route", false)),
+      signal,
+    });
+  }
+
+  it("a terminal chaos action does not burn the one-shot — the next clean request gets it", async () => {
+    mock = new LLMock();
+    mock.onMessage("route", { content: "plain ok" });
+    await mock.start();
+    mock.nextRequestError(503, { message: "Injected", type: "server_error" });
+
+    // Pre-fix: the one-shot was claimed at SELECTION, then the chaos roll
+    // answered the request instead — the injection was consumed unserved and
+    // this second request came back 200.
+    await chat(mock.url, { "x-aimock-chaos-drop": "1" });
+    const next = await chat(mock.url);
+    expect(next.status).toBe(503);
+    expect((await next.json()).error.message).toBe("Injected");
+
+    // Still exactly one-shot: the release re-arms, it does not duplicate.
+    const after = await chat(mock.url);
+    expect(after.status).toBe(200);
+  });
+
+  it("a client that leaves during the chaos-latency delay does not burn the one-shot", async () => {
+    mock = new LLMock();
+    mock.onMessage("route", { content: "plain ok" });
+    await mock.start();
+    mock.nextRequestError(503, { message: "Injected", type: "server_error" });
+
+    const ac = new AbortController();
+    const inflight = chat(mock.url, { "x-aimock-chaos-latency": "400" }, ac.signal).catch(
+      () => null,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    ac.abort();
+    await inflight;
+    await new Promise((resolve) => setTimeout(resolve, 400));
+
+    const next = await chat(mock.url);
+    expect(next.status).toBe(503);
+  });
+
+  it("a queued one-shot reports responseKind 'error', not 'factory', in the fixture listing", async () => {
+    mock = new LLMock();
+    await mock.start();
+    mock.nextRequestError(503);
+
+    const listing = await (await fetch(`${mock.url}/__aimock/fixtures?include=fixtures`)).json();
+    expect(listing.fixtures[0].responseKind).toBe("error");
+  });
+});

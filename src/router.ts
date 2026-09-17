@@ -1,3 +1,4 @@
+import { claimOneShotError, isOneShotError } from "./fixture-loader.js";
 import type { ChatCompletionRequest, ChatMessage, ContentPart, Fixture } from "./types.js";
 import {
   describeMatch,
@@ -743,4 +744,23 @@ export function matchFixture(
   options?: MatchOptions,
 ): Fixture | null {
   return matchFixtureDiagnostic(fixtures, req, matchCounts, requestTransform, options).fixture;
+}
+
+/** Select for serving and reserve an injected error before the caller can await.
+ * Diagnostic-only matching stays non-consuming. A competing selection retries
+ * against the live queue; cancellation must release the reserved fixture.
+ */
+export function selectFixtureForServing(
+  ...args: Parameters<typeof matchFixtureDiagnostic>
+): MatchFixtureDiagnostic {
+  for (;;) {
+    const attempt = matchFixtureDiagnostic(...args);
+    if (
+      attempt.fixture &&
+      isOneShotError(attempt.fixture) &&
+      !claimOneShotError(args[0], attempt.fixture)
+    )
+      continue;
+    return attempt;
+  }
 }

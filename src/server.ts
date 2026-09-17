@@ -19,6 +19,11 @@ import {
   entryToFixture,
   isInjectableStatus,
   INJECTED_STATUS_RANGE,
+  queueOneShotError,
+  isOneShotError,
+  claimOneShotError,
+  clearFixtureQueue,
+  releaseOneShotError,
 } from "./fixture-loader.js";
 import { writeSSEStream, writeErrorResponse } from "./sse-writer.js";
 import { createInterruptionSignal } from "./interruption.js";
@@ -419,7 +424,8 @@ export interface FullResetTargets {
  * `POST /__aimock/reset/fixtures` alias, and `LLMock.reset()`.
  */
 export function performFullReset(fixtures: Fixture[], targets: FullResetTargets | null): void {
-  fixtures.length = 0;
+  // Also invalidates one-shot claims parked in flight (see `clearFixtureQueue`).
+  clearFixtureQueue(fixtures);
   falJobs.clear();
   falQueueStates.clear();
   clearBatchStore();
@@ -699,8 +705,12 @@ async function handleControlAPI(
           index,
           match: redactForInspection(fixture.match),
           // NOT `response` — that name already means the response ITSELF on
-          // `Fixture`, and this is only a one-word kind label.
-          responseKind: fixtureResponseKind(fixture.response),
+          // `Fixture`, and this is only a one-word kind label. A queued
+          // one-shot error carries a FACTORY response (the factory performs
+          // the idempotent claim), so the shape test alone reports "factory"
+          // and this surface loses the one signal it exists to give: that an
+          // injection is armed. Take the kind from the one-shot MARKER.
+          responseKind: isOneShotError(fixture) ? "error" : fixtureResponseKind(fixture.response),
           ...(fixture.latency !== undefined ? { latency: fixture.latency } : {}),
           ...(fixture.chaos !== undefined ? { chaos: fixture.chaos } : {}),
         })),
@@ -891,7 +901,7 @@ async function handleControlAPI(
 
   // DELETE /__aimock/fixtures — clear all fixtures
   if (subPath === "/fixtures" && req.method === "DELETE") {
-    fixtures.length = 0;
+    clearFixtureQueue(fixtures);
     if (defaults.registry) {
       defaults.registry.setGauge("aimock_fixtures_loaded", {}, fixtures.length);
     }
@@ -1007,37 +1017,9 @@ async function handleControlAPI(
         }
       }
     }
-    const errorFixture: Fixture = {
-      match: { predicate: () => true },
-      response: {
-        error: {
-          message: errorBody?.message ?? "Injected error",
-          type: errorBody?.type ?? "server_error",
-          code: errorBody?.code,
-        },
-        status,
-      },
-    };
-    // Insert at front so it matches before everything else
-    fixtures.unshift(errorFixture);
-    // One-shot: match once then self-remove.  We use a `consumed` flag to
-    // prevent double-matching from concurrent requests and defer the actual
-    // splice via queueMicrotask so it never mutates the fixtures array while
-    // matchFixture is iterating over it.
-    let consumed = false;
-    const original = errorFixture.match.predicate!;
-    errorFixture.match.predicate = (req) => {
-      if (consumed) return false;
-      const result = original(req);
-      if (result) {
-        consumed = true;
-        queueMicrotask(() => {
-          const idx = fixtures.indexOf(errorFixture);
-          if (idx !== -1) fixtures.splice(idx, 1);
-        });
-      }
-      return result;
-    };
+    // Shared with `LLMock.nextRequestError`: same endpoint gate, consumed when
+    // served rather than when its predicate is evaluated.
+    queueOneShotError(fixtures, status, errorBody ?? undefined);
 
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ queued: true }));
@@ -1282,6 +1264,33 @@ async function handleCompletions(
   // (so the shared increment below does not double-count it).
   let fixtureCountIncremented = false;
   const openRouterFallback = openRouter && Array.isArray(body.models) && body.models.length > 0;
+  // Select the fixture to serve for `probe`, CLAIMING a one-shot injected error
+  // the instant it is selected — synchronously, before any chaos-latency await
+  // and before its factory runs — so exactly one request consumes it. A
+  // one-shot another in-flight request already claimed is no longer in
+  // `fixtures`, so re-running the match falls through to the next candidate.
+  const selectFixture = (
+    probe: ChatCompletionRequest,
+    counts: ReturnType<typeof journal.getFixtureMatchCountsForTest>,
+  ): ReturnType<typeof matchFixtureDiagnostic> => {
+    for (;;) {
+      const attempt = matchFixtureDiagnostic(
+        fixtures,
+        probe,
+        counts,
+        defaults.requestTransform,
+        matchOptions,
+      );
+      if (
+        attempt.fixture &&
+        isOneShotError(attempt.fixture) &&
+        !claimOneShotError(fixtures, attempt.fixture)
+      ) {
+        continue;
+      }
+      return attempt;
+    }
+  };
 
   if (openRouterFallback) {
     const candidates = buildOpenRouterCandidates(body);
@@ -1308,13 +1317,7 @@ async function handleCompletions(
       candidate: string,
     ): Promise<{ fixture: Fixture; response: FixtureResponse; isError: boolean } | null> => {
       const probe: ChatCompletionRequest = { ...body, model: candidate };
-      const attempt = matchFixtureDiagnostic(
-        fixtures,
-        probe,
-        matchCounts,
-        defaults.requestTransform,
-        matchOptions,
-      );
+      const attempt = selectFixture(probe, matchCounts);
       skippedBySequenceOrTurn = Math.max(skippedBySequenceOrTurn, attempt.skippedBySequenceOrTurn);
       if (!attempt.fixture) return null;
       const response = await resolveResponse(attempt.fixture, probe);
@@ -1366,13 +1369,7 @@ async function handleCompletions(
       preResolvedResponse = lastErrorResponse;
     }
   } else {
-    const single = matchFixtureDiagnostic(
-      fixtures,
-      body,
-      journal.getFixtureMatchCountsForTest(testId),
-      defaults.requestTransform,
-      matchOptions,
-    );
+    const single = selectFixture(body, journal.getFixtureMatchCountsForTest(testId));
     fixture = single.fixture;
     skippedBySequenceOrTurn = single.skippedBySequenceOrTurn;
   }
@@ -1435,6 +1432,9 @@ async function handleCompletions(
   // ever received.
   const goneAfterLatency = responseGoneReason(res);
   if (goneAfterLatency !== null) {
+    // Claimed at selection, but no error body ever reached a client — re-arm
+    // so the injection is not burned by a client that walked away.
+    releaseOneShotError(fixtures, fixture);
     defaults.logger.debug(
       `[chaos] ${method} ${path}: ${describeUnwritableReason(goneAfterLatency)} after the ` +
         `latency delay — not served, not journalled`,
@@ -1470,6 +1470,9 @@ async function handleCompletions(
       defaults.registry,
       defaults.logger,
     );
+    // The chaos action, not the fixture, answered this request — a claimed
+    // one-shot's error body was never written, so put it back in the queue.
+    releaseOneShotError(fixtures, fixture);
     return;
   }
 
@@ -1494,6 +1497,9 @@ async function handleCompletions(
       defaults.registry,
       defaults.logger,
     );
+    // Same as the terminal actions above: malformed replaces the body, so a
+    // claimed one-shot's error was never served.
+    releaseOneShotError(fixtures, fixture);
     return;
   }
 

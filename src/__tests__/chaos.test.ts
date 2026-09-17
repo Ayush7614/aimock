@@ -9,6 +9,7 @@ import {
 import { createServer, type ServerInstance } from "../server.js";
 import { Journal } from "../journal.js";
 import { Logger } from "../logger.js";
+import { LLMock } from "../llmock.js";
 import type { Fixture, ChatCompletionRequest } from "../types.js";
 
 // ---------------------------------------------------------------------------
@@ -1112,3 +1113,115 @@ describe("chaos no-fixture gate labels the journal source truthfully", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// A one-shot error claimed BEFORE a reset must not be re-armed AFTER it. The
+// chat handler claims at selection and releases on every non-serving exit
+// (client gone mid-latency, terminal chaos action, malformed). If the queue is
+// cleared between the claim and the release, the release used to unshift the
+// stale injection into the freshly cleared array — so the FIRST request of the
+// next test, which registered nothing and reset first, got the previous
+// test's 503. Reset is the isolation barrier every parallel harness leans on.
+// ---------------------------------------------------------------------------
+describe("chaos: a one-shot claimed before a reset is not re-armed into the reset queue", () => {
+  let mock: LLMock | null = null;
+
+  afterEach(async () => {
+    if (mock) {
+      await mock.stop();
+      mock = null;
+    }
+  });
+
+  function chat(url: string, headers: Record<string, string> = {}, signal?: AbortSignal) {
+    return fetch(`${url}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...headers },
+      body: JSON.stringify(chatRequest("hello")),
+      signal,
+    });
+  }
+
+  /**
+   * Claim the one-shot with a request parked in the chaos-latency delay, run
+   * `clear` while it is parked, then let the request leave WITHOUT being
+   * served (client abort → release). Returns after the release has run.
+   */
+  async function claimThenClearThenRelease(url: string, clear: () => Promise<unknown> | unknown) {
+    const ac = new AbortController();
+    const inflight = chat(url, { "x-aimock-chaos-latency": "600" }, ac.signal).catch(() => null);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    await clear();
+    ac.abort();
+    await inflight;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+
+  it("LLMock.reset() between claim and release: the next request is served normally", async () => {
+    mock = new LLMock();
+    await mock.start();
+    mock.nextRequestError(503, { message: "injected" });
+
+    await claimThenClearThenRelease(mock.url, () => mock!.reset());
+
+    // Pre-fix: the release put the injection back into the reset array.
+    expect(mock.getFixtures()).toHaveLength(0);
+    mock.onMessage("hello", { content: "plain ok" });
+    const next = await chat(mock.url);
+    expect(next.status).toBe(200);
+    expect((await next.json()).choices[0].message.content).toBe("plain ok");
+  });
+
+  it("POST /__aimock/reset between claim and release: the next request is served normally", async () => {
+    mock = new LLMock();
+    await mock.start();
+    mock.nextRequestError(503, { message: "injected" });
+
+    await claimThenClearThenRelease(mock.url, async () => {
+      const res = await fetch(`${mock!.url}/__aimock/reset`, { method: "POST" });
+      expect(res.status).toBe(200);
+    });
+
+    const listing = await (await fetch(`${mock.url}/__aimock/fixtures?include=fixtures`)).json();
+    expect(listing.count).toBe(0);
+    mock.onMessage("hello", { content: "plain ok" });
+    expect((await chat(mock.url)).status).toBe(200);
+  });
+
+  it("LLMock.clearFixtures() and DELETE /__aimock/fixtures invalidate the claim the same way", async () => {
+    mock = new LLMock();
+    await mock.start();
+
+    mock.nextRequestError(503, { message: "injected" });
+    await claimThenClearThenRelease(mock.url, () => {
+      mock!.clearFixtures();
+    });
+    expect(mock.getFixtures()).toHaveLength(0);
+
+    mock.nextRequestError(503, { message: "injected" });
+    await claimThenClearThenRelease(mock.url, async () => {
+      const res = await fetch(`${mock!.url}/__aimock/fixtures`, { method: "DELETE" });
+      expect(res.status).toBe(200);
+    });
+    expect(mock.getFixtures()).toHaveLength(0);
+
+    mock.onMessage("hello", { content: "plain ok" });
+    expect((await chat(mock.url)).status).toBe(200);
+  });
+
+  it("a one-shot queued AFTER the reset still releases and re-arms normally", async () => {
+    // The guard must key on the claim's generation, not disable release: a
+    // fresh one-shot claimed post-reset and dropped by chaos stays pending.
+    mock = new LLMock();
+    mock.onMessage("hello", { content: "plain ok" });
+    await mock.start();
+    await mock.reset();
+    mock.onMessage("hello", { content: "plain ok" });
+    mock.nextRequestError(503, { message: "injected" });
+
+    await chat(mock.url, { "x-aimock-chaos-drop": "1" });
+    const next = await chat(mock.url);
+    expect(next.status).toBe(503);
+    expect((await next.json()).error.message).toBe("injected");
+    expect((await chat(mock.url)).status).toBe(200);
+  });
+});

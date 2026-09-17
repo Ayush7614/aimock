@@ -8,7 +8,6 @@ import type {
   FixtureFileResponse,
   FixtureMatch,
   FixtureOpts,
-  FixtureResponse,
   ImageResponse,
   MockServerOptions,
   Mountable,
@@ -28,6 +27,8 @@ import type { ResolvedInboundAuth } from "./api-key-auth.js";
 import {
   isInjectableStatus,
   INJECTED_STATUS_RANGE,
+  queueOneShotError,
+  clearFixtureQueue,
   loadFixtureFile,
   loadFixturesFromDir,
   entryToFixture,
@@ -114,10 +115,11 @@ export class LLMock {
     return this;
   }
 
-  // Uses length = 0 to preserve array reference identity — the running
-  // server reads this same array on every request.
+  // Clears in place to preserve array reference identity — the running
+  // server reads this same array on every request — and invalidates any
+  // one-shot claim parked in flight so it cannot re-arm into the cleared queue.
   clearFixtures(): this {
-    this.fixtures.length = 0;
+    clearFixtureQueue(this.fixtures);
     return this;
   }
 
@@ -313,8 +315,8 @@ export class LLMock {
   /**
    * Queue a one-shot error that will be returned for the next matching
    * request, then automatically removed. Implemented as an internal fixture
-   * with a `predicate` that always matches (so it fires first) and spliced
-   * at the front of the fixture list.
+   * inserted at the front of the fixture list; see `queueOneShotError` for
+   * the endpoint gate and the served-not-evaluated consumption rule.
    */
   nextRequestError(
     status: number,
@@ -330,60 +332,7 @@ export class LLMock {
         `nextRequestError: invalid status ${String(status)} — must be ${INJECTED_STATUS_RANGE}`,
       );
     }
-    const errorResponse: FixtureResponse = {
-      error: {
-        message: errorBody?.message ?? "Injected error",
-        type: errorBody?.type ?? "server_error",
-        code: errorBody?.code,
-      },
-      status,
-    };
-    // An injected error is only a valid response for endpoints that can carry
-    // an error envelope. Mirror the router's endpoint-compat table
-    // (matchFixtureDiagnostic in router.ts): error responses are compatible
-    // with chat / embedding / realtime* / fal / the four elevenlabs-voice*
-    // slots and with requests that carry no endpoint type, but NOT with
-    // multimedia endpoints (image, speech, video, transcription, …). Gating consumption on this prevents an incompatible
-    // request from matching the predicate and splicing — and thereby
-    // destroying — a one-shot error intended for a different endpoint before
-    // the router's own compat check would have skipped it.
-    const errorEndpointCompatible = (req: import("./types.js").ChatCompletionRequest) => {
-      const reqEndpoint = req._endpointType as string | undefined;
-      if (
-        reqEndpoint === undefined ||
-        reqEndpoint === "chat" ||
-        reqEndpoint === "embedding" ||
-        reqEndpoint.startsWith("realtime") ||
-        reqEndpoint === "fal" ||
-        reqEndpoint === "elevenlabs-voice-design" ||
-        reqEndpoint === "elevenlabs-voice" ||
-        reqEndpoint === "elevenlabs-voice-get" ||
-        reqEndpoint === "elevenlabs-voice-delete"
-      ) {
-        return true;
-      }
-      return false;
-    };
-    const fixture: Fixture = {
-      match: { predicate: errorEndpointCompatible },
-      response: errorResponse,
-    };
-    // Insert at front so it matches before everything else
-    this.fixtures.unshift(fixture);
-    // Remove after first match — the journal records it so tests can assert.
-    // Only consume (and splice) when the request endpoint is compatible; an
-    // incompatible request returns false here, falls through to other
-    // fixtures, and leaves this error pending for its intended endpoint.
-    const original = fixture.match.predicate!;
-    fixture.match.predicate = (req) => {
-      const result = original(req);
-      if (result) {
-        // Remove synchronously on first match to prevent race conditions
-        const idx = this.fixtures.indexOf(fixture);
-        if (idx !== -1) this.fixtures.splice(idx, 1);
-      }
-      return result;
-    };
+    queueOneShotError(this.fixtures, status, errorBody);
     return this;
   }
 

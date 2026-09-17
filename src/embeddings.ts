@@ -32,7 +32,8 @@ import {
   normalizeEmbeddingInput,
   MAX_EMBEDDING_DIMENSIONS,
 } from "./helpers.js";
-import { matchFixtureDiagnostic } from "./router.js";
+import { releaseOneShotError } from "./fixture-loader.js";
+import { selectFixtureForServing } from "./router.js";
 import { writeErrorResponse } from "./sse-writer.js";
 import type { Journal } from "./journal.js";
 import { applyChaosAsync } from "./chaos.js";
@@ -178,7 +179,7 @@ export async function handleEmbeddings(
   };
 
   const testId = getTestId(req);
-  const { fixture, skippedBySequenceOrTurn } = matchFixtureDiagnostic(
+  const { fixture, skippedBySequenceOrTurn } = selectFixtureForServing(
     fixtures,
     syntheticReq,
     journal.getFixtureMatchCountsForTest(testId),
@@ -210,8 +211,10 @@ export async function handleEmbeddings(
       defaults.registry,
       defaults.logger,
     )
-  )
+  ) {
+    releaseOneShotError(fixtures, fixture);
     return;
+  }
 
   if (fixture) {
     const response = await resolveResponse(fixture, syntheticReq);
