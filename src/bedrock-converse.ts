@@ -24,7 +24,7 @@ import {
   isTextResponse,
   isToolCallResponse,
   isContentWithToolCallsResponse,
-  resolveFixtureBlocks,
+  resolveFixtureBlockOutcome,
   isErrorResponse,
   flattenHeaders,
   isJsonObject,
@@ -218,7 +218,8 @@ function buildBedrockStreamContentWithToolCallsEvents(
       blockIndex++;
     }
 
-    const ordered = resolveFixtureBlocks(blocks);
+    const outcome = resolveFixtureBlockOutcome(blocks);
+    const ordered = outcome.ordered;
     for (const block of ordered) {
       if (block.type === "text") {
         events.push({
@@ -270,7 +271,12 @@ function buildBedrockStreamContentWithToolCallsEvents(
 
     events.push({
       eventType: "messageStop",
-      payload: { stopReason: converseStopReason(overrides?.finishReason, "tool_use") },
+      payload: {
+        stopReason: converseStopReason(
+          overrides?.finishReason,
+          outcome.hasToolCalls ? "tool_use" : "end_turn",
+        ),
+      },
     });
     events.push({
       eventType: "metadata",
@@ -623,13 +629,16 @@ function buildConverseContentWithToolCallsResponse(
     };
   };
 
+  let blockHasTools: boolean | undefined;
   if (blocks && blocks.length > 0) {
     // NEW PATH: the non-streaming `content[]` array is positionally observable,
     // so emit `text`/`toolUse` content blocks in the fixture's ARRAY ORDER
     // (after any leading reasoning block). A toolCall block before a text block
     // therefore yields a toolUse ahead of the text — matching the streaming
     // path for the same `blocks` fixture.
-    const ordered = resolveFixtureBlocks(blocks);
+    const outcome = resolveFixtureBlockOutcome(blocks);
+    const ordered = outcome.ordered;
+    blockHasTools = outcome.hasToolCalls;
     for (const block of ordered) {
       if (block.type === "text") {
         contentBlocks.push({ text: block.text });
@@ -655,7 +664,10 @@ function buildConverseContentWithToolCallsResponse(
         content: contentBlocks,
       },
     },
-    stopReason: converseStopReason(overrides?.finishReason, "tool_use"),
+    stopReason: converseStopReason(
+      overrides?.finishReason,
+      blockHasTools === false ? "end_turn" : "tool_use",
+    ),
     usage: converseUsage(overrides),
     metrics: { latencyMs: 0 },
   };
