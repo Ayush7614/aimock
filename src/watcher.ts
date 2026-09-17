@@ -1,7 +1,7 @@
 import { watch, type FSWatcher } from "node:fs";
 import type { Fixture } from "./types.js";
 import type { Logger } from "./logger.js";
-import type { ValidationResult } from "./fixture-loader.js";
+import { clearFixtureQueue, type ValidationResult } from "./fixture-loader.js";
 
 const DEBOUNCE_MS = 500;
 
@@ -55,8 +55,9 @@ export function watchFixtures(
       }
     }
 
-    // Replace in-place to preserve array reference identity
-    fixtures.length = 0;
+    // Replace in-place to preserve array reference identity. Same door as
+    // reset: a one-shot claim parked across the reload must not re-arm into it.
+    clearFixtureQueue(fixtures);
     fixtures.push(...newFixtures);
     logger.info(`Reloaded ${newFixtures.length} fixture(s)`);
   }

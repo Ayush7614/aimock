@@ -988,11 +988,11 @@ export function applyChaosAction(
   }
 
   switch (action) {
+    // Every case journals AFTER its write, for the same reason the metric
+    // below is counted after: a `writeHead` that throws (a socket torn down
+    // between the guard above and the call) must not leave behind a journal
+    // entry for a response the client never received.
     case "drop": {
-      journal.add({
-        ...context,
-        response: { status: 500, fixture, chaosAction: "drop", source },
-      });
       writeErrorResponse(
         res,
         500,
@@ -1004,22 +1004,22 @@ export function applyChaosAction(
           },
         }),
       );
+      journal.add({
+        ...context,
+        response: { status: 500, fixture, chaosAction: "drop", source },
+      });
       break;
     }
     case "malformed": {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end("{malformed json: <<<chaos>>>");
       journal.add({
         ...context,
         response: { status: 200, fixture, chaosAction: "malformed", source },
       });
-      res.writeHead(200, { "Content-Type": "application/json" });
-      res.end("{malformed json: <<<chaos>>>");
       break;
     }
     case "rateLimit": {
-      journal.add({
-        ...context,
-        response: { status: 429, fixture, chaosAction: "rateLimit", source },
-      });
       // Route through writeErrorResponse() so the chaos 429 carries the same
       // OpenAI-shaped rate-limit header set (Retry-After + RATE_LIMIT_HEADERS)
       // as every other 429 in the repo, instead of a second hand-rolled set.
@@ -1034,17 +1034,26 @@ export function applyChaosAction(
           },
         }),
       );
+      journal.add({
+        ...context,
+        response: { status: 429, fixture, chaosAction: "rateLimit", source },
+      });
       break;
     }
     case "disconnect": {
-      journal.add({
-        ...context,
-        response: { status: 0, fixture, chaosAction: "disconnect", source },
-      });
+      // The status the client actually saw: the one already on the wire when
+      // the response was committed before this teardown, else 0 (nothing was
+      // ever sent). Journalling 0 for a committed response claimed the client
+      // got no status line when it had.
+      const status = res.headersSent ? res.statusCode : 0;
       // Marked BEFORE the teardown so anything reacting to `close` already
       // sees this as OUR disconnect rather than a client hang-up.
       chaosDisconnectedResponses.add(res);
       res.destroy();
+      journal.add({
+        ...context,
+        response: { status, fixture, chaosAction: "disconnect", source },
+      });
       break;
     }
     default: {

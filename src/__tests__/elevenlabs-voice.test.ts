@@ -4,7 +4,15 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { LLMock } from "../llmock.js";
-import { clearElevenLabsVoices, rememberElevenLabsVoice } from "../elevenlabs-voice.js";
+import {
+  clearElevenLabsVoices,
+  handleElevenLabsVoiceDesign,
+  handleElevenLabsVoiceGet,
+  rememberElevenLabsVoice,
+} from "../elevenlabs-voice.js";
+import { Journal } from "../journal.js";
+import { Logger } from "../logger.js";
+import type { RecordConfig } from "../types.js";
 
 const SEA_CAPTAIN = "A weathered sea captain in his sixties, gravelly, unhurried";
 
@@ -2969,5 +2977,280 @@ describe("ElevenLabs voice create: parameter validation sits where design's does
     expect(((await absentId.json()) as { error: { message: string } }).error.message).toBe(
       "Missing required parameter: 'generated_voice_id'",
     );
+  });
+});
+
+/**
+ * F6: no voice journal entry carried a `service` tag, so
+ * `GET /__aimock/journal?service=elevenlabs-voice` selected nothing even
+ * though the unfiltered journal showed the traffic. Every branch — design,
+ * create, the GET/DELETE slot routes, their 400/404s, and the chaos gates —
+ * now tags itself the way files/fine-tuning/batches do.
+ */
+describe("ElevenLabs voice journal entries carry service", () => {
+  let mock: LLMock | undefined;
+
+  afterEach(async () => {
+    await mock?.stop().catch(() => {});
+    mock = undefined;
+    clearElevenLabsVoices();
+  });
+
+  type Entry = { method: string; path: string; service?: string; response: { status: number } };
+  const journal = async (base: string, qs = ""): Promise<Entry[]> =>
+    (await (await fetch(`${base}/__aimock/journal${qs}`)).json()) as Entry[];
+
+  test("?service=elevenlabs-voice selects every voice route outcome", async () => {
+    mock = new LLMock({ port: 0 });
+    await mock.start();
+    const post = (route: string, body: unknown): Promise<Response> =>
+      fetch(`${mock!.url}${route}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+
+    // design: 404 (no fixture), 400 (missing description), 400 (malformed JSON)
+    expect(
+      (await post("/v1/text-to-voice/design", { voice_description: SEA_CAPTAIN })).status,
+    ).toBe(404);
+    expect((await post("/v1/text-to-voice/design", {})).status).toBe(400);
+    expect(
+      (
+        await fetch(`${mock.url}/v1/text-to-voice/design`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: "{",
+        })
+      ).status,
+    ).toBe(400);
+    // create: 200, then the slot routes on the saved voice
+    expect(
+      (
+        await post("/v1/text-to-voice", {
+          voice_name: "Captain",
+          voice_description: SEA_CAPTAIN,
+          generated_voice_id: "preview_captain",
+        })
+      ).status,
+    ).toBe(200);
+    expect((await fetch(`${mock.url}/v1/voices/preview_captain`)).status).toBe(200);
+    expect(
+      (await fetch(`${mock.url}/v1/voices/preview_captain`, { method: "DELETE" })).status,
+    ).toBe(200);
+    expect((await fetch(`${mock.url}/v1/voices/preview_captain`)).status).toBe(404);
+
+    const all = (await journal(mock.url)).filter(
+      (e) => e.path.includes("/v1/text-to-voice") || e.path.includes("/v1/voices/"),
+    );
+    expect(all.map((e) => e.response.status)).toEqual([404, 400, 400, 200, 200, 200, 404]);
+    for (const e of all) expect(e.service, `${e.method} ${e.path}`).toBe("elevenlabs-voice");
+
+    const filtered = await journal(mock.url, "?service=elevenlabs-voice");
+    expect(filtered).toHaveLength(all.length);
+  });
+
+  test("a chaos-faulted voice request stays selectable by service", async () => {
+    mock = new LLMock({ port: 0 });
+    await mock.start();
+    const testId = "voice-journal-chaos";
+    const headers = { "Content-Type": "application/json", "X-Test-Id": testId };
+    await fetch(`${mock.url}/__aimock/chaos`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ rateLimitRate: 1 }),
+    });
+    const design = await fetch(`${mock.url}/v1/text-to-voice/design`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ voice_description: SEA_CAPTAIN }),
+    });
+    expect(design.status).toBe(429);
+    const get = await fetch(`${mock.url}/v1/voices/nobody`, { headers });
+    expect(get.status).toBe(429);
+
+    const tagged = (await journal(mock.url, `?service=elevenlabs-voice&testId=${testId}`)).map(
+      (e) => e.response.status,
+    );
+    expect(tagged).toEqual([429, 429]);
+  });
+});
+
+/**
+ * H5: the no-fixture chaos gates hardcoded their journal `source` — design and
+ * create said "proxy" with no record config at all, and the GET/DELETE slot
+ * gate said "internal" while record mode was about to proxy the very same
+ * miss. Every voice gate now applies the rule `src/server.ts` applies: the
+ * label is "internal" unless record mode has an ElevenLabs upstream.
+ *
+ * And every voice journal write used to land BEFORE its response write, so a
+ * `writeHead` that threw left a phantom entry for a response the client never
+ * got — the inverse of the journal-after-write rule files.ts and chaos.ts
+ * follow. Every site now journals after the write succeeds.
+ */
+describe("ElevenLabs voice journal truth", () => {
+  let mock: LLMock | undefined;
+  let upstream: http.Server | undefined;
+
+  afterEach(async () => {
+    await mock?.stop().catch(() => {});
+    mock = undefined;
+    if (upstream) await closeServer(upstream);
+    upstream = undefined;
+    clearElevenLabsVoices();
+  });
+
+  type Entry = { method: string; path: string; response: { status: number; source?: string } };
+  const testId = "voice-journal-truth";
+  const headers = { "Content-Type": "application/json", "X-Test-Id": testId };
+  const dropEverything = (base: string): Promise<Response> =>
+    fetch(`${base}/__aimock/chaos`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ dropRate: 1 }),
+    });
+  const faultBoth = async (base: string): Promise<string[]> => {
+    const design = await fetch(`${base}/v1/text-to-voice/design`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ voice_description: SEA_CAPTAIN }),
+    });
+    expect(design.status).toBe(500);
+    const get = await fetch(`${base}/v1/voices/nobody`, { headers });
+    expect(get.status).toBe(500);
+    const entries = (await (
+      await fetch(`${base}/__aimock/journal?service=elevenlabs-voice&testId=${testId}`)
+    ).json()) as Entry[];
+    expect(entries.map((e) => e.method)).toEqual(["POST", "GET"]);
+    return entries.map((e) => e.response.source ?? "<none>");
+  };
+
+  test("a no-fixture chaos fault with no record config journals source internal on every route", async () => {
+    mock = new LLMock({ port: 0 });
+    await mock.start();
+    await dropEverything(mock.url);
+    expect(await faultBoth(mock.url)).toEqual(["internal", "internal"]);
+  });
+
+  test("a no-fixture chaos fault under record mode with an ElevenLabs upstream journals source proxy on every route", async () => {
+    const up = await createUpstream((_req, res) => {
+      res.writeHead(500);
+      res.end("chaos must have answered before this");
+    });
+    upstream = up.server;
+    mock = new LLMock({
+      port: 0,
+      record: { providers: { elevenlabs: up.url }, fixturePath: makeTmpDir() },
+    });
+    await mock.start();
+    await dropEverything(mock.url);
+    expect(await faultBoth(mock.url)).toEqual(["proxy", "proxy"]);
+  });
+
+  test("a no-fixture chaos fault under strict mode with an ElevenLabs upstream journals source internal on every route", async () => {
+    // Strict refuses every miss before record mode gets to forward it, so
+    // nothing here was ever going to be proxied.
+    const up = await createUpstream((_req, res) => {
+      res.writeHead(500);
+      res.end("chaos must have answered before this");
+    });
+    upstream = up.server;
+    mock = new LLMock({
+      port: 0,
+      strict: true,
+      record: { providers: { elevenlabs: up.url }, fixturePath: makeTmpDir() },
+    });
+    await mock.start();
+    await dropEverything(mock.url);
+    expect(await faultBoth(mock.url)).toEqual(["internal", "internal"]);
+  });
+
+  test("a no-fixture chaos fault under a record config with no providers map journals source internal instead of throwing", async () => {
+    // A JS caller (or a hand-built config) can hand over `record: {}`. The
+    // voice label rule used to read `.providers.elevenlabs` unguarded, so the
+    // chaos gate threw before the drop was written or journalled. Driven
+    // through the handler directly: the full server has its own unguarded
+    // `record.providers.byteplus` read in its routing, outside this rule.
+    const journal = new Journal();
+    const defaults = {
+      latency: 0,
+      chunkSize: 0,
+      replaySpeed: 1,
+      logger: new Logger("silent"),
+      record: {} as RecordConfig,
+      chaos: { dropRate: 1 },
+    };
+    const server = http.createServer((req, res) => {
+      const chunks: Buffer[] = [];
+      req.on("data", (c: Buffer) => chunks.push(c));
+      req.on("end", () => {
+        void handleElevenLabsVoiceDesign(
+          req,
+          res,
+          Buffer.concat(chunks).toString(),
+          [],
+          defaults,
+          journal,
+        );
+      });
+    });
+    upstream = server;
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const { port } = server.address() as { port: number };
+
+    const design = await fetch(`http://127.0.0.1:${port}/v1/text-to-voice/design`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ voice_description: SEA_CAPTAIN }),
+    });
+    expect(design.status).toBe(500);
+    // Before: the TypeError surfaced as an unhandled rejection with no body
+    // written — this is the chaos drop's own body.
+    expect(((await design.json()) as { error: { code: string } }).error.code).toBe("chaos_drop");
+    const entries = journal.getAll();
+    expect(entries).toHaveLength(1);
+    expect(entries[0].response).toMatchObject({ chaosAction: "drop", source: "internal" });
+  });
+
+  test("a response write that throws leaves no journal entry behind", async () => {
+    const journal = new Journal();
+    const defaults = { latency: 0, chunkSize: 0, replaySpeed: 1, logger: new Logger("silent") };
+    const res = {
+      setHeader(): void {},
+      writeHead(): never {
+        throw new Error("writeHead refused");
+      },
+      end(): void {},
+    } as unknown as http.ServerResponse;
+
+    // design: the no-fixture 404 (`writeNoMatch`)
+    const design = {
+      url: "/v1/text-to-voice/design",
+      method: "POST",
+      headers: { "content-type": "application/json" },
+    } as unknown as http.IncomingMessage;
+    await expect(
+      handleElevenLabsVoiceDesign(
+        design,
+        res,
+        JSON.stringify({ voice_description: SEA_CAPTAIN }),
+        [],
+        defaults,
+        journal,
+      ),
+    ).rejects.toThrow("writeHead refused");
+
+    // slot GET: the stored-voice 200 (`serveStored`)
+    rememberElevenLabsVoice({ voice_id: "stored" });
+    const get = {
+      url: "/v1/voices/stored",
+      method: "GET",
+      headers: {},
+    } as unknown as http.IncomingMessage;
+    await expect(
+      handleElevenLabsVoiceGet(get, res, "stored", [], defaults, journal),
+    ).rejects.toThrow("writeHead refused");
+
+    expect(journal.getAll()).toEqual([]);
   });
 });

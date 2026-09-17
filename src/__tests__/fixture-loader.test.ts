@@ -2228,3 +2228,93 @@ describe("auto-stringify JSON objects in fixture entries", () => {
     );
   });
 });
+
+// ---------------------------------------------------------------------------
+// Fixture chaos bounds go through the ONE chaos table (F5). Before, a
+// hand-rolled range check let `latencyMs: 1.5` validate while the CLI flag and
+// the request header rejected it, and the runtime then rejected the fixture
+// value on every request.
+// ---------------------------------------------------------------------------
+
+describe("validateFixtures chaos bounds match parseChaosField", () => {
+  it("error: chaos.latencyMs is fractional", () => {
+    const fixtures = [makeFixture({ chaos: { latencyMs: 1.5 } })];
+    const results = validateFixtures(fixtures);
+    expect(results.some((r) => r.severity === "error" && r.message.includes("latencyMs"))).toBe(
+      true,
+    );
+  });
+
+  it("error: chaos.latencyMs is out of range", () => {
+    const fixtures = [makeFixture({ chaos: { latencyMs: 30001 } })];
+    const results = validateFixtures(fixtures);
+    expect(results.some((r) => r.severity === "error" && r.message.includes("latencyMs"))).toBe(
+      true,
+    );
+  });
+
+  it("error: chaos.rateLimitRate is > 1", () => {
+    const fixtures = [makeFixture({ chaos: { rateLimitRate: 1.5 } })];
+    const results = validateFixtures(fixtures);
+    expect(results.some((r) => r.severity === "error" && r.message.includes("rateLimitRate"))).toBe(
+      true,
+    );
+  });
+
+  it("no error: integer latencyMs and in-range rateLimitRate", () => {
+    const fixtures = [makeFixture({ chaos: { latencyMs: 30000, rateLimitRate: 1 } })];
+    expect(validateFixtures(fixtures)).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ALL five chaos fields go through the ONE chaos table (G6). Before, only
+// `rateLimitRate` and `latencyMs` did; `dropRate`, `malformedRate` and
+// `disconnectRate` kept a hand-rolled `< 0 || > 1` check, so `NaN`, `-0` and a
+// numeric STRING all validated clean and were then rejected on every request.
+// ---------------------------------------------------------------------------
+
+describe("validateFixtures: every chaos field uses parseChaosField", () => {
+  const chaos = (c: Record<string, unknown>) => makeFixture({ chaos: c as Fixture["chaos"] });
+
+  it("error: chaos.dropRate is a numeric string", () => {
+    const results = validateFixtures([chaos({ dropRate: "0.5" })]);
+    expect(results.some((r) => r.severity === "error" && r.message.includes("dropRate"))).toBe(
+      true,
+    );
+  });
+
+  it("error: chaos.dropRate is NaN", () => {
+    const results = validateFixtures([chaos({ dropRate: NaN })]);
+    expect(results.some((r) => r.severity === "error" && r.message.includes("dropRate"))).toBe(
+      true,
+    );
+  });
+
+  it("error: chaos.malformedRate is negative zero", () => {
+    const results = validateFixtures([chaos({ malformedRate: -0 })]);
+    expect(results.some((r) => r.severity === "error" && r.message.includes("malformedRate"))).toBe(
+      true,
+    );
+  });
+
+  it("error: chaos.disconnectRate is a numeric string", () => {
+    const results = validateFixtures([chaos({ disconnectRate: "1" })]);
+    expect(
+      results.some((r) => r.severity === "error" && r.message.includes("disconnectRate")),
+    ).toBe(true);
+  });
+
+  it("no error: in-range numeric rates on all five fields", () => {
+    const fixtures = [
+      chaos({
+        dropRate: 0,
+        malformedRate: 0.5,
+        disconnectRate: 1,
+        rateLimitRate: 0.25,
+        latencyMs: 10,
+      }),
+    ];
+    expect(validateFixtures(fixtures)).toHaveLength(0);
+  });
+});

@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import http from "node:http";
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { LLMock } from "../llmock.js";
 import {
   clearFileStore,
@@ -12,7 +12,12 @@ import {
   FILES_LIST_MAX_LIMIT,
   FILES_MAX_FILENAME_BYTES,
   getStoredFileBytes,
+  handleFilesContent,
+  handleFilesCreate,
+  handleFilesRetrieve,
 } from "../files.js";
+import { Journal } from "../journal.js";
+import { Logger } from "../logger.js";
 import { normalizePathLabel, FILES_ID_RE, FILES_CONTENT_RE } from "../metrics.js";
 
 /** A real 70-byte 1x1 PNG — invalid UTF-8, so a utf8 round-trip mangles it. */
@@ -1707,7 +1712,8 @@ describe("Files API journal bodies", () => {
     await fetch(`${mock.url}/v1/files/${created.id}`);
     await fetch(`${mock.url}/v1/files/${created.id}/content`);
     await fetch(`${mock.url}/v1/files/${created.id}`, { method: "DELETE" });
-    // An upload rejected before it parsed has no payload to describe.
+    // An upload rejected before it parsed has no payload to describe; its
+    // entry carries the error envelope instead (F6), never the octets.
     const bad = await postJson(`${mock.url}/v1/files`, {
       filename: "b.jsonl",
       purpose: "nope",
@@ -1717,11 +1723,12 @@ describe("Files API journal bodies", () => {
 
     const entries = filesEntries();
     expect(entries).toHaveLength(6);
-    // Entry 0 is the upload; every later entry is bodyless.
+    // Entry 0 is the upload; the four bodyless routes follow; the rejection is last.
     expect(entries[0].body).not.toBeNull();
-    for (const entry of entries.slice(1)) {
+    for (const entry of entries.slice(1, 5)) {
       expect(entry.body, `${entry.method} ${entry.path} should journal a null body`).toBeNull();
     }
+    expect(entries[5].body).toEqual(await bad.json());
     // F2: service stays on EVERY entry regardless of the body.
     for (const entry of entries) expect(entry.service).toBe("files");
   });
@@ -2574,5 +2581,239 @@ describe("Files API list query parameters obey one rule", () => {
     const { status, body } = await rawGet(mock.port, "/v1/files?purpose=batch#frag");
     expect(status).toBe(200);
     expect((JSON.parse(body) as { data: unknown[] }).data).toHaveLength(0);
+  });
+});
+
+/**
+ * F6: the files journal used to be incomplete in three ways. A 400 entry
+ * carried `body: null` and no log line, so a caller reading the journal could
+ * see that an upload was rejected but not why; no entry carried
+ * `source: "internal"` although every files response is synthesized by this
+ * process exactly as fine-tuning's are; and every 200 was journaled BEFORE
+ * the response was written, so a `writeHead` that threw left a phantom 200
+ * entry for a response the client never received.
+ */
+describe("Files API journal completeness", () => {
+  let mock: LLMock;
+
+  beforeEach(async () => {
+    clearFileStore();
+    mock = new LLMock({ port: 0, logLevel: "warn" });
+    await mock.start();
+  });
+
+  afterEach(async () => {
+    await mock.stop();
+    clearFileStore();
+  });
+
+  const filesEntries = (): ReturnType<LLMock["getRequests"]> =>
+    mock.getRequests().filter((e) => e.service === "files");
+
+  it("journals the rejection reason and logs a 400", async () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const bad = await postJson(`${mock.url}/v1/files`, {
+        filename: "b.jsonl",
+        purpose: "nope",
+        content: "b",
+      });
+      expect(bad.status).toBe(400);
+      const wire = (await bad.json()) as { error: { message: string; type: string } };
+
+      const entries = filesEntries();
+      expect(entries).toHaveLength(1);
+      expect(entries[0].response.status).toBe(400);
+      // The entry carries the SAME envelope the wire got, so the reason a
+      // request was rejected is readable from the journal alone.
+      expect(entries[0].body).toEqual(wire);
+      expect(wire.error.message).toContain("purpose");
+
+      const lines = warnSpy.mock.calls.map((c) => c.map(String).join(" "));
+      expect(
+        lines.some((l) => l.includes("POST /v1/files") && l.includes(wire.error.message)),
+      ).toBe(true);
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it.each([
+    {
+      label: "purpose controls",
+      field: "purpose",
+      value: "x\nFORGED\r\t\0\x1b\x7f\x85\u2028\u2029",
+    },
+    {
+      label: "decoded cursor controls",
+      field: "after",
+      value: "x\nFORGED\r\t\0\x1b\x7f\x85\u2028\u2029",
+    },
+    { label: "200 KB purpose", field: "purpose", value: "Z".repeat(200_000) },
+    { label: "long request path", field: "after", value: "Z".repeat(4_000) },
+  ])("bounds and escapes the full rejection warning for $label", async ({ field, value }) => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const res =
+        field === "purpose"
+          ? await postJson(`${mock.url}/v1/files`, {
+              filename: "x.txt",
+              content: "x",
+              purpose: value,
+            })
+          : await fetch(`${mock.url}/v1/files?after=${encodeURIComponent(value)}`);
+      expect(res.status).toBe(400);
+      const wire = await res.json();
+      expect(wire.error.message).toContain(value);
+      const [entry] = filesEntries();
+      expect(entry.response).toMatchObject({ status: 400, source: "internal" });
+      // The journal's existing body cap still applies to oversized envelopes.
+      if (value.length < 200_000) expect(entry.body).toEqual(wire);
+      expect(warnSpy).toHaveBeenCalledTimes(1);
+      const line = warnSpy.mock.calls[0].map(String).join(" ");
+      expect(line).toContain("[aimock] Files mock: rejected");
+      expect(line.length).toBeLessThanOrEqual(1_033); // 1,024 + Logger's fixed prefix
+      for (const character of line) {
+        const code = character.charCodeAt(0);
+        expect(
+          code >= 32 && !(code >= 127 && code <= 159) && code !== 0x2028 && code !== 0x2029,
+        ).toBe(true);
+      }
+      if (value.length < 100) {
+        expect(line).toContain(
+          "\\u000aFORGED\\u000d\\u0009\\u0000\\u001b\\u007f\\u0085\\u2028\\u2029",
+        );
+      } else {
+        expect(line.endsWith("...")).toBe(true);
+      }
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it("journals a list 400 with its reason too", async () => {
+    const res = await fetch(`${mock.url}/v1/files?limit=0`);
+    expect(res.status).toBe(400);
+    const wire = await res.json();
+    const [entry] = filesEntries();
+    expect(entry.response.status).toBe(400);
+    expect(entry.body).toEqual(wire);
+  });
+
+  it("marks every files entry source=internal, success and error alike", async () => {
+    const created = (await (
+      await postJson(`${mock.url}/v1/files`, {
+        filename: "a.jsonl",
+        purpose: "batch",
+        content: "a",
+      })
+    ).json()) as { id: string };
+    await fetch(`${mock.url}/v1/files`);
+    await fetch(`${mock.url}/v1/files/${created.id}`);
+    await fetch(`${mock.url}/v1/files/${created.id}/content`);
+    await fetch(`${mock.url}/v1/files/${created.id}`, { method: "DELETE" });
+    await fetch(`${mock.url}/v1/files/${created.id}`);
+    await postJson(`${mock.url}/v1/files`, { filename: "b.jsonl", purpose: "nope", content: "b" });
+
+    const entries = filesEntries();
+    expect(entries.map((e) => e.response.status)).toEqual([200, 200, 200, 200, 200, 404, 400]);
+    for (const entry of entries) {
+      expect(entry.response.source, `${entry.method} ${entry.path}`).toBe("internal");
+    }
+  });
+
+  it("does not journal a 200 whose response write threw", async () => {
+    const created = (await (
+      await postJson(`${mock.url}/v1/files`, {
+        filename: "a.jsonl",
+        purpose: "batch",
+        content: "a",
+      })
+    ).json()) as { id: string };
+
+    const journal = new Journal();
+    const req = {
+      url: `/v1/files/${created.id}/content`,
+      method: "GET",
+      headers: {},
+    } as unknown as http.IncomingMessage;
+    const res = {
+      setHeader(): void {},
+      writeHead(): never {
+        throw new Error("writeHead refused");
+      },
+      end(): void {},
+    } as unknown as http.ServerResponse;
+
+    await expect(
+      handleFilesContent(req, res, created.id, journal, { logger: new Logger("silent") }, () => {}),
+    ).rejects.toThrow("writeHead refused");
+    // Nothing reached the client, so nothing is journaled as served.
+    expect(journal.getAll()).toEqual([]);
+  });
+
+  it("does not journal a 400 whose response write threw", async () => {
+    const journal = new Journal();
+    const req = {
+      url: "/v1/files",
+      method: "POST",
+      headers: { "content-type": "application/json" },
+    } as unknown as http.IncomingMessage;
+    const res = {
+      setHeader(): void {},
+      writeHead(): never {
+        throw new Error("writeHead refused");
+      },
+      end(): void {},
+    } as unknown as http.ServerResponse;
+    const raw = Buffer.from(JSON.stringify({ filename: "a.jsonl", purpose: "nope", content: "a" }));
+
+    await expect(
+      handleFilesCreate(req, res, raw, journal, { logger: new Logger("silent") }, () => {}),
+    ).rejects.toThrow("writeHead refused");
+    expect(journal.getAll()).toEqual([]);
+  });
+
+  it("does not journal a 404 whose response write threw", async () => {
+    const journal = new Journal();
+    const req = {
+      url: "/v1/files/file-missing",
+      method: "GET",
+      headers: {},
+    } as unknown as http.IncomingMessage;
+    const res = {
+      setHeader(): void {},
+      writeHead(): never {
+        throw new Error("writeHead refused");
+      },
+      end(): void {},
+    } as unknown as http.ServerResponse;
+
+    await expect(
+      handleFilesRetrieve(
+        req,
+        res,
+        "file-missing",
+        journal,
+        { logger: new Logger("silent") },
+        () => {},
+      ),
+    ).rejects.toThrow("writeHead refused");
+    expect(journal.getAll()).toEqual([]);
+  });
+
+  it("still journals a normal 400 and 404 exactly once each", async () => {
+    await postJson(`${mock.url}/v1/files`, { filename: "b.jsonl", purpose: "nope", content: "b" });
+    await fetch(`${mock.url}/v1/files/file-missing`);
+    const entries = filesEntries();
+    expect(entries.map((e) => e.response.status)).toEqual([400, 404]);
+    expect(entries[0].body).toMatchObject({
+      error: { message: expect.stringContaining("purpose") },
+    });
+    expect(entries[1].body).toBeNull();
+    for (const entry of entries) {
+      expect(entry.service).toBe("files");
+      expect(entry.response.source).toBe("internal");
+    }
   });
 });

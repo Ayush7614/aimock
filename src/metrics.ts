@@ -217,12 +217,30 @@ export function createMetricsRegistry(): MetricsRegistry {
 // Regex patterns for parametric API routes
 const BEDROCK_RE =
   /^\/model\/([^/]+)\/(invoke|invoke-with-response-stream|converse|converse-stream)$/;
-const GEMINI_RE = /^\/v1beta\/models\/([^:]+):(generateContent|streamGenerateContent)$/;
+// Gemini `/v1beta/models/{model}:{action}`. The action segment is caller
+// controlled, so only the actions the server routes stay verbatim; anything
+// else collapses to `{action}`. `predictLongRunning` is listed so the Veo
+// submit label below stays byte-identical to what it was before this RE
+// widened past generate/streamGenerate — the two rules must agree.
+const GEMINI_RE = /^\/v1beta\/models\/([^:]+):([^/]+)$/;
+const GEMINI_ACTIONS = new Set([
+  "generateContent",
+  "streamGenerateContent",
+  "embedContent",
+  "batchEmbedContents",
+  "countTokens",
+  "predict",
+  "predictLongRunning",
+]);
+const GEMINI_MODEL_RE = /^\/v1beta\/models\/([^:/]+)$/;
 const AZURE_RE = /^\/openai\/deployments\/([^/]+)\/(chat\/completions|embeddings)$/;
 const ELEVENLABS_TTS_RE = /^\/v1\/text-to-speech\/([^/]+)$/;
 const ELEVENLABS_VOICE_RE = /^\/v1\/voices\/([^/]+)$/;
 const VERTEX_RE =
   /^\/v1\/projects\/([^/]+)\/locations\/([^/]+)\/publishers\/google\/models\/([^:]+):(.+)$/;
+// The Vertex `:action` segment is caller controlled exactly as Gemini's is;
+// server.ts routes only these two, so anything else collapses to `{action}`.
+const VERTEX_ACTIONS = new Set(["generateContent", "streamGenerateContent"]);
 // Exported: server.ts route dispatch matches the same OpenRouter and OpenAI
 // video paths.
 export const OPENROUTER_VIDEO_CONTENT_RE = /^\/api\/v1\/videos\/([^/]+)\/content$/;
@@ -259,6 +277,148 @@ export const BATCHES_CANCEL_RE = /^\/v1\/batches\/([^/]+)\/cancel$/;
 export const BATCHES_ID_RE = /^\/v1\/batches\/([^/]+)$/;
 export const FILES_CONTENT_RE = /^\/v1\/files\/([^/]+)\/content$/;
 export const FILES_ID_RE = /^\/v1\/files\/([^/]+)$/;
+
+/**
+ * Closed namespaces beyond fine-tuning. Each prefix below is entered by prefix
+ * and always returns, so no id-bearing or unknown-depth path under it can
+ * reach the verbatim return at the bottom of `normalizePathLabel`:
+ *
+ * - fal: `/fal/queue/requests/{id}[/status|/cancel|/stream]` (aimock's own
+ *   queue layout), `/fal/{model}/requests/{id}[/…]` (the `x-fal-target-host`
+ *   path-mirror of `queue.fal.run`), `/fal/queue/submit/{model}`,
+ *   `/fal/run/{model}`. Request ids are minted per submit and model ids are
+ *   caller-controlled multi-segment paths, so both collapse.
+ * - music: `/v1/music/{generation|variation|remix|extend|plan|detailed|stream}`
+ *   are the ElevenLabs routes (`plan`/`stream` take their own response shape
+ *   in elevenlabs-audio.ts); the server RE accepts any suffix, so an unknown
+ *   one collapses.
+ * - files / batches: the id and sub-resource rules above cover the routed
+ *   shapes; any other depth collapses to the namespace's `{other}`.
+ */
+/**
+ * The fal.ai route shape, shared with server.ts so the label rule cannot
+ * drift from the route rule: a bare `/fal` is routed, so it is labelled here
+ * rather than falling through to `{unknown}`.
+ */
+export const FAL_ROUTE_RE = /^\/fal(?:\/.*)?$/;
+const FAL_QUEUE_REQUEST_RE = /^\/fal\/queue\/requests\/[^/]+(?:\/([^/]+))?$/;
+const FAL_MIRROR_REQUEST_RE = /^\/fal\/.+\/requests\/[^/]+(?:\/([^/]+))?$/;
+const FAL_REQUEST_SUBRESOURCES = new Set(["status", "cancel", "stream"]);
+const FAL_QUEUE_SUBMIT_RE = /^\/fal\/queue\/submit\/.+$/;
+const FAL_RUN_RE = /^\/fal\/run\/.+$/;
+const FAL_OTHER_LABEL = "/fal/{other}";
+const MUSIC_PREFIX = "/v1/music/";
+const MUSIC_ACTIONS = new Set([
+  "generation",
+  "variation",
+  "remix",
+  "extend",
+  "plan",
+  "detailed",
+  "stream",
+]);
+const MUSIC_OTHER_LABEL = "/v1/music/{other}";
+const FILES_PREFIX = "/v1/files/";
+const FILES_OTHER_LABEL = "/v1/files/{other}";
+const BATCHES_PREFIX = "/v1/batches/";
+const BATCHES_OTHER_LABEL = "/v1/batches/{other}";
+
+/**
+ * Label for a path no route claimed. Metrics are recorded for EVERY response,
+ * the generic 404 included, so an unrouted path is caller-controlled text and
+ * a fuzzer (or a typo'd SDK base URL) would mint one label per request.
+ *
+ * The collapse is decided by ROUTE SHAPE, never by status: a 404 is not the
+ * only way an unrouted path gets answered (a CORS preflight is 204 for any
+ * path, a torn-down response has no status at all), and a routed path can
+ * legitimately 404 (a fixture miss, a missing file) without becoming
+ * unknown. Every path that is not claimed by a placeholder rule above must
+ * therefore be listed here to keep its verbatim label.
+ */
+export const UNKNOWN_PATH_LABEL = "{unknown}";
+
+/**
+ * Static paths server.ts dispatches by exact match (after
+ * `normalizeCompatPath`, so the canonical `/v1/...` spelling). A path absent
+ * from this table that no placeholder rule claims is labelled `{unknown}`
+ * whatever its status — so a new static route needs an entry here or its
+ * traffic is counted but not named.
+ */
+const STATIC_ROUTE_PATHS = new Set([
+  "/health",
+  "/ready",
+  "/metrics",
+  "/search",
+  "/v1/chat/completions",
+  "/v1/responses",
+  "/v1/realtime",
+  "/v1/messages",
+  "/v1/embeddings",
+  "/v1/moderations",
+  "/v1/models",
+  "/v1/_requests",
+  "/v1/images/generations",
+  "/v1/images/edits",
+  "/v1/images/variations",
+  "/v1/audio/speech",
+  "/v1/audio/transcriptions",
+  "/v1/audio/translations",
+  "/v1/videos",
+  "/v1/batches",
+  "/v1/files",
+  "/v1/sound-generation",
+  "/v1/music",
+  "/v1/text-to-voice",
+  "/v1/text-to-voice/design",
+  "/v1beta/interactions",
+  "/v2/chat",
+  "/v2/embed",
+  "/v2/rerank",
+  "/api/chat",
+  "/api/generate",
+  "/api/embeddings",
+  "/api/embed",
+  "/api/tags",
+  "/api/v1/videos",
+  "/api/v1/videos/models",
+  "/api/v1/credits",
+  "/api/v1/key",
+  "/api/v1/models",
+  "/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent",
+]);
+
+/**
+ * Control API (`/__aimock/...`): a closed set of sub-paths, matched exactly
+ * in `handleControlAPI`; anything else under the prefix collapses.
+ */
+const CONTROL_PREFIX = "/__aimock/";
+const CONTROL_PATHS = new Set([
+  "/__aimock/health",
+  "/__aimock/journal",
+  "/__aimock/fixtures",
+  "/__aimock/chaos",
+  "/__aimock/reset",
+  "/__aimock/reset/journal",
+  "/__aimock/reset/fixtures",
+  "/__aimock/error",
+]);
+const CONTROL_OTHER_LABEL = "/__aimock/{other}";
+
+/**
+ * Sub-paths a mounted service (`createServer(..., mounts)`) answers below its
+ * mount root. The mount roots themselves are runtime configuration, so the
+ * caller passes them in; the JSON-RPC handlers (MCP, A2A, AG-UI, vector) take
+ * the root only, and A2A additionally serves its agent card.
+ */
+const MOUNT_SUBPATHS = new Set(["/.well-known/agent-card.json"]);
+
+/**
+ * Status label for a response that was destroyed before its body ended: no
+ * status line reached the client as a completed response, so no HTTP code
+ * describes the outcome truthfully. Distinct from every numeric status so
+ * `sum(aimock_requests_total)` equals requests served.
+ */
+export const DESTROYED_STATUS_LABEL = "destroyed";
 
 /**
  * Fine-tuning routes. Both id families (`ftjob-…` per create, `ftckpt-…` per
@@ -311,18 +471,43 @@ const FINE_TUNING_OTHER_LABEL = "/v1/fine_tuning/{other}";
 /**
  * Normalize parametric API paths to route patterns for use as metric labels.
  * Replaces dynamic segments (model IDs, deployment names, etc.) with placeholders.
+ * `mountPaths` are the roots of the mounted services, so their traffic keeps a
+ * bounded label instead of collapsing to `{unknown}`.
  */
-export function normalizePathLabel(pathname: string): string {
+export function normalizePathLabel(pathname: string, mountPaths: readonly string[] = []): string {
+  // Match server dispatch precedence: controls, mounts in registration order,
+  // then provider routes. A mount may overlap any provider namespace.
+  // Control API: exact sub-paths verbatim, anything else under the prefix
+  // collapses.
+  if (pathname.startsWith(CONTROL_PREFIX)) {
+    return CONTROL_PATHS.has(pathname) ? pathname : CONTROL_OTHER_LABEL;
+  }
+
+  // Mounted services: the root and the known sub-paths verbatim, anything
+  // deeper collapses under the mount.
+  for (const mountPath of mountPaths) {
+    if (pathname === mountPath) return pathname;
+    if (pathname.startsWith(mountPath + "/")) {
+      return MOUNT_SUBPATHS.has(pathname.slice(mountPath.length))
+        ? pathname
+        : `${mountPath}/{other}`;
+    }
+  }
+
   // Bedrock: /model/{modelId}/{operation}
   const bedrockMatch = pathname.match(BEDROCK_RE);
   if (bedrockMatch) {
     return `/model/{modelId}/${bedrockMatch[2]}`;
   }
 
-  // Gemini: /v1beta/models/{model}:{action}
+  // Gemini: /v1beta/models/{model}:{action}, plus the bare GET model lookup.
   const geminiMatch = pathname.match(GEMINI_RE);
   if (geminiMatch) {
-    return `/v1beta/models/{model}:${geminiMatch[2]}`;
+    const action = GEMINI_ACTIONS.has(geminiMatch[2]) ? geminiMatch[2] : "{action}";
+    return `/v1beta/models/{model}:${action}`;
+  }
+  if (GEMINI_MODEL_RE.test(pathname)) {
+    return "/v1beta/models/{model}";
   }
 
   // Azure: /openai/deployments/{id}/{operation}
@@ -334,7 +519,8 @@ export function normalizePathLabel(pathname: string): string {
   // Vertex AI: /v1/projects/{p}/locations/{l}/publishers/google/models/{m}:{action}
   const vertexMatch = pathname.match(VERTEX_RE);
   if (vertexMatch) {
-    return `/v1/projects/{p}/locations/{l}/publishers/google/models/{m}:${vertexMatch[4]}`;
+    const action = VERTEX_ACTIONS.has(vertexMatch[4]) ? vertexMatch[4] : "{action}";
+    return `/v1/projects/{p}/locations/{l}/publishers/google/models/{m}:${action}`;
   }
 
   // ElevenLabs TTS: /v1/text-to-speech/{voice_id}
@@ -398,6 +584,9 @@ export function normalizePathLabel(pathname: string): string {
   if (pathname !== "/v1/batches" && BATCHES_ID_RE.test(pathname)) {
     return "/v1/batches/{id}";
   }
+  if (pathname.startsWith(BATCHES_PREFIX)) {
+    return BATCHES_OTHER_LABEL;
+  }
 
   // Files API: /v1/files/{id} and /v1/files/{id}/content carry random
   // `file-…` ids — raw paths would mint unbounded label cardinality.
@@ -407,6 +596,32 @@ export function normalizePathLabel(pathname: string): string {
   }
   if (pathname !== "/v1/files" && FILES_ID_RE.test(pathname)) {
     return "/v1/files/{id}";
+  }
+  if (pathname.startsWith(FILES_PREFIX)) {
+    return FILES_OTHER_LABEL;
+  }
+
+  // fal.ai: see the namespace note above. Queue-request rules read before the
+  // path-mirror rule because `/fal/queue/requests/…` also matches the mirror
+  // RE's `.+/requests/` shape; both would label correctly, but the specific
+  // rule reading first keeps the cascade legible.
+  if (FAL_ROUTE_RE.test(pathname)) {
+    const queueRequest = pathname.match(FAL_QUEUE_REQUEST_RE);
+    if (queueRequest) {
+      return `/fal/queue/requests/{id}${falRequestSuffix(queueRequest[1])}`;
+    }
+    if (FAL_QUEUE_SUBMIT_RE.test(pathname)) return "/fal/queue/submit/{model}";
+    if (FAL_RUN_RE.test(pathname)) return "/fal/run/{model}";
+    const mirrorRequest = pathname.match(FAL_MIRROR_REQUEST_RE);
+    if (mirrorRequest) {
+      return `/fal/{model}/requests/{id}${falRequestSuffix(mirrorRequest[1])}`;
+    }
+    return FAL_OTHER_LABEL;
+  }
+
+  // ElevenLabs Music: known actions verbatim, anything else collapses.
+  if (pathname.startsWith(MUSIC_PREFIX)) {
+    return MUSIC_ACTIONS.has(pathname.slice(MUSIC_PREFIX.length)) ? pathname : MUSIC_OTHER_LABEL;
   }
 
   // Fine-tuning. Handled as one closed namespace rather than a few loose REs:
@@ -446,6 +661,14 @@ export function normalizePathLabel(pathname: string): string {
     return FINE_TUNING_OTHER_LABEL;
   }
 
-  // Static path — return as-is
-  return pathname;
+  // Static path — verbatim only if server.ts routes it. Anything else is, as
+  // far as metrics can tell, caller-controlled text, whatever status it got
+  // (404, a 204 preflight, a destroyed response); every routed id path that
+  // can legitimately 404 has already returned its placeholder label above.
+  return STATIC_ROUTE_PATHS.has(pathname) ? pathname : UNKNOWN_PATH_LABEL;
+}
+
+function falRequestSuffix(sub: string | undefined): string {
+  if (sub === undefined) return "";
+  return FAL_REQUEST_SUBRESOURCES.has(sub) ? `/${sub}` : "/{other}";
 }
