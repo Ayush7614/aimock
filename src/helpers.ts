@@ -475,6 +475,23 @@ export function resolveFixtureBlocks(blocks: FixtureFileBlock[]): FixtureBlock[]
   });
 }
 
+/** Project normalized ordered blocks without changing the fixture or generating ids. */
+export function resolveFixtureBlockOutcome(blocks: FixtureFileBlock[]) {
+  const ordered = resolveFixtureBlocks(blocks);
+  let content = "";
+  const toolCalls: ToolCall[] = [];
+  for (const block of ordered) {
+    if (block.type === "text") content += block.text;
+    else
+      toolCalls.push({
+        name: block.name,
+        arguments: block.arguments,
+        ...(block.id !== undefined ? { id: block.id } : {}),
+      });
+  }
+  return { ordered, content, toolCalls, hasToolCalls: toolCalls.length > 0 };
+}
+
 export function isErrorResponse(r: FixtureResponse): r is ErrorResponse {
   return (
     "error" in r &&
@@ -992,7 +1009,8 @@ export function buildContentWithToolCallsChunks(
     // their own buckets regardless of chunk order. We still emit honest
     // array-order chunks (the SSE chunk SEQUENCE is the contract this path
     // asserts), but we do NOT fake interleaving the channel cannot express.
-    const ordered = resolveFixtureBlocks(blocks);
+    const outcome = resolveFixtureBlockOutcome(blocks);
+    const ordered = outcome.ordered;
 
     // Reasoning chunks (emitted first, OpenRouter format) — unchanged from legacy.
     if (reasoning) {
@@ -1098,7 +1116,7 @@ export function buildContentWithToolCallsChunks(
       }
     }
 
-    // Finish chunk — preserved exactly as the legacy path.
+    // Derive the default terminal from the blocks actually emitted.
     chunks.push({
       id,
       object: "chat.completion.chunk",
@@ -1109,7 +1127,7 @@ export function buildContentWithToolCallsChunks(
           index: 0,
           delta: {},
           logprobs: null,
-          finish_reason: overrides?.finishReason ?? "tool_calls",
+          finish_reason: overrides?.finishReason ?? (outcome.hasToolCalls ? "tool_calls" : "stop"),
         },
       ],
       ...(fingerprint !== undefined && { system_fingerprint: fingerprint }),
