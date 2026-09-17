@@ -27,6 +27,8 @@ import type {
   FixtureFileBlock,
   ChatCompletion,
   ResponseOverrides,
+  RecordConfig,
+  RecordProviderKey,
 } from "./types.js";
 
 /**
@@ -53,6 +55,23 @@ export function resolveStrictMode(
     }
   }
   return serverDefault ?? false;
+}
+
+/**
+ * Would a fixture miss on this request have been forwarded upstream? This is
+ * the ONE rule behind the no-fixture chaos journal `source` label: "proxy"
+ * only when record mode has an upstream for THIS provider and strict mode is
+ * not refusing the miss first. `effectiveStrict` is the header-resolved value
+ * from {@link resolveStrictMode}. `record.providers` is read guarded — a JS
+ * caller can hand over `record: {}`.
+ */
+export function wouldProxyMiss(
+  effectiveStrict: boolean,
+  record: RecordConfig | undefined,
+  providerKey: RecordProviderKey | undefined,
+): boolean {
+  if (effectiveStrict || providerKey === undefined) return false;
+  return Boolean(record?.providers?.[providerKey]);
 }
 
 /**

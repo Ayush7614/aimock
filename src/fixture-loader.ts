@@ -21,6 +21,7 @@ import {
   isJSONResponse,
 } from "./helpers.js";
 import type { Logger } from "./logger.js";
+import { CHAOS_FIELDS, CHAOS_FIELD_NAMES, parseChaosField } from "./chaos.js";
 
 /**
  * Auto-stringify object-valued `content` and `toolCalls[].arguments` fields.
@@ -915,41 +916,27 @@ export function validateFixtures(fixtures: Fixture[]): ValidationResult[] {
       }
     }
     if (f.chaos !== undefined) {
-      const ch = f.chaos;
-      if (ch.dropRate !== undefined && (ch.dropRate < 0 || ch.dropRate > 1)) {
-        results.push({
-          severity: "error",
-          fixtureIndex: i,
-          message: "chaos.dropRate must be between 0 and 1",
-        });
-      }
-      if (ch.malformedRate !== undefined && (ch.malformedRate < 0 || ch.malformedRate > 1)) {
-        results.push({
-          severity: "error",
-          fixtureIndex: i,
-          message: "chaos.malformedRate must be between 0 and 1",
-        });
-      }
-      if (ch.disconnectRate !== undefined && (ch.disconnectRate < 0 || ch.disconnectRate > 1)) {
-        results.push({
-          severity: "error",
-          fixtureIndex: i,
-          message: "chaos.disconnectRate must be between 0 and 1",
-        });
-      }
-      if (ch.rateLimitRate !== undefined && (ch.rateLimitRate < 0 || ch.rateLimitRate > 1)) {
-        results.push({
-          severity: "error",
-          fixtureIndex: i,
-          message: "chaos.rateLimitRate must be between 0 and 1",
-        });
-      }
-      if (ch.latencyMs !== undefined && (ch.latencyMs < 0 || ch.latencyMs > 30000)) {
-        results.push({
-          severity: "error",
-          fixtureIndex: i,
-          message: "chaos.latencyMs must be between 0 and 30000",
-        });
+      // EVERY chaos field is routed through the ONE chaos table, so a fixture
+      // cannot accept a value the CLI, the header and the runtime reject. The
+      // hand-rolled `< 0 || > 1` checks this replaces let `NaN`, `-0` and a
+      // numeric string (`dropRate: "0.5"`) validate clean, and `latencyMs: 1.5`
+      // through; the runtime then rejected the fixture value on every request.
+      // A fixture is typed data, like the control API's JSON body: the field
+      // must be a number. A numeric STRING is a type error here, not a wire
+      // spelling to be parsed — the header API is the surface that takes text.
+      const ch = f.chaos as Record<string, unknown>;
+      for (const field of CHAOS_FIELD_NAMES) {
+        const value = ch[field];
+        if (value === undefined) continue;
+        const accepted = typeof value === "number" ? parseChaosField(field, value) : undefined;
+        if (accepted === undefined) {
+          const shape = CHAOS_FIELDS[field].integer ? "a whole number of ms" : "a number";
+          results.push({
+            severity: "error",
+            fixtureIndex: i,
+            message: `chaos.${field} must be ${shape} between 0 and ${CHAOS_FIELDS[field].max}`,
+          });
+        }
       }
     }
 

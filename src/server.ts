@@ -56,6 +56,7 @@ import {
   markMintedRequestId,
   resolveResponse,
   resolveStrictMode,
+  wouldProxyMiss,
   resolveReasoningForModel,
   strictOverrideField,
   strictNoMatchMessage,
@@ -1449,6 +1450,14 @@ async function handleCompletions(
     chaosConfig,
   );
   const chaosContext = { method, path, headers: flatHeaders, body };
+  // With no fixture, the response is aimock's own unless this request was
+  // going to be proxied — so the journal source is "internal", not "proxy",
+  // on the non-proxied path. A miss is only proxied when record mode has an
+  // upstream for THIS provider and strict is not refusing it first; the
+  // shared rule lives in `wouldProxyMiss` (also used by elevenlabs-voice.ts).
+  const effectiveStrict = resolveStrictMode(defaults.strict, req.headers);
+  const missWouldProxy = wouldProxyMiss(effectiveStrict, defaults.record, providerKey);
+  const noFixtureSource = missWouldProxy ? "proxy" : "internal";
 
   if (chaosAction === "drop" || chaosAction === "disconnect" || chaosAction === "rateLimit") {
     applyChaosAction(
@@ -1457,21 +1466,31 @@ async function handleCompletions(
       fixture,
       journal,
       chaosContext,
-      fixture ? "fixture" : "proxy",
+      fixture ? "fixture" : noFixtureSource,
       defaults.registry,
       defaults.logger,
     );
     return;
   }
 
-  if (fixture && chaosAction === "malformed") {
+  // `malformed` is applied here whenever there is no upstream response to
+  // mutate: a matched fixture, or a miss that would not be proxied (the 404
+  // and strict-503 paths). Only the proxied no-fixture case defers, to the
+  // `beforeWriteResponse` hook below — the same `wouldProxyMiss` rule as the
+  // source label above, so a strict-mode miss with an upstream configured is
+  // answered here rather than skipped for a 503 that never rolled. Before
+  // this, a rolled `malformed` on the no-fixture non-proxied path fell through
+  // to a plain 404 — never applied, journalled or counted. With no fixture,
+  // nothing here was ever proxied, so the source is aimock itself:
+  // `"internal"`, never `"proxy"`.
+  if (chaosAction === "malformed" && (fixture || !missWouldProxy)) {
     applyChaosAction(
       chaosAction,
       res,
       fixture,
       journal,
       chaosContext,
-      "fixture",
+      fixture ? "fixture" : "internal",
       defaults.registry,
       defaults.logger,
     );
@@ -1479,7 +1498,6 @@ async function handleCompletions(
   }
 
   if (!fixture) {
-    const effectiveStrict = resolveStrictMode(defaults.strict, req.headers);
     if (effectiveStrict) {
       const strictStatus = 503;
       const strictMessage = strictNoMatchMessage(skippedBySequenceOrTurn);
@@ -1618,7 +1636,22 @@ async function handleCompletions(
         });
         return;
       }
-      // outcome === "not_configured" — fall through to 404
+      // outcome === "not_configured" — nothing was written; fall through to
+      // 404, unless a rolled `malformed` is still owed to the client. Nothing
+      // was proxied, so the source is `"internal"`.
+      if (chaosAction === "malformed") {
+        applyChaosAction(
+          chaosAction,
+          res,
+          null,
+          journal,
+          chaosContext,
+          "internal",
+          defaults.registry,
+          defaults.logger,
+        );
+        return;
+      }
     }
 
     journal.add({
@@ -2122,25 +2155,21 @@ export async function createServerWithResolvedAuth(
     },
   };
 
-  // Validate chaos config rates
+  // Validate chaos defaults through the ONE chaos table, so what startup warns
+  // about is exactly what the runtime rejects (same fields, same bounds, same
+  // words). The hand-rolled range check this replaces said nothing for
+  // `latencyMs: 250.5`, which the runtime then rejected on every request.
   if (options?.chaos) {
-    const chaosRates = [
-      { name: "dropRate", value: options.chaos.dropRate },
-      { name: "malformedRate", value: options.chaos.malformedRate },
-      { name: "disconnectRate", value: options.chaos.disconnectRate },
-      { name: "rateLimitRate", value: options.chaos.rateLimitRate },
-    ];
-    for (const { name, value } of chaosRates) {
-      if (value !== undefined && (value < 0 || value > 1)) {
-        logger.warn(`Chaos ${name} (${value}) is outside 0-1 range — will be clamped at runtime`);
-      }
-    }
-    if (
-      options.chaos.latencyMs !== undefined &&
-      (options.chaos.latencyMs < 0 || options.chaos.latencyMs > 30000)
-    ) {
+    const chaosDefaults = options.chaos as Record<string, unknown>;
+    for (const field of CHAOS_FIELD_NAMES) {
+      const value = chaosDefaults[field];
+      if (value === undefined) continue;
+      // Typed config, like the control API's JSON body: a numeric string is a
+      // type error, not a wire spelling to be parsed.
+      if (typeof value === "number" && parseChaosField(field, value) !== undefined) continue;
+      const shape = CHAOS_FIELDS[field].integer ? "a whole number of ms" : "a number";
       logger.warn(
-        `Chaos latencyMs (${options.chaos.latencyMs}) is outside 0-30000 range — will be clamped at runtime`,
+        `Chaos default ${field} value ${JSON.stringify(value)} — must be ${shape} in [0,${CHAOS_FIELDS[field].max}]; rejected at runtime, never clamped: this default is ignored`,
       );
     }
   }
@@ -3920,7 +3949,7 @@ export async function createServerWithResolvedAuth(
                 method: req.method ?? "GET",
                 path: pathname,
                 headers: flattenHeaders(req.headers),
-                body: { model: "", messages: [] },
+                body: null,
               },
               "internal",
               defaults.registry,
@@ -4018,7 +4047,7 @@ export async function createServerWithResolvedAuth(
               method: req.method ?? "GET",
               path: pathname,
               headers: flattenHeaders(req.headers),
-              body: { model: "", messages: [] },
+              body: null,
             },
             "internal",
             defaults.registry,
