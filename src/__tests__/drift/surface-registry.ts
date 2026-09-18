@@ -139,6 +139,16 @@ export const SURFACE_REGISTRY: Record<string, SurfaceMapping> = {
     ],
     typesFile: null,
   },
+  "openai-live": {
+    provider: "OpenAI Live",
+    liveCoverage: "live",
+    coverageNote:
+      "Both delegation modes exercise the primary provider WebSocket and actual aimock replay. Shapes use reviewed raw-wire descriptors; the installed OpenAI SDK has no Live types. Missing OPENAI_API_KEY skips the live legs.",
+    builderFile: "src/ws-live.ts",
+    builderFunctions: ["handleLiveSession"],
+    typesFile: "src/live-types.ts",
+    sdkShapesFile: "src/__tests__/drift/live-scenarios.ts",
+  },
   "openai-realtime": {
     provider: "OpenAI Realtime",
     liveCoverage: "live",

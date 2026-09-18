@@ -114,7 +114,12 @@ export type {
 export type { ServiceFixtures } from "./server.js";
 
 // WebSocket
-export { WebSocketConnection, upgradeToWebSocket, computeAcceptKey } from "./ws-framing.js";
+export {
+  WebSocketConnection,
+  upgradeToWebSocket,
+  computeAcceptKey,
+  type WebSocketLimits,
+} from "./ws-framing.js";
 export { handleWebSocketResponses } from "./ws-responses.js";
 export { handleWebSocketRealtime } from "./ws-realtime.js";
 export { handleWebSocketGeminiLive } from "./ws-gemini-live.js";
@@ -180,6 +185,7 @@ export {
   buildToolCallCompletion,
   buildContentWithToolCallsCompletion,
   extractOverrides,
+  isLiveResponse,
   isTextResponse,
   isToolCallResponse,
   isContentWithToolCallsResponse,
@@ -455,3 +461,17 @@ export type {
   FixtureFileToolCallResponse,
   FixtureFileContentWithToolCallsResponse,
 } from "./types.js";
+
+// OpenAI Live
+export type {
+  LiveJson,
+  LiveObject,
+  LiveMode,
+  LivePosition,
+  LiveBinding,
+  LiveEntry,
+  LiveTranscript,
+  LiveFixtureResponse,
+  LiveOptions,
+  LiveFailureCategory,
+} from "./live-types.js";

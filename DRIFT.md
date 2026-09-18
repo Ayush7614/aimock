@@ -13,7 +13,7 @@ Drift detection compares three independent sources to triangulate the cause of a
 | Yes                   | Yes                | **No drift** — all clear                                             |
 | No                    | Yes                | **SDK drift** — provider deprecated something SDK still references   |
 
-Two-way comparison (mock vs real) can't distinguish between "we need to fix aimock" and "the SDK hasn't caught up yet." Three-way comparison can.
+Two-way comparison (mock vs real) can't distinguish between "we need to fix aimock" and "the SDK hasn't caught up yet." Three-way comparison can. OpenAI Live is an explicit exception: its installed SDK has no Live types, so its canary compares supported invariants against frozen provider descriptors and real traffic.
 
 ## Running Drift Tests
 
@@ -27,7 +27,7 @@ OPENAI_API_KEY=sk-... pnpm test:drift
 
 Environment variables the drift legs read (each one gates only the legs listed; an unset variable skips those legs — reported as skipped, never as a failure):
 
-- `OPENAI_API_KEY` — OpenAI Chat Completions, Responses, Embeddings, Transcription, Realtime WS and Responses WS legs, plus the OpenAI model check in `models.drift.ts`
+- `OPENAI_API_KEY` — OpenAI Chat Completions, Responses, Embeddings, Transcription, Realtime WS, Responses WS and OpenAI Live WS legs, plus the OpenAI model check in `models.drift.ts`
 - `OPENAI_REALTIME_KEY` — optional; used instead of `OPENAI_API_KEY` for the Realtime WS session probes only
 - `ANTHROPIC_API_KEY` — Anthropic Claude Messages legs and capability canaries, plus the Anthropic model check
 - `GOOGLE_API_KEY` — Google Gemini, Gemini Embeddings canary, Gemini Interactions and Gemini Live WS legs, plus the Gemini model check
@@ -51,7 +51,7 @@ Every surface in `src/__tests__/drift/surface-registry.ts` declares `liveCoverag
 - **`"live"`** — at least one `*.drift.ts` leg issues a request to the real vendor (directly, or through `providers.ts` / `ws-providers.ts`). A vendor-side change turns that leg red. This is drift detection.
 - **`"none"`** — every emitting leg only drives the LOCAL aimock server and grades its output against a hand-written SDK-shape fixture in this repo. That catches an aimock builder regression; it can **not** catch the vendor changing its wire format. This is offline conformance, not drift detection, and the surface must say why in `coverageNote`.
 
-`drift-report.json` carries an **`unverifiedSurfaces`** array on every run listing the `"none"` surfaces, and the collector prints them. It is written even when empty, so a missing field means "an old report", never "everything was verified". Read a clean run as _"no drift on the surfaces that were actually checked"_ — the `unverifiedSurfaces` list is the rest.
+`drift-report.json` carries an **`unverifiedSurfaces`** array on every run listing the `"none"` surfaces, and the collector prints them. For OpenAI Live, it also includes runtime coverage: missing, skipped, failed or incomplete lifecycle cases leave the surface unverified. Both client and managed lifecycle cases must pass, with no other failed or skipped Live assertions, to remove it from this list. It is written even when empty, so a missing field means "an old report", never "everything was verified". Read a clean run as _"no drift on the surfaces that were actually checked"_ — the `unverifiedSurfaces` list is the rest.
 
 This exists because an omitted declaration used to read as coverage. Four Bedrock surfaces and Vertex AI sat behind `describe.skipIf(!AWS_ACCESS_KEY_ID …)` / `describe.skipIf(!GOOGLE_APPLICATION_CREDENTIALS …)` gates on bodies that make no vendor call at all, and no drift workflow sets those variables — so the cases had never executed while the four surfaces reported as covered and green. The gates are gone (those cases now run unconditionally as offline conformance, and two of them failed the first time they were allowed to run), and `drift-collector.test.ts` re-derives live-capability from the emitting sources, so a `liveCoverage` claim that contradicts the code fails CI in both directions.
 
@@ -118,7 +118,7 @@ When a `critical` drift is detected:
 
 ## Additional Drift Coverage
 
-`surface-registry.ts` declares 28 surfaces: 18 `liveCoverage: "live"` and 10 `"none"`. Beyond the per-provider chat/completion cases, these endpoints are covered too:
+`surface-registry.ts` declares 29 surfaces: 19 `liveCoverage: "live"` and 10 `"none"`. Beyond the per-provider chat/completion cases, these endpoints are covered too:
 
 ### Additional Endpoint Drift Coverage
 
@@ -183,10 +183,7 @@ which moves these rows to `Offline⁴`; a funded key is what would move the whol
 `openrouter-chat.drift.ts`, a mock-only OpenRouter case, not an OpenAI one. All of these are pinned
 by the unit suite only.
 
-WebSocket drift tests cover aimock's WS protocols with 11 `it(` blocks across the three
-`ws-*.drift.ts` files: 6 live three-way comparisons (Responses WS text + tool call, Realtime GA
-text + tool call, Gemini Live audio + tool call), 1 live model canary (Realtime) and 4 offline unit
-cases (Gemini Live model resolution). See the table under "WebSocket Protocols" below.
+WebSocket drift tests cover four protocol files: 6 live three-way comparisons (Responses WS text + tool call, Realtime GA text + tool call, Gemini Live audio + tool call), 2 OpenAI Live lifecycle cases, 1 live model canary (Realtime) and 4 offline unit cases (Gemini Live model resolution). OpenAI Live uses frozen provider descriptors rather than SDK types. See the table under "WebSocket Protocols" below.
 
 ### Gemini Interactions API (Beta)
 
@@ -204,6 +201,7 @@ Uses `describe.skipIf(!GOOGLE_API_KEY)` like other Gemini tests. The Interaction
 
 | Protocol               | Text        | Tool Call | Real Endpoint                                                       | Status    |
 | ---------------------- | ----------- | --------- | ------------------------------------------------------------------- | --------- |
+| OpenAI Live            | Transcripts | Managed ✓ | `wss://api.openai.com/v1/live/sessions`                             | Verified  |
 | OpenAI Responses WS    | ✓           | ✓         | `wss://api.openai.com/v1/responses`                                 | Verified  |
 | OpenAI Realtime (GA)   | ✓           | ✓         | `wss://api.openai.com/v1/realtime`                                  | Verified  |
 | OpenAI Realtime (Beta) | —           | —         | `wss://api.openai.com/v1/realtime` + `OpenAI-Beta: realtime=v1`     | Excluded¹ |
@@ -219,7 +217,7 @@ answers the Beta shape — with that same sunset rejection, not a handshake — 
 [deprecation policy](https://aimock.copilotkit.dev/deprecation-policy/); it is pinned by
 `ws-realtime.test.ts` and `ws-api-conformance.test.ts`, not by drift.
 
-**Models**: `gpt-4o-mini` for Responses WS, `gpt-realtime-mini` for Realtime GA.
+**Models**: `gpt-4o-mini` for Responses WS, `gpt-realtime-mini` for Realtime GA, `gpt-live-1` for OpenAI Live.
 
 **GA Realtime Drift Tests**:
 
@@ -229,7 +227,42 @@ answers the Beta shape — with that same sunset rejection, not a handshake — 
 
 **Auth**: Uses the same `OPENAI_API_KEY` and `GOOGLE_API_KEY` environment variables as HTTP tests. No new secrets needed.
 
-**How it works**: A TLS WebSocket client (`ws-providers.ts`) connects to real provider endpoints using `node:tls` with RFC 6455 framing. Each protocol function handles the setup sequence (e.g., Realtime session negotiation, Gemini Live setup/setupComplete) and collects messages until a terminal event. The mock side uses the existing `ws-test-client.ts` plaintext client against the local aimock server.
+**How it works**: Responses WS, Realtime and Gemini Live use a TLS WebSocket client (`ws-providers.ts`) that connects to real provider endpoints using `node:tls` with RFC 6455 framing. Each protocol function handles the setup sequence (e.g., Realtime session negotiation, Gemini Live setup/setupComplete) and collects messages until a terminal event. The mock side uses the existing `ws-test-client.ts` plaintext client against the local aimock server.
+
+### OpenAI Live: client and managed delegation
+
+`ws-live.drift.ts` runs two cases against `gpt-live-1`: `client lifecycle` and `managed lifecycle`. Each connects to the primary `wss://api.openai.com/v1/live/sessions` endpoint through the raw TLS WebSocket connector. Each also replays a reviewed capture through a real local aimock WebSocket. The installed OpenAI 4.x SDK has no Live types.
+
+Supply `OPENAI_API_KEY` through your environment, then run only these cases:
+
+```bash
+pnpm run test:drift src/__tests__/drift/ws-live.drift.ts --maxWorkers=1 --minWorkers=1
+
+# Check the missing-key result without contacting the provider: two skipped cases.
+env -u OPENAI_API_KEY pnpm run test:drift src/__tests__/drift/ws-live.drift.ts --maxWorkers=1 --minWorkers=1
+```
+
+Each run opens at most two provider connections, one per mode, without automatic retries. Each attempt has a 45-second deadline, including a 15-second upgrade deadline. Input is at most 10 seconds of owned PCM (480,000 bytes). The combined client/server capture is limited to 8 MiB and 5,000 events. Each attempt aborts and destroys its socket on exit. A provider error or HTTP 401, 403 or 429 prevents the next mode from opening another connection.
+
+The cases check required event shapes, session model/mode/identity, successful closure, audio output, input/output transcripts, cumulative usage and delegation after input. Client mode checks thinking and commentary. Managed mode checks two named tool calls, both results before explicit `response.create`, and continuation linked to the original backend response. They compare these supported invariants, not exact wording, latency or audio chunk counts. Unknown extra top-level server events remain diagnostic observations rather than critical drift.
+
+Provenance comes from the reviewed [frozen contract](src/__tests__/fixtures/live/contract.json), [client capture](src/__tests__/fixtures/live/client.json) and [managed capture](src/__tests__/fixtures/live/managed.json). The [scenario helper](src/__tests__/drift/live-scenarios.ts) exposes their provider-reference descriptors. These are observed/reference contracts, not SDK verification. The registry routes `openai-live` findings to `src/ws-live.ts` and `handleLiveSession`.
+
+Read run status before interpreting coverage:
+
+- **Missing key:** two skips; OpenAI Live stays in `unverifiedSurfaces`. A successful test-process exit does not establish compatibility.
+- **Both modes pass:** actual provider and local replay invariants passed. A filtered single-mode run or a partially skipped run does not establish full coverage.
+- **Access, authentication or quota refusal:** a failed, unverified run. The collector retains the diagnostic under OpenAI Live in quarantine (exit **5**), including the subsequent refusal-latched case. It is neither a skip nor protocol drift.
+- **Supported invariant failure:** a trusted critical finding uses exit **2**.
+- **Timeout with zero observed messages:** no protocol evidence was collected; the collector uses exit **6** when no higher-priority condition applies. Other inconclusive failures remain quarantined.
+
+These are collector exit codes, not Vitest exit codes. Mixed collector results keep the existing precedence: critical (**2**), quarantine (**5**), AG-UI unavailable (**1**), zero-message timeout (**6**), then clean (**0**). Coverage metadata does not introduce an exit code. A refusal remains in the report even when a separate critical finding determines exit 2.
+
+The canary logs elapsed milliseconds, server-event count, input bytes and the last reported usage. Missing usage means unknown, not zero. Live session billing and backend model/tool billing are separate; elapsed time is not an invoice. Budget for up to two 45-second provider attempts per invocation. Review a failed attempt before rerunning it.
+
+This canary does not test mutable backend updates, acoustic playback or interruption quality. It does not prove speaker output stopped. Local aimock replays captured audio; it does not synthesize speech. POST SDP, WebRTC, sideband connections, fork/download and cancellation are outside this surface. See the [WebSocket guide](docs/websocket/index.html#openai-live) for mock and replay setup.
+
+`gpt-live-1` remains a known voice family excluded from text-only model probes. That text exclusion does not disable this dedicated Live canary. `gpt-live-1-mini` remains unclassified and can still trigger new-family detection.
 
 ### Gemini Live: graded on the AUDIO modality
 
@@ -287,4 +320,6 @@ family does not, by itself, fail the drift tests):
 
 ## Cost
 
-A live collector run exercises every `liveCoverage: "live"` surface in `src/__tests__/drift/surface-registry.ts` (18 of the 28 registered surfaces at the time of writing; the other 10 are mock-only conformance checks that make no vendor call), using the cheapest available models (`gpt-4o-mini`, `gpt-realtime-mini`, `claude-haiku-4-5-20251001`, `gemini-2.5-flash`) with 10-100 max tokens each. Per day that is two scheduled live runs (`test-drift.yml`'s `drift` job and `fix-drift.yml`'s re-collect gate) plus one or two per push on a drift-code PR. The Realtime probe opens two GA WS connections per run (one text turn, one tool call) and no Beta connection (the Beta shape is retired upstream). The 2 Gemini Live legs each open a real WS session and generate a short audio turn.
+A live collector run exercises the enabled `liveCoverage: "live"` surfaces in `src/__tests__/drift/surface-registry.ts` (19 of the 29 registered surfaces at the time of writing; the other 10 are mock-only conformance checks that make no vendor call), using low-cost models for the text legs (`gpt-4o-mini`, `gpt-realtime-mini`, `claude-haiku-4-5-20251001`, `gemini-2.5-flash`) with 10-100 max tokens each. Per day that is two scheduled live runs (`test-drift.yml`'s `drift` job and `fix-drift.yml`'s re-collect gate) plus one or two per push on a drift-code PR. The Realtime probe opens two GA WS connections per run (one text turn, one tool call) and no Beta connection (the Beta shape is retired upstream). The 2 Gemini Live legs each open a real WS session and generate a short audio turn.
+
+The OpenAI Live canary adds up to two `gpt-live-1` sessions per run, with owned audio and backend delegation. Its finite limits and usage reporting are described above; the text-token estimates do not apply to these sessions.

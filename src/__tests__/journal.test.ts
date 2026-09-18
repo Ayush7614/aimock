@@ -169,6 +169,30 @@ describe("Journal", () => {
   });
 
   describe("findByFixture", () => {
+    it("associates safe diagnostics before onAdd without exposing the original fixture", () => {
+      const fixture: Fixture = {
+        match: { userMessage: "private-marker" },
+        response: { content: "private-marker" },
+      };
+      let observed: JournalEntry | undefined;
+      const journal = new Journal({
+        maxEntries: 1,
+        onAdd(entry) {
+          observed = entry;
+          expect(journal.findByFixture(fixture)).toContain(entry);
+          expect(JSON.stringify(entry)).not.toContain("private-marker");
+        },
+      });
+      const safe = makeEntry();
+      const entry = journal.add(safe, fixture);
+      expect(observed).toBe(entry);
+      expect(journal.findByFixture(fixture)).toEqual([entry]);
+      const next = journal.add(safe, fixture);
+      expect(journal.findByFixture(fixture)).toEqual([next]);
+      journal.clear();
+      expect(journal.findByFixture(fixture)).toEqual([]);
+    });
+
     it("returns entries matching the given fixture reference", () => {
       const journal = new Journal();
       const fixtureA: Fixture = { match: { userMessage: "a" }, response: { content: "A" } };

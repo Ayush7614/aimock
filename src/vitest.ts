@@ -11,9 +11,10 @@
  *   });
  */
 
-import { beforeAll, afterAll, beforeEach } from "vitest";
+import { beforeAll, afterAll, beforeEach, afterEach } from "vitest";
 import { LLMock } from "./llmock.js";
 import { loadFixtureFile, loadFixturesFromDir } from "./fixture-loader.js";
+import type { LiveOptions } from "./live-types.js";
 import type { Fixture, MockServerOptions } from "./types.js";
 import { statSync } from "node:fs";
 import { resolve } from "node:path";
@@ -36,7 +37,8 @@ export interface AimockHandle {
  * Start an aimock server for the duration of the test suite.
  *
  * - `beforeAll`: starts the server and optionally loads fixtures
- * - `beforeEach`: resets fixture match counts (not fixtures themselves)
+ * - `beforeEach`: closes Live sessions and resets fixture match counts (not fixtures)
+ * - `afterEach`: closes Live sessions owned by this helper's server
  * - `afterAll`: stops the server
  *
  * Returns a getter function — call it inside tests to access the handle.
@@ -52,7 +54,7 @@ export function useAimock(options: UseAimockOptions = {}): () => AimockHandle {
 
     if (fixturePath) {
       const resolved = resolve(fixturePath);
-      const loadedFixtures = loadFixtures(resolved);
+      const loadedFixtures = loadFixtures(resolved, options.live);
       for (const f of loadedFixtures) {
         llm.addFixture(f);
       }
@@ -72,8 +74,13 @@ export function useAimock(options: UseAimockOptions = {}): () => AimockHandle {
 
   beforeEach(() => {
     if (handle) {
+      handle.llm.closeLiveSessions();
       handle.llm.resetMatchCounts();
     }
+  });
+
+  afterEach(() => {
+    handle?.llm.closeLiveSessions();
   });
 
   afterAll(async () => {
@@ -97,13 +104,13 @@ export function useAimock(options: UseAimockOptions = {}): () => AimockHandle {
   };
 }
 
-function loadFixtures(fixturePath: string): Fixture[] {
+function loadFixtures(fixturePath: string, liveOptions?: LiveOptions): Fixture[] {
   try {
     const stat = statSync(fixturePath);
     if (stat.isDirectory()) {
-      return loadFixturesFromDir(fixturePath);
+      return loadFixturesFromDir(fixturePath, undefined, liveOptions);
     }
-    return loadFixtureFile(fixturePath);
+    return loadFixtureFile(fixturePath, undefined, liveOptions);
   } catch (err) {
     console.warn(
       `[aimock] Failed to load fixtures from ${fixturePath}: ${err instanceof Error ? err.message : String(err)}`,

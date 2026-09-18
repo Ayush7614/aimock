@@ -2,6 +2,7 @@ import { claimOneShotError, isOneShotError } from "./fixture-loader.js";
 import type { ChatCompletionRequest, ChatMessage, ContentPart, Fixture } from "./types.js";
 import {
   describeMatch,
+  isLiveResponse,
   isImageResponse,
   isAudioResponse,
   isTranscriptionResponse,
@@ -315,6 +316,19 @@ export function matchFixtureDiagnostic(
     //    whose response type is incompatible (prevents generic chat fixtures
     //    from matching image/speech/video requests and causing 500s)
     const reqEndpoint = effective._endpointType as string | undefined;
+    const response = fixture.response;
+    const liveResponse = isLiveResponse(response);
+    if (reqEndpoint === "openai-live") {
+      if (
+        match.endpoint !== "openai-live" ||
+        effective.model !== "gpt-live-1" ||
+        (typeof response !== "function" &&
+          (!liveResponse || effective.model !== response.live.model))
+      )
+        continue;
+    } else if (liveResponse) {
+      continue;
+    }
     if (match.endpoint !== undefined) {
       if (match.endpoint !== reqEndpoint) continue;
       // A declared endpoint used to END the shape discussion — the router

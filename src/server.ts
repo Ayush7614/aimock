@@ -161,6 +161,8 @@ import {
   clearFineTuningStore,
 } from "./fine-tuning.js";
 import { upgradeToWebSocket, type WebSocketConnection } from "./ws-framing.js";
+import { handleLiveSession } from "./ws-live.js";
+import { normalizeLiveOptions } from "./live-fixture.js";
 import { handleWebSocketResponses } from "./ws-responses.js";
 import { handleWebSocketRealtime } from "./ws-realtime.js";
 import { handleWebSocketGeminiLive } from "./ws-gemini-live.js";
@@ -204,7 +206,10 @@ import {
   type ResolvedInboundAuth,
 } from "./api-key-auth.js";
 
+const liveClosers = new WeakMap<HandlerDefaults, (testId?: string) => void>();
+
 export interface ServerInstance {
+  closeLiveSessions(testId?: string): void;
   server: http.Server;
   journal: Journal;
   url: string;
@@ -218,6 +223,7 @@ export interface ServerInstance {
 
 const COMPLETIONS_PATH = "/v1/chat/completions";
 const RESPONSES_PATH = "/v1/responses";
+const LIVE_PATH = "/v1/live/sessions";
 const REALTIME_PATH = "/v1/realtime";
 const GEMINI_LIVE_PATH =
   "/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent";
@@ -435,6 +441,7 @@ export function performFullReset(fixtures: Fixture[], targets: FullResetTargets 
   resetInteractionCounter();
   resetEventIdCounter();
   if (!targets) return;
+  liveClosers.get(targets.defaults)?.();
   targets.journal.clear();
   // Chaos warning latches are per-server state too: a suite that resets between
   // tests must see a bad static chaos value reported again, not inherit the
@@ -4124,6 +4131,14 @@ export async function createServerWithResolvedAuth(
   // ─── WebSocket upgrade handling ──────────────────────────────────────────
 
   const activeConnections = new Set<WebSocketConnection>();
+  const liveLimits = normalizeLiveOptions(options?.live);
+  const liveSessions = new Map<symbol, { testId: string; dispose: () => void }>();
+  const closeLiveSessions = (testId?: string) => {
+    for (const session of [...liveSessions.values()]) {
+      if (testId === undefined || session.testId === testId) session.dispose();
+    }
+  };
+  liveClosers.set(defaults, closeLiveSessions);
 
   server.on(
     "upgrade",
@@ -4235,11 +4250,33 @@ export async function createServerWithResolvedAuth(
     if (
       pathname !== RESPONSES_PATH &&
       pathname !== REALTIME_PATH &&
-      pathname !== GEMINI_LIVE_PATH
+      pathname !== GEMINI_LIVE_PATH &&
+      pathname !== LIVE_PATH
     ) {
       socket.write("HTTP/1.1 404 Not Found\r\n\r\n");
       socket.destroy();
       return;
+    }
+
+    let liveId: symbol | undefined;
+    if (pathname === LIVE_PATH) {
+      if (req.method !== "GET" || parsedUrl.searchParams.has("model")) {
+        socket.end("HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n");
+        return;
+      }
+      if (liveSessions.size >= liveLimits.maxSessions) {
+        socket.end("HTTP/1.1 429 Too Many Requests\r\nConnection: close\r\n\r\n");
+        return;
+      }
+      liveId = Symbol("live-session");
+      const reservedId = liveId;
+      liveSessions.set(reservedId, {
+        testId: getTestId(req),
+        dispose: () => {
+          socket.destroy();
+          liveSessions.delete(reservedId);
+        },
+      });
     }
 
     // Push any buffered data back before upgrading
@@ -4249,9 +4286,10 @@ export async function createServerWithResolvedAuth(
 
     let ws: WebSocketConnection;
     try {
-      ws = upgradeToWebSocket(req, socket);
+      ws = upgradeToWebSocket(req, socket, pathname === LIVE_PATH ? liveLimits : undefined);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : "WebSocket upgrade failed";
+      if (liveId !== undefined) liveSessions.delete(liveId);
       logger.error(`WebSocket upgrade error: ${msg}`);
       if (!socket.destroyed) socket.destroy();
       return;
@@ -4270,7 +4308,21 @@ export async function createServerWithResolvedAuth(
 
     // Route to handler
     const wsTestId = getTestId(req);
-    if (pathname === RESPONSES_PATH) {
+    if (pathname === LIVE_PATH && liveId !== undefined) {
+      const sessionId = liveId;
+      const dispose = handleLiveSession(ws, fixtures, journal, {
+        defaults,
+        limits: liveLimits,
+        localApiKeys: resolvedAuth.publicConfig?.apiKeys,
+        testId: wsTestId,
+        headers: req.headers,
+        onDispose: () => {
+          liveSessions.delete(sessionId);
+          activeConnections.delete(ws);
+        },
+      });
+      liveSessions.set(sessionId, { testId: wsTestId, dispose });
+    } else if (pathname === RESPONSES_PATH) {
       handleWebSocketResponses(ws, fixtures, journal, {
         ...defaults,
         model: "gpt-4",
@@ -4302,6 +4354,7 @@ export async function createServerWithResolvedAuth(
   // Close active WS connections when server shuts down
   const originalClose = server.close.bind(server);
   server.close = function (this: http.Server, callback?: (err?: Error) => void) {
+    closeLiveSessions();
     for (const ws of activeConnections) {
       ws.close(1001, "Server shutting down");
     }
@@ -4333,6 +4386,7 @@ export async function createServerWithResolvedAuth(
       }
 
       resolve({
+        closeLiveSessions,
         server,
         journal,
         url,
