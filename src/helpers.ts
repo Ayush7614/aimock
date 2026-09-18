@@ -1028,7 +1028,15 @@ export function buildContentWithToolCallsChunks(
           created,
           model: effectiveModel,
           choices: [
-            { index: 0, delta: { reasoning_content: slice }, logprobs: null, finish_reason: null },
+            {
+              index: 0,
+              delta: {
+                ...(i === 0 && { role: overrides?.role ?? "assistant" }),
+                reasoning_content: slice,
+              },
+              logprobs: null,
+              finish_reason: null,
+            },
           ],
           ...(fingerprint !== undefined && { system_fingerprint: fingerprint }),
         });
@@ -1153,7 +1161,15 @@ export function buildContentWithToolCallsChunks(
         created,
         model: effectiveModel,
         choices: [
-          { index: 0, delta: { reasoning_content: slice }, logprobs: null, finish_reason: null },
+          {
+            index: 0,
+            delta: {
+              ...(i === 0 && { role: overrides?.role ?? "assistant" }),
+              reasoning_content: slice,
+            },
+            logprobs: null,
+            finish_reason: null,
+          },
         ],
         ...(fingerprint !== undefined && { system_fingerprint: fingerprint }),
       });
