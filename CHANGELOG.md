@@ -35,6 +35,7 @@
 
 ### Fixed
 
+- Reasoning-first OpenAI chat streams that combine content and tool calls now include the configured role (default `assistant`) in the first reasoning chunk, for both legacy and block fixtures. This lets LangChain recognize the assistant message and preserves tool calls for LangGraph TypeScript MCP rendering (#470)
 - Journals and metrics now reflect delivered and interrupted responses, preserve request identity across concurrent calls, and keep route labels bounded. One-shot errors are reserved before asynchronous processing and returned to the queue when unserved, preventing duplicate delivery (#466)
 - Nonstreaming OpenAI chat returns authored block text and tools. Across OpenAI, Claude, Gemini, Gemini Interactions, Cohere and Bedrock, text-only blocks now finish normally instead of reporting a tool-call terminal; tool-containing blocks retain their tool outcome (#467)
 - AG-UI drift checks read the generated AG-UI 1.0 schemas as well as the legacy layout, and unavailable or malformed comparisons no longer pass silently. BASE and HEAD use the same pinned canonical sources while retaining their own product types. `AGUIRunStartedEvent` now includes optional `protocolVersion?: string` (#469)
