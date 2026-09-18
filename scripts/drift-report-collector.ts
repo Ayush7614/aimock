@@ -444,6 +444,7 @@ const WS_HANDSHAKE_PROBES: readonly {
   surface: keyof typeof SURFACE_REGISTRY;
 }[] = [
   { file: "ws-realtime.drift.ts", surface: "openai-realtime" },
+  { file: "ws-live.drift.ts", surface: "openai-live" },
   { file: "ws-gemini-live.drift.ts", surface: "gemini-live" },
   { file: "ws-responses.drift.ts", surface: "openai-responses-ws" },
 ];
@@ -1189,7 +1190,7 @@ export function collectDriftEntries(results: VitestJsonResult): CollectResult {
             builderFile: mapping.builderFile,
             builderFunctions: mapping.builderFunctions,
             typesFile: mapping.typesFile ?? null,
-            sdkShapesFile: SDK_SHAPES_FILE,
+            sdkShapesFile: mapping.sdkShapesFile ?? SDK_SHAPES_FILE,
             diffs: [
               {
                 severity: "critical" as const,
@@ -1250,7 +1251,7 @@ export function collectDriftEntries(results: VitestJsonResult): CollectResult {
               builderFile: mapping.builderFile,
               builderFunctions: mapping.builderFunctions,
               typesFile: mapping.typesFile ?? null,
-              sdkShapesFile: SDK_SHAPES_FILE,
+              sdkShapesFile: mapping.sdkShapesFile ?? SDK_SHAPES_FILE,
               diffs: [
                 {
                   severity: "critical" as const,
@@ -1291,6 +1292,19 @@ export function collectDriftEntries(results: VitestJsonResult): CollectResult {
             testName: `${assertion.ancestorTitles.join(" ")} > ${assertion.title}`,
             rawLocation: extractRawLocation(fullMessage),
             timeoutMs: liveTimeout.timeoutMs,
+            message: fullMessage,
+          });
+          continue;
+        }
+
+        // Live refusals, access failures and inconclusive probes are visible
+        // failures, never compatibility findings or benign skipped infra. Keep
+        // them here even when a sibling already produced a trusted drift entry.
+        if (resolveWSSurface(fullMessage, testName) === "openai-live") {
+          quarantine.push({
+            provider: SURFACE_REGISTRY["openai-live"].provider,
+            testName,
+            rawLocation: extractRawLocation(fullMessage),
             message: fullMessage,
           });
           continue;
@@ -1883,15 +1897,15 @@ export function conclusionForExitCode(exitCode: 0 | 1 | 2 | 5 | 6): string {
 /**
  * Every registry surface that NO live provider leg grades.
  *
- * Read straight off `SURFACE_REGISTRY`, not off the run: whether a surface has
+ * The source-only view reads `SURFACE_REGISTRY`: whether a surface has
  * a live leg is a property of the SOURCE, not of what happened to execute, so
  * this is the same answer on a credential-less run as on a fully-keyed one —
  * which is exactly the point. A surface with no live leg is never "verified and
  * clean", it is "not looked at", and the report now says so out loud instead of
  * letting its absence from `entries` read as a pass.
  */
-export function collectUnverifiedSurfaces(): UnverifiedSurface[] {
-  return Object.entries(SURFACE_REGISTRY)
+export function collectUnverifiedSurfaces(results?: VitestJsonResult): UnverifiedSurface[] {
+  const surfaces = Object.entries(SURFACE_REGISTRY)
     .filter(([, mapping]) => mapping.liveCoverage === "none")
     .map(([surface, mapping]) => ({
       surface,
@@ -1901,6 +1915,37 @@ export function collectUnverifiedSurfaces(): UnverifiedSurface[] {
       note: mapping.coverageNote as string,
     }))
     .sort((a, b) => a.surface.localeCompare(b.surface));
+
+  // Source capability is not runtime coverage. The Live provider suite has
+  // separate client/managed assertions; every selected assertion must pass.
+  // Keep the no-argument form for source-only callers that have no run report.
+  if (results) {
+    const assertions = results.testResults
+      .flatMap((file) => file.assertionResults)
+      .filter(
+        (assertion) =>
+          resolveWSProbeSurfaceByName(assertion.ancestorTitles.join(" ")) === "openai-live",
+      );
+    const passed = assertions.filter((a) => a.status === "passed").length;
+    const bothModesPassed = ["client lifecycle", "managed lifecycle"].every((title) =>
+      assertions.some((a) => a.title === title && a.status === "passed"),
+    );
+    if (!bothModesPassed || passed !== assertions.length) {
+      const failed = assertions.filter((a) => a.status === "failed").length;
+      const skipped = assertions.filter((a) =>
+        ["pending", "skipped", "todo", "disabled"].includes(a.status),
+      ).length;
+      surfaces.push({
+        surface: "openai-live",
+        provider: SURFACE_REGISTRY["openai-live"].provider,
+        note:
+          assertions.length === 0
+            ? "No Live assertions executed in this run. Live compatibility was not verified."
+            : `This run: ${passed} passed, ${failed} failed, ${skipped} skipped, ${assertions.length - passed - failed - skipped} other Live assertions. Live compatibility was not fully verified.`,
+      });
+    }
+  }
+  return surfaces.sort((a, b) => a.surface.localeCompare(b.surface));
 }
 
 function main(): void {
@@ -1947,7 +1992,7 @@ function main(): void {
   // `conclusion` derived from it (base-report reuse contract).
   const exitCode = computeExitCode(criticalCount, quarantineCount, agUiSkipped, timeoutCount);
 
-  const unverifiedSurfaces = collectUnverifiedSurfaces();
+  const unverifiedSurfaces = collectUnverifiedSurfaces(httpResults);
 
   const timestamp = new Date().toISOString();
   const report: DriftReport = {
