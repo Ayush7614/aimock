@@ -176,9 +176,9 @@
               <td>endpoint</td>
               <td>string</td>
               <td>
-                Restrict to endpoint type: chat, image, speech, transcription, video, embedding.
-                Search, rerank, and moderation services (added in 1.7.0) are registered through
-                their own fixture APIs rather than via this field
+                Restrict to endpoint type: chat, image, speech, transcription, video, embedding,
+                openai-live. Search, rerank, and moderation services (added in 1.7.0) are registered
+                through their own fixture APIs rather than via this field
               </td>
             </tr>
             <tr>
@@ -374,6 +374,13 @@
               <td>Transcribed text with optional timestamps</td>
             </tr>
             <tr>
+              <td>Live</td>
+              <td>live, liveTiming?</td>
+              <td>
+                A versioned bidirectional transcript. See <a href="#live">GPT-Live transcripts</a>.
+              </td>
+            </tr>
+            <tr>
               <td>Video</td>
               <td>video.id, video.status, video.url?, video.error?, video.b64?, video.cost?</td>
               <td>
@@ -394,6 +401,152 @@
             <code>systemFingerprint</code>, <code>created</code>).
           </p>
         </div>
+
+        <h2 id="live">GPT-Live transcripts</h2>
+        <p>
+          A Live fixture uses <code>match.endpoint: "openai-live"</code> and
+          <code>response: { live: transcript, liveTiming: "immediate" }</code>. It describes a
+          complete conversation on <code>GET /v1/live/sessions</code>. The
+          <a href="/websocket#openai-live">WebSocket guide</a> explains the connection and session
+          commands.
+        </p>
+        <div class="code-block">
+          <div class="code-block-header">live-fixture.ts <span class="lang-tag">ts</span></div>
+          <pre><code>import { readFileSync } from "node:fs";
+import { LLMock, type LiveTranscript } from "@copilotkit/aimock";
+
+// Run from the aimock repository. Choose one mode per server.
+const path = "./fixtures/openai-live-client.json";
+const mock = new LLMock();
+mock.loadFixtureFile(path);
+await mock.start();
+// Connect your application to mock.url at /v1/live/sessions.
+// After the conversation, close its socket and await mock.stop().
+
+// Alternative registration on a separate server:
+const document = JSON.parse(readFileSync(path, "utf8"));
+const transcript: LiveTranscript = document.fixtures[0].response.live;
+const builderMock = new LLMock();
+builderMock.onLive({ model: "gpt-live-1" }, transcript);</code></pre>
+        </div>
+        <p>
+          The repository includes <code>fixtures/openai-live-client.json</code> and
+          <code>fixtures/openai-live-managed.json</code>. Both match the same endpoint and model, so
+          load one per server. These examples contain authored events and synthetic PCM samples.
+          Their timing and usage values are illustrative. They are not provider recordings or
+          speech. The builder takes the transcript directly and defaults to recorded timing. The
+          example files explicitly select immediate timing.
+        </p>
+
+        <h3>Transcript format</h3>
+        <table class="endpoint-table">
+          <thead>
+            <tr>
+              <th>Field</th>
+              <th>Meaning</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>version, model, mode</td>
+              <td>
+                <code>version: 1</code>, <code>model: "gpt-live-1"</code>, and
+                <code>mode: "client"</code> or <code>"managed"</code>.
+              </td>
+            </tr>
+            <tr>
+              <td>audio</td>
+              <td>
+                <code>{ encoding: "pcm16le", sampleRateHz: 24000, channels: 1 }</code>. Audio event
+                payloads contain base64-encoded PCM bytes.
+              </td>
+            </tr>
+            <tr>
+              <td>configuration</td>
+              <td>
+                The session configuration. It must equal the first
+                <code>session.start</code> command's <code>session</code> value.
+              </td>
+            </tr>
+            <tr>
+              <td>entries</td>
+              <td>
+                Ordered events, each with <code>direction</code> (<code>"client"</code> or
+                <code>"server"</code>), <code>atMs</code>, and <code>event</code>. Every server
+                entry also has a <code>barrier</code>.
+              </td>
+            </tr>
+            <tr>
+              <td>bindings</td>
+              <td>
+                Identifier definitions and references. Each binding supplies <code>entry</code>,
+                <code>pointer</code>, <code>name</code>, <code>action</code>, and
+                <code>owner</code>.
+              </td>
+            </tr>
+            <tr>
+              <td>capture</td>
+              <td>
+                <code>source</code> is <code>"authored"</code> or <code>"provider"</code>.
+                <code>complete</code> must be <code>true</code>. <code>terminalEntry</code> is the
+                zero-based index of the final <code>session.closed</code>. Provider captures include
+                provenance.
+              </td>
+            </tr>
+          </tbody>
+        </table>
+        <p>
+          The final close reason must be <code>close_requested</code> or <code>remote_hangup</code>.
+          Partial captures and error probes are rejected. Server configuration snapshots must agree
+          with startup and accepted updates. Only managed backend <code>instructions</code> updates
+          are supported. Mode and audio format cannot change during a session.
+        </p>
+
+        <h3>Causal barriers and PCM chunks</h3>
+        <p>
+          A server barrier uses <code>{ command, audioBytes }</code> to identify required client
+          input. <code>command</code> counts accepted non-audio commands, including startup.
+          <code>audioBytes</code> counts decoded input bytes since that command. Barriers must
+          increase or stay equal and must refer to preceding client input. A server event cannot run
+          before client input that defines an identifier it references.
+        </p>
+        <p>
+          Replay compares decoded input PCM bytes across adjacent audio appends with identical
+          metadata. Clients can split or combine these chunks at sample boundaries. Each PCM16
+          sample uses two bytes. A non-audio command or metadata change ends the run. Annotated
+          audio commands retain their original frame boundary. Rechunking cannot move bytes across
+          these boundaries. Aimock replays fixture output audio and does not synthesize speech from
+          transcript text.
+        </p>
+
+        <h3>Identifier bindings</h3>
+        <p>
+          A binding's <code>pointer</code> is a JSON Pointer relative to its entry's event.
+          <code>action</code> is <code>"define"</code> or <code>"reference"</code>.
+          <code>owner</code> is <code>"client"</code> or <code>"server"</code>. One symbolic
+          <code>name</code> connects each definition to its later references. Replay creates fresh
+          server identifiers for each connection. Clients must use the identifiers received on that
+          connection, including delegation IDs and tool-call IDs.
+        </p>
+        <p>
+          The limited <code>origin: "imported-context"</code> exception defines a first-seen server
+          response ID at <code>/event/response/previous_response_id</code> in a response lifecycle
+          event. This represents earlier context outside the capture. It applies only to a non-null
+          identifier without an earlier definition. Later occurrences reference that same name.
+          Other forward references remain invalid, and null values have no binding.
+        </p>
+
+        <h3>Replay timing</h3>
+        <p>
+          <code>liveTiming: "recorded"</code> is the default. Replay uses each server event's
+          <code>atMs</code> offset from accepted startup, divided by the fixture's
+          <code>replaySpeed</code>, or the server value when omitted (default <code>1</code>). A
+          speed of <code>2</code> halves those offsets. <code>liveTiming: "immediate"</code> removes
+          the recorded delays. Both modes preserve server order and wait for causal barriers. Faster
+          timing does not bypass required client commands, tool results, or input audio. Session
+          limits and timeouts still apply. See <a href="/record-replay">Record &amp; Replay</a> for
+          capture and retention.
+        </p>
 
         <h2 id="ordered-blocks">Ordered blocks (tool-first &amp; interleaved streaming)</h2>
         <p>

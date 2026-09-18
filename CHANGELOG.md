@@ -6,6 +6,9 @@
 
 ### Added
 
+- **OpenAI GPT-Live mock, record and offline replay** on the primary `GET /v1/live/sessions` WebSocket, with `onLive` and file fixtures for client and managed backend modes. Replay preserves causal ordering, recorded timing, PCM audio and transcripts, remaps identifiers per connection, and requires managed tool results plus explicit `response.create` continuation. Audio comes from authored or recorded fixtures; aimock does not synthesize speech. POST SDP, WebRTC, sideband connections, session fork/download and backend cancellation are outside this support.
+- Live sessions enforce finite message, audio, queue and lifetime limits, keep local authentication separate from provider credentials, and close on test cleanup, reset or server stop. Recording sanitizes credentials and identifiers and rejects unsafe exports; retained audio and transcript content remain in the fixture.
+- Live drift canaries compare real provider and aimock lifecycle, audio/transcript, delegation, tool continuation and usage behavior in both backend modes. The collector attributes these results to `openai-live` and distinguishes missing credentials or unavailable coverage from a passing canary.
 - Chaos `rateLimitRate` / `--chaos-ratelimit`: deterministic 429 with `Retry-After` (#449)
 - Chaos `latencyMs` / `--chaos-latency` now actually delays responses on every path (#449)
 - OpenAI Files API mock — byte-exact uploads, create-purpose enum, CORS on faults (#445)
