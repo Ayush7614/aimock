@@ -23,7 +23,8 @@
  *   npx tsx scripts/drift-report-collector.ts [--out drift-report.json]
  */
 
-import { execSync } from "node:child_process";
+import { discoverAgUiSources, resolveAgUiRepo } from "./drift-agui-canonical.js";
+import { execSync, execFileSync } from "node:child_process";
 import { existsSync, statSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -1516,11 +1517,9 @@ export function collectDriftEntries(results: VitestJsonResult): CollectResult {
  * or an empty array if the canonical repo is unavailable or tests pass.
  */
 /**
- * The one file the AG-UI drift tests actually read out of the canonical
- * checkout. A directory merely NAMED `ag-ui` proves nothing: if this file is
- * absent the drift suites' `describe.skipIf` gates fire and the whole AG-UI leg
- * silently reports NOTHING — which the collector would otherwise certify as a
- * clean baseline. Presence of this file is the checkout's usability test.
+ * Legacy source name retained for diagnostics and existing callers. Checkout
+ * validity is decided by the shared resolver: both generated source files or
+ * both legacy source files must exist before the canonical comparison runs.
  */
 export const AGUI_CANONICAL_TYPES_RELPATH = "sdks/typescript/packages/core/src/types.ts";
 
@@ -1556,11 +1555,11 @@ export function classifyAgUiCheckout(agUiPath: string): AgUiCheckoutStatus {
     };
   }
   if (!isDir) return { kind: "absent" };
-  if (!existsSync(resolve(agUiPath, AGUI_CANONICAL_TYPES_RELPATH))) {
+  if (!discoverAgUiSources(agUiPath)) {
     return {
       kind: "incomplete",
       reason:
-        `${agUiPath} exists but ${AGUI_CANONICAL_TYPES_RELPATH} is missing — the canonical ` +
+        `${agUiPath} lacks a complete generated types.ts/schemas.ts or legacy events.ts/types.ts pair (${AGUI_CANONICAL_TYPES_RELPATH}) — the canonical ` +
         `AG-UI checkout is STALE or INCOMPLETE. This is not a git/network failure: remove the ` +
         `directory and re-clone (git clone --depth 1 https://github.com/ag-ui-protocol/ag-ui.git).`,
     };
@@ -1569,13 +1568,12 @@ export function classifyAgUiCheckout(agUiPath: string): AgUiCheckoutStatus {
 }
 
 function ensureAgUiRepo(): boolean {
-  const agUiPath = resolve("..", "ag-ui");
+  const agUiPath = resolveAgUiRepo(resolve("..", "ag-ui"));
   const status = classifyAgUiCheckout(agUiPath);
   if (status.kind === "ok") return true;
   if (status.kind === "incomplete") {
     // N5: do NOT proceed. Running the drift suites against an unusable checkout
-    // makes every AG-UI assertion skip, and a leg that graded nothing must never
-    // be able to certify AG-UI as drift-free.
+    // cannot establish compatibility; never certify an ungraded checkout as clean.
     console.warn(`AG-UI canonical checkout unusable: ${status.reason}`);
     console.warn("AG-UI schema drift detection will be skipped.");
     return false;
@@ -1584,11 +1582,15 @@ function ensureAgUiRepo(): boolean {
   // Not present — try to clone
   console.log("AG-UI canonical repo not found. Cloning...");
   try {
-    execSync("git clone --depth 1 https://github.com/ag-ui-protocol/ag-ui.git ../ag-ui", {
-      encoding: "utf-8",
-      stdio: ["pipe", "pipe", "pipe"],
-      timeout: 60_000,
-    });
+    execFileSync(
+      "git",
+      ["clone", "--depth", "1", "https://github.com/ag-ui-protocol/ag-ui.git", agUiPath],
+      {
+        encoding: "utf-8",
+        stdio: ["pipe", "pipe", "pipe"],
+        timeout: 60_000,
+      },
+    );
   } catch (cloneErr: unknown) {
     const msg = cloneErr instanceof Error ? cloneErr.message : String(cloneErr);
     console.warn(`Could not clone AG-UI repo: ${msg}`);

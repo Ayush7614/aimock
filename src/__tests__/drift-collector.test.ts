@@ -3616,6 +3616,7 @@ describe("classifyAgUiCheckout — a directory named ag-ui is not a canonical ch
     const canonicalDir = join(agUi, "sdks", "typescript", "packages", "core", "src");
     mkdirSync(canonicalDir, { recursive: true });
     writeFileSync(join(canonicalDir, "types.ts"), "export type Placeholder = never;\n");
+    writeFileSync(join(canonicalDir, "events.ts"), "export enum EventType {}\n");
     expect(classifyAgUiCheckout(agUi)).toEqual({ kind: "ok" });
   });
 
