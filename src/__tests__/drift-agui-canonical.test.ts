@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { collectAgUiDriftEntries } from "../../scripts/drift-report-collector.js";
 import { discoverAgUiSources, parseGeneratedAgUi } from "../../scripts/drift-agui-canonical.js";
 
 const roots: string[] = [];
@@ -94,4 +95,34 @@ it("standalone canonical comparison fails when the explicit checkout is incomple
   expect(result.error).toBeUndefined();
   expect(result.status).not.toBe(0);
   expect(result.stdout + result.stderr).toContain("AG-UI canonical comparison unavailable");
+});
+
+it("unsupported generated schemas remain failed assertions visible to the collector", () => {
+  const root = checkout(["generated/types.ts", "generated/schemas.ts"]);
+  writeFileSync(join(root, "sdks/typescript/packages/core/src/generated/types.ts"), types);
+  const cwd = fileURLToPath(new URL("../../", import.meta.url));
+  const result = spawnSync(
+    process.execPath,
+    [
+      join(cwd, "node_modules/vitest/vitest.mjs"),
+      "run",
+      "src/__tests__/drift/agui-",
+      "--config",
+      "vitest.config.drift.ts",
+      "--reporter=json",
+      "--maxWorkers=1",
+      "--minWorkers=1",
+    ],
+    {
+      cwd,
+      env: { ...process.env, AGUI_REPO_PATH: root },
+      encoding: "utf8",
+      timeout: 15000,
+    },
+  );
+  expect(result.error).toBeUndefined();
+  expect(result.status).toBe(1);
+  const report = JSON.parse(result.stdout);
+  expect(report.numFailedTests).toBeGreaterThan(0);
+  expect(collectAgUiDriftEntries(report).quarantine.length).toBeGreaterThan(0);
 });

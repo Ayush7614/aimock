@@ -370,6 +370,7 @@ describe("AG-UI schema drift", () => {
         "AG-UI canonical comparison unavailable: expected a complete generated or legacy source layout and aimock types",
       );
   });
+  let parsingError: unknown;
   let canonicalSource: string;
   let aimockSource: string;
   let canonicalTypes: string[];
@@ -377,29 +378,36 @@ describe("AG-UI schema drift", () => {
   let canonicalSchemas: Map<string, SchemaInfo>;
   let aimockInterfaces: Map<string, SchemaInfo>;
 
-  // Parse sources once
-  if (canonical && aimockExists) {
-    canonicalSource = fs.readFileSync(canonical.types, "utf-8");
-    aimockSource = fs.readFileSync(AIMOCK_TYPES_PATH, "utf-8");
-    aimockTypes = parseAimockEventTypes(aimockSource);
-    if (canonical.layout === "generated") {
-      const parsed = parseGeneratedAgUi(
-        canonicalSource,
-        fs.readFileSync(canonical.schemas, "utf-8"),
-      );
-      canonicalTypes = parsed.types;
-      canonicalSchemas = parsed.schemas;
-    } else {
-      canonicalTypes = parseCanonicalEventTypes(canonicalSource);
-      canonicalSchemas = parseCanonicalSchemas(
-        canonicalSource,
-        buildSchemaAliases(canonical.directory),
-      );
+  // Parse after test registration so unsupported upstream schemas fail assertions
+  // and remain visible to the collector instead of aborting suite collection.
+  beforeAll(() => {
+    if (!canonical || !aimockExists) return;
+    try {
+      canonicalSource = fs.readFileSync(canonical.types, "utf-8");
+      aimockSource = fs.readFileSync(AIMOCK_TYPES_PATH, "utf-8");
+      aimockTypes = parseAimockEventTypes(aimockSource);
+      if (canonical.layout === "generated") {
+        const parsed = parseGeneratedAgUi(
+          canonicalSource,
+          fs.readFileSync(canonical.schemas, "utf-8"),
+        );
+        canonicalTypes = parsed.types;
+        canonicalSchemas = parsed.schemas;
+      } else {
+        canonicalTypes = parseCanonicalEventTypes(canonicalSource);
+        canonicalSchemas = parseCanonicalSchemas(
+          canonicalSource,
+          buildSchemaAliases(canonical.directory),
+        );
+      }
+      aimockInterfaces = parseAimockInterfaces(aimockSource);
+    } catch (error) {
+      parsingError = error;
     }
-    aimockInterfaces = parseAimockInterfaces(aimockSource);
-  }
+  });
 
   it("should have complete canonical sources available", () => {
+    expect(parsingError).toBeUndefined();
     expect(canonicalExists).toBe(true);
     expect(aimockExists).toBe(true);
   });
