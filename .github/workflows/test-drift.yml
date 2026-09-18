@@ -627,6 +627,18 @@ jobs:
           PREFLIGHT
           npx tsx "$PREFLIGHT_FILE"
 
+      - name: Pin canonical AG-UI sources for both fresh comparison legs
+        if: steps.preflight.outputs.live_legs_ran != 'false'
+        run: |
+          set -euo pipefail
+          AGUI_REPO_PATH="$RUNNER_TEMP/aimock-agui-canonical"
+          git clone --depth 1 https://github.com/ag-ui-protocol/ag-ui.git "$AGUI_REPO_PATH"
+          AGUI_UPSTREAM_SHA=$(git -C "$AGUI_REPO_PATH" rev-parse HEAD)
+          git -C "$AGUI_REPO_PATH" checkout --detach "$AGUI_UPSTREAM_SHA"
+          echo "AGUI_REPO_PATH=$AGUI_REPO_PATH" >> "$GITHUB_ENV"
+          echo "AGUI_UPSTREAM_SHA=$AGUI_UPSTREAM_SHA" >> "$GITHUB_ENV"
+          echo "AG-UI canonical comparison SHA: $AGUI_UPSTREAM_SHA"
+
       # ---- BASE leg -------------------------------------------------------
       # Prefer reusing the most recent same-UTC-day, well-formed `main`
       # scheduled drift report as the delta base — a same-day main baseline
@@ -661,8 +673,13 @@ jobs:
           # `main` run's drift-report artifact, then let isBaseReportReusable
           # (D6.1) decide if it is a trustworthy same-UTC-day baseline. On any
           # failure to obtain a reusable report, fall through to a live run.
+          git worktree add ../base-main origin/main
+          AGUI_BOOTSTRAP=$(npx tsx scripts/drift-agui-baseline.ts check ../base-main)
           REUSED=false
-          if BASE_RUN_ID=$(gh run list \
+          # Cached reports produced by the old reader did not grade AG-UI 1.0.
+          if [ "$AGUI_BOOTSTRAP" = "true" ]; then
+            echo "base: AG-UI reader compatibility bootstrap requires a fresh comparison"
+          elif BASE_RUN_ID=$(gh run list \
                 --workflow="Drift Tests" --repo="$REPO" --branch=main \
                 --event=schedule --status=success --limit=1 \
                 --json databaseId --jq '.[0].databaseId // empty'); then
@@ -700,7 +717,7 @@ jobs:
             echo "base: no reusable same-UTC-day main report — running fresh live base"
             # Check main out into a sibling worktree and run the collector
             # there, writing the base report back into the workspace root.
-            git worktree add ../base-main origin/main
+            npx tsx scripts/drift-agui-baseline.ts apply ../base-main "$AGUI_REPO_PATH"
             cd ../base-main
             pnpm install --frozen-lockfile
             # The collector exits 2 when it finds critical drift — that is the
@@ -786,6 +803,8 @@ jobs:
           #            delta keys, so the gate cannot blame the PR for it.
           #   exit 5 → quarantine (unparseable output) — genuine fault, FAIL.
           #   any other non-{0,2,6} → genuine collector fault, FAIL.
+          test "$(git -C "$AGUI_REPO_PATH" rev-parse HEAD)" = "$AGUI_UPSTREAM_SHA"
+          test -z "$(git -C "$AGUI_REPO_PATH" status --porcelain)"
           set +e
           npx tsx scripts/drift-report-collector.ts --out drift-report-head.json
           HEAD_EXIT=$?
