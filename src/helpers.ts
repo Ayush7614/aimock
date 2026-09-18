@@ -1,3 +1,4 @@
+import type { LiveFixtureResponse } from "./live-types.js";
 import { createHash, randomBytes } from "node:crypto";
 import type * as http from "node:http";
 import type { IncomingHttpHeaders } from "node:http";
@@ -227,6 +228,11 @@ export function flattenHeaders(headers: http.IncomingHttpHeaders): Record<string
     }
   }
   return flat;
+}
+
+/** Structural discriminator; registration performs full transcript validation. */
+export function isLiveResponse(value: unknown): value is LiveFixtureResponse {
+  return value !== null && typeof value === "object" && !Array.isArray(value) && "live" in value;
 }
 
 export function isResponseFactory(r: FixtureResponse | ResponseFactory): r is ResponseFactory {

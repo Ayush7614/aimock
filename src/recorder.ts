@@ -325,12 +325,15 @@ export function persistFixture(opts: {
   record: RecordConfig;
   providerKey: RecordProviderKey;
   testId: string;
+  /** Separate Live captures from HTTP OpenAI snapshots. */
+  filePrefix?: "openai-live";
   fixture: Fixture;
   fixtures: Fixture[];
   warnings?: string[];
   logger: Logger;
 }): PersistFixtureResult {
   const { record, providerKey, testId, fixture, fixtures, warnings = [], logger } = opts;
+  const fileKey = opts.filePrefix ?? providerKey;
 
   // Match criteria with no userMessage / inputText / endpoint will not match
   // any future request — warn, then save to disk for inspection but skip the
@@ -365,15 +368,15 @@ export function persistFixture(opts: {
       const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
       filepath = path.join(
         fixturePath,
-        `${providerKey}-${timestamp}-${crypto.randomUUID().slice(0, 8)}.json`,
+        `${fileKey}-${timestamp}-${crypto.randomUUID().slice(0, 8)}.json`,
       );
     } else {
-      filepath = path.join(fixturePath, slug, `${providerKey}.json`);
+      filepath = path.join(fixturePath, slug, `${fileKey}.json`);
       mergeExisting = true;
     }
   } else {
     const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
-    const timestampFile = `${providerKey}-${timestamp}-${crypto.randomUUID().slice(0, 8)}.json`;
+    const timestampFile = `${fileKey}-${timestamp}-${crypto.randomUUID().slice(0, 8)}.json`;
     // The context becomes a directory segment, but it originates from the
     // attacker-controllable `X-AIMock-Context` header — slugify it (mirroring
     // testId above) so `../`, separators, and absolute prefixes can't escape
@@ -391,6 +394,7 @@ export function persistFixture(opts: {
     ...warnings,
   ];
 
+  let tmpPath: string | undefined;
   try {
     fs.mkdirSync(path.dirname(filepath), { recursive: true });
 
@@ -454,9 +458,14 @@ export function persistFixture(opts: {
     // races. Keep synchronous — for streamed responses the HTTP reply is
     // already on the wire, so async writes would race with callers checking
     // the filesystem before the fixture has landed.
-    const tmpPath = filepath + ".tmp." + process.pid;
-    fs.writeFileSync(tmpPath, JSON.stringify(fileContent, null, 2), "utf-8");
+    tmpPath = filepath + ".tmp." + crypto.randomUUID();
+    fs.writeFileSync(tmpPath, JSON.stringify(fileContent, null, 2), {
+      encoding: "utf-8",
+      flag: "wx",
+      mode: 0o600,
+    });
     fs.renameSync(tmpPath, filepath);
+    tmpPath = undefined;
 
     if (!isEmptyMatch) {
       fixtures.push(fixture);
@@ -467,6 +476,14 @@ export function persistFixture(opts: {
     const msg = err instanceof Error ? err.message : "Unknown filesystem error";
     logger.error(`Failed to save fixture to disk: ${msg}`);
     return { kind: "failed", error: msg };
+  } finally {
+    if (tmpPath) {
+      try {
+        fs.unlinkSync(tmpPath);
+      } catch {
+        /* Preserve the original persistence error. */
+      }
+    }
   }
 }
 

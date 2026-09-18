@@ -1,3 +1,6 @@
+import type { LiveTranscript } from "./live-types.js";
+import { normalizeLiveFixture, normalizeLiveOptions } from "./live-fixture.js";
+import { isLiveResponse } from "./helpers.js";
 import type {
   AudioResponse,
   ChaosConfig,
@@ -54,23 +57,38 @@ export class LLMock {
 
   constructor(options?: MockServerOptions, resolvedInboundAuth?: ResolvedInboundAuth) {
     this.options = options ?? {};
+    if (this.options.live !== undefined) normalizeLiveOptions(this.options.live);
     this.resolvedInboundAuth = resolvedInboundAuth;
   }
 
   // ---- Fixture management ----
 
+  private normalizeFixture(fixture: Fixture): Fixture {
+    if (
+      isLiveResponse(fixture.response) ||
+      (fixture.match.endpoint === "openai-live" && typeof fixture.response !== "function")
+    ) {
+      return {
+        ...fixture,
+        match: { ...fixture.match },
+        response: normalizeLiveFixture(fixture.response, this.options.live),
+      };
+    }
+    return fixture;
+  }
+
   addFixture(fixture: Fixture): this {
-    this.fixtures.push(fixture);
+    this.fixtures.push(this.normalizeFixture(fixture));
     return this;
   }
 
   addFixtures(fixtures: Fixture[]): this {
-    this.fixtures.push(...fixtures);
+    this.fixtures.push(...fixtures.map((fixture) => this.normalizeFixture(fixture)));
     return this;
   }
 
   prependFixture(fixture: Fixture): this {
-    this.fixtures.unshift(fixture);
+    this.fixtures.unshift(this.normalizeFixture(fixture));
     return this;
   }
 
@@ -79,12 +97,12 @@ export class LLMock {
   }
 
   loadFixtureFile(filePath: string): this {
-    this.fixtures.push(...loadFixtureFile(filePath));
+    this.fixtures.push(...loadFixtureFile(filePath, undefined, this.options.live));
     return this;
   }
 
   loadFixtureDir(dirPath: string): this {
-    this.fixtures.push(...loadFixturesFromDir(dirPath));
+    this.fixtures.push(...loadFixturesFromDir(dirPath, undefined, this.options.live));
     return this;
   }
 
@@ -105,8 +123,8 @@ export class LLMock {
     } else {
       entries = input;
     }
-    const converted = entries.map((e) => entryToFixture(e));
-    const issues = validateFixtures(converted);
+    const converted = entries.map((e) => entryToFixture(e, undefined, this.options.live));
+    const issues = validateFixtures(converted, this.options.live);
     const errors = issues.filter((i) => i.severity === "error");
     if (errors.length > 0) {
       throw new Error(`Fixture validation failed: ${JSON.stringify(errors)}`);
@@ -132,9 +150,18 @@ export class LLMock {
   ): this {
     return this.addFixture({
       match,
-      response: typeof response === "function" ? response : normalizeResponse(response),
+      response:
+        typeof response === "function" ? response : normalizeResponse(response, this.options.live),
       ...opts,
     });
+  }
+
+  onLive(
+    match: Omit<FixtureMatch, "endpoint">,
+    transcript: LiveTranscript,
+    opts?: FixtureOpts,
+  ): this {
+    return this.on({ ...match, endpoint: "openai-live" }, { live: transcript }, opts);
   }
 
   onMessage(
@@ -474,6 +501,11 @@ export class LLMock {
           moderation: this.moderationFixtures,
         }));
     return this.serverInstance.url;
+  }
+
+  closeLiveSessions(testId?: string): this {
+    this.serverInstance?.closeLiveSessions(testId);
+    return this;
   }
 
   async stop(): Promise<void> {

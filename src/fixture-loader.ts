@@ -1,3 +1,5 @@
+import type { LiveOptions } from "./live-types.js";
+import { normalizeLiveFixture } from "./live-fixture.js";
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import type {
@@ -10,6 +12,7 @@ import type {
   ResponseOverrides,
 } from "./types.js";
 import {
+  isLiveResponse,
   isTextResponse,
   isToolCallResponse,
   isContentWithToolCallsResponse,
@@ -31,7 +34,11 @@ import { CHAOS_FIELDS, CHAOS_FIELD_NAMES, parseChaosField } from "./chaos.js";
  * `fallthrough` OpenRouter-failover flag) pass through unmodified via the
  * shallow clone below.
  */
-export function normalizeResponse(raw: FixtureFileResponse): FixtureResponse {
+export function normalizeResponse(
+  raw: FixtureFileResponse,
+  liveOptions?: LiveOptions,
+): FixtureResponse {
+  if (isLiveResponse(raw)) return normalizeLiveFixture(raw, liveOptions);
   // Shallow-clone so we don't mutate the parsed JSON input.
   const response = { ...raw } as Record<string, unknown>;
 
@@ -72,7 +79,11 @@ export function normalizeResponse(raw: FixtureFileResponse): FixtureResponse {
   return response as unknown as FixtureResponse;
 }
 
-export function entryToFixture(entry: FixtureFileEntry, logger?: Logger): Fixture {
+export function entryToFixture(
+  entry: FixtureFileEntry,
+  logger?: Logger,
+  liveOptions?: LiveOptions,
+): Fixture {
   const fixture: Fixture = {
     match: {
       userMessage: entry.match.userMessage,
@@ -93,7 +104,10 @@ export function entryToFixture(entry: FixtureFileEntry, logger?: Logger): Fixtur
       }),
       ...(entry.match.context !== undefined && { context: entry.match.context }),
     },
-    response: normalizeResponse(entry.response),
+    response:
+      entry.match.endpoint === "openai-live"
+        ? normalizeLiveFixture(entry.response, liveOptions)
+        : normalizeResponse(entry.response, liveOptions),
     ...(entry.latency !== undefined && { latency: entry.latency }),
     ...(entry.chunkSize !== undefined && { chunkSize: entry.chunkSize }),
     ...(entry.truncateAfterChunks !== undefined && {
@@ -153,7 +167,11 @@ function warn(logger: Logger | undefined, msg: string, ...rest: unknown[]): void
   }
 }
 
-export function loadFixtureFile(filePath: string, logger?: Logger): Fixture[] {
+export function loadFixtureFile(
+  filePath: string,
+  logger?: Logger,
+  liveOptions?: LiveOptions,
+): Fixture[] {
   let raw: string;
   try {
     raw = readFileSync(filePath, "utf-8");
@@ -179,10 +197,14 @@ export function loadFixtureFile(filePath: string, logger?: Logger): Fixture[] {
     return [];
   }
 
-  return (parsed as FixtureFile).fixtures.map((e) => entryToFixture(e, logger));
+  return (parsed as FixtureFile).fixtures.map((e) => entryToFixture(e, logger, liveOptions));
 }
 
-export function loadFixturesFromDir(dirPath: string, logger?: Logger): Fixture[] {
+export function loadFixturesFromDir(
+  dirPath: string,
+  logger?: Logger,
+  liveOptions?: LiveOptions,
+): Fixture[] {
   let entries: string[];
   try {
     entries = readdirSync(dirPath);
@@ -216,14 +238,14 @@ export function loadFixturesFromDir(dirPath: string, logger?: Logger): Fixture[]
   const fixtures: Fixture[] = [];
   for (const name of jsonFiles) {
     const filePath = join(dirPath, name);
-    fixtures.push(...loadFixtureFile(filePath, logger));
+    fixtures.push(...loadFixtureFile(filePath, logger, liveOptions));
   }
 
   // Recurse into all subdirectories (full depth) to support nested layouts
   // like showcase/aimock/d6/<integration>/<feature>.json.
   subdirs.sort();
   for (const sub of subdirs) {
-    fixtures.push(...loadFixturesFromDir(join(dirPath, sub), logger));
+    fixtures.push(...loadFixturesFromDir(join(dirPath, sub), logger, liveOptions));
   }
 
   return fixtures;
@@ -666,7 +688,10 @@ export function queueOneShotError(
   return fixture;
 }
 
-export function validateFixtures(fixtures: Fixture[]): ValidationResult[] {
+export function validateFixtures(
+  fixtures: Fixture[],
+  liveOptions?: LiveOptions,
+): ValidationResult[] {
   const results: ValidationResult[] = [];
 
   const seenUserMessages = new Map<string, number>();
@@ -674,6 +699,21 @@ export function validateFixtures(fixtures: Fixture[]): ValidationResult[] {
   for (let i = 0; i < fixtures.length; i++) {
     const f = fixtures[i];
     const response = f.response;
+
+    if (
+      typeof response !== "function" &&
+      (isLiveResponse(response) || f.match.endpoint === "openai-live")
+    ) {
+      try {
+        normalizeLiveFixture(response, liveOptions);
+      } catch (error) {
+        results.push({
+          severity: "error",
+          fixtureIndex: i,
+          message: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
 
     // Skip response-shape validation for function responses — they are
     // evaluated at runtime so we cannot statically inspect them.
@@ -695,13 +735,14 @@ export function validateFixtures(fixtures: Fixture[]): ValidationResult[] {
         !isAudioResponse(response) &&
         !isTranscriptionResponse(response) &&
         !isVideoResponse(response) &&
-        !isJSONResponse(response)
+        !isJSONResponse(response) &&
+        !isLiveResponse(response)
       ) {
         results.push({
           severity: "error",
           fixtureIndex: i,
           message:
-            "response is not a recognized type (must have content, toolCalls, error, embedding, image, audio, transcription, video, or json)",
+            "response is not a recognized type (must have content, toolCalls, error, embedding, image, audio, transcription, video, json, or live)",
         });
       }
 

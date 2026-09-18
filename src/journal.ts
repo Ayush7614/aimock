@@ -161,6 +161,7 @@ export interface JournalOptions {
 
 export class Journal {
   private entries: JournalEntry[] = [];
+  private readonly matchedFixtures = new WeakMap<JournalEntry, Fixture>();
   private readonly fixtureMatchCountsByTestId: Map<string, Map<Fixture, number>> = new Map();
   private readonly maxEntries: number;
   private readonly fixtureCountsMaxTestIds: number;
@@ -181,13 +182,15 @@ export class Journal {
     return this.getFixtureMatchCountsForTest(DEFAULT_TEST_ID);
   }
 
-  add(entry: Omit<JournalEntry, "id" | "timestamp">): JournalEntry {
+  /** @internal matchedFixture preserves identity when Live supplies safe diagnostics. */
+  add(entry: Omit<JournalEntry, "id" | "timestamp">, matchedFixture?: Fixture): JournalEntry {
     const full: JournalEntry = {
       id: generateId("req"),
       timestamp: Date.now(),
       ...entry,
       body: capBody(entry.body),
     };
+    if (matchedFixture) this.matchedFixtures.set(full, matchedFixture);
     this.entries.push(full);
     // FIFO eviction when over capacity. Array.prototype.shift() is O(n)
     // regardless of how many we drop per add; we accept it at small caps
@@ -224,7 +227,9 @@ export class Journal {
   }
 
   findByFixture(fixture: Fixture): JournalEntry[] {
-    return this.entries.filter((e) => e.response.fixture === fixture);
+    return this.entries.filter(
+      (e) => (this.matchedFixtures.get(e) ?? e.response.fixture) === fixture,
+    );
   }
 
   /**
