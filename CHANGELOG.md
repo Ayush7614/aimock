@@ -1,55 +1,60 @@
 # @copilotkit/aimock
 
-## [Unreleased]
+## [1.43.0] - 2026-09-22
 
 > **BREAKING** — `aimock -h` is `--help`, not `--host`: `aimock -h 0.0.0.0` exits 1 with `Error: Unexpected argument '0.0.0.0'. This command does not take positional arguments`. Migration: `--host <string>` (long form only). The `llmock` bin (the Docker ENTRYPOINT) keeps `-h, --host` (#453).
 
 ### Added
 
-- **OpenAI GPT-Live mock, record and offline replay** on the primary `GET /v1/live/sessions` WebSocket, with `onLive` and file fixtures for client and managed backend modes. Replay preserves causal ordering, recorded timing, PCM audio and transcripts, remaps identifiers per connection, and requires managed tool results plus explicit `response.create` continuation. Audio comes from authored or recorded fixtures; aimock does not synthesize speech. POST SDP, WebRTC, sideband connections, session fork/download and backend cancellation are outside this support.
-- Live sessions enforce finite message, audio, queue and lifetime limits, keep local authentication separate from provider credentials, and close on test cleanup, reset or server stop. Recording sanitizes credentials and identifiers and rejects unsafe exports; retained audio and transcript content remain in the fixture.
-- Live drift canaries compare real provider and aimock lifecycle, audio/transcript, delegation, tool continuation and usage behavior in both backend modes. The collector attributes these results to `openai-live` and distinguishes missing credentials or unavailable coverage from a passing canary.
+- OpenAI GPT-Live mock, record and offline replay on `GET /v1/live/sessions`, with `onLive` fixtures (#468)
+- Live sessions enforce message/audio/queue/lifetime limits; recordings sanitize credentials (#468)
+- Live drift canaries for lifecycle, audio/transcript, delegation and usage, attributed to `openai-live` (#468)
 - Chaos `rateLimitRate` / `--chaos-ratelimit`: deterministic 429 with `Retry-After` (#449)
 - Chaos `latencyMs` / `--chaos-latency` now actually delays responses on every path (#449)
 - OpenAI Files API mock — byte-exact uploads, create-purpose enum, CORS on faults (#445)
-- Mock OpenAI fine-tuning jobs — deterministic lifecycle, events, cursor pages (#447)
+- OpenAI fine-tuning jobs mock — deterministic lifecycle, events, cursor pages (#447)
+- OpenAI Batches API mock — create/list/retrieve/cancel with real output files (#446)
 - `X-Request-Id` echoed or minted on every response; `?requestId=` filters the journal (#450)
 - `aimock validate` lints fixture files or directories offline, failing on broken files (#453)
-- **ElevenLabs Voice Design record/replay** — `POST /v1/text-to-voice/design` matches fixtures on `voice_description` (via `onElevenLabsVoiceDesign`), `POST /v1/text-to-voice` saves a preview as a permanent voice with a deterministic `voice_id`, and `GET`/`DELETE /v1/voices/{voice_id}` cover slot management (delete is idempotent). Unmatched design/save calls proxy under the existing `elevenlabs` provider key. Preview fixtures embed `audio_base_64` and are larger than JSON-only tapes (#452)
-- ElevenLabs Voice Design: wire-fact provenance block and strict-mode 503 coverage (#454)
-- OpenAI Batches API mock: create/list/retrieve/cancel with deterministic poll progression and real output files (#446)
+- ElevenLabs Voice Design record/replay — design, save-as-voice, and voice slot management (#452)
+- ElevenLabs Voice Design provenance block and strict-mode 503 coverage (#454)
 
 ### Changed
 
 - **BREAKING:** `aimock -h` is `--help`, matching `aimock convert -h` and `aimock validate -h`; the host override is `--host` only. The `llmock` bin (the Docker entrypoint) keeps its own `-h, --host` — see the note above (#453)
-- `aimock --config ""`, `--port ""` and `--host ""` are usage errors naming the option, instead of being read as "not given" (#453)
+- `aimock --config ""`, `--port ""` and `--host ""` are usage errors naming the option (#453)
 - Realtime `OpenAI-Beta: realtime=v1` now returns the real sunset rejection, not a session (#461)
 - `POST /v1/images/variations` now replays the real removal 404; OpenAI deleted it (#462)
 - `ChaosAction` gains `"rateLimit"` — an exhaustive switch over it needs a case (#449)
-- `applyChaosAsync()` returns a `ChaosAsyncOutcome` (`false | "handled" | "unwritable"`) instead of a bare `boolean`, so callers can tell "a chaos action fired and was journalled" from "the response was already dead, nothing happened" — the old `true` meant both. Both non-`false` members are truthy, so the standard `if (await applyChaosAsync(...)) return;` call shape is unchanged; only code that stored the result in an explicitly `boolean`-typed binding needs updating (#449)
+- `applyChaosAsync()` returns `false | "handled" | "unwritable"` instead of a bare `boolean` (#449)
 - Journal `headers` now ALWAYS carry `x-request-id` — exact `toEqual` asserts break (#450)
 
 ### Deprecated
 
-- The exported synchronous `applyChaos()` — it cannot await, so it silently skips the configured chaos latency (`latencyMs` / `--chaos-latency` / `x-aimock-chaos-latency`) while every internal caller is now required to use the async form. It still works and its fault behaviour is unchanged, but it now warns once per process. Library consumers embedding aimock should switch to `await applyChaosAsync(...)` — same arguments, plus the latency (#449)
+- Synchronous `applyChaos()` warns once per process; it skips chaos latency. Use `await applyChaosAsync(...)` (#449)
 
 ### Fixed
 
-- Reasoning-first OpenAI chat streams that combine content and tool calls now include the configured role (default `assistant`) in the first reasoning chunk, for both legacy and block fixtures. This lets LangChain recognize the assistant message and preserves tool calls for LangGraph TypeScript MCP rendering (#470)
-- Journals and metrics now reflect delivered and interrupted responses, preserve request identity across concurrent calls, and keep route labels bounded. One-shot errors are reserved before asynchronous processing and returned to the queue when unserved, preventing duplicate delivery (#466)
-- Nonstreaming OpenAI chat returns authored block text and tools. Across OpenAI, Claude, Gemini, Gemini Interactions, Cohere and Bedrock, text-only blocks now finish normally instead of reporting a tool-call terminal; tool-containing blocks retain their tool outcome (#467)
-- AG-UI drift checks read the generated AG-UI 1.0 schemas as well as the legacy layout, and unavailable or malformed comparisons no longer pass silently. BASE and HEAD use the same pinned canonical sources while retaining their own product types. `AGUIRunStartedEvent` now includes optional `protocolVersion?: string` (#469)
-- Drift reports explicitly list surfaces without live vendor coverage in `unverifiedSurfaces`. Offline Bedrock and Vertex conformance checks no longer skip for missing credentials, and Bedrock expectations use HTTP wire shapes instead of SDK-only fields (#460)
-- Drift documentation now matches actual coverage, credentials, CI triggers and cost boundaries. ElevenLabs drift checks distinguish vendor observations from fixture conformance, retain vendor error bodies and preserve setup failures during cleanup (#465)
-- Chaos no longer treats a committed status line as a dead response. `headersSent` was folded in with "the client hung up" and "the body was already ended", so on an already-committed response the configured chaos latency was zeroed and a `disconnect` action — a bare socket teardown that needs no status line of its own — was silently skipped. Only the three actions that write their own status line (`drop`, `malformed`, `rateLimit`) are foreclosed by committed headers now, and when one of them is skipped `applyChaosAsync()` returns `false` rather than a truthy `"unwritable"`, so the ubiquitous `if (await applyChaosAsync(...)) return;` no longer abandons a healthy body the handler was still streaming (#449)
-- Chaos skip logs name what actually happened. A response that was ended normally and whose connection was torn down afterwards is reported as already-ended instead of "the client disconnected", and the `disconnect` action's own `res.destroy()` is reported as aimock's teardown instead of a client hang-up (#449)
-- `aimock_chaos_triggered_total` is incremented AFTER the chaos response is written, not before, so a write that throws no longer leaves behind a metric for bytes that never went out (#449)
-- A request whose chaos latency was cancelled by the client hanging up mid-delay is no longer served or journalled. The chat-completions gate and the two server-side fal gates await the delay and roll the chaos action as separate steps, and did not re-check that the response could still carry bytes once the delay unwound early — so an aborted request still had a full response built, written into a dead socket and recorded in the journal. That phantom entry claimed bytes no client ever received; `journal.getAll()` now stays empty for it, exactly as `applyChaosAsync` already documented (#449)
+- Reasoning-first chat streams with content and tool calls carry the assistant role in the first chunk (#470)
+- Journals and metrics reflect delivered vs interrupted responses; one-shot errors never double-deliver (#466)
+- Nonstreaming OpenAI chat returns block text and tools; text-only blocks finish normally on every provider (#467)
+- AG-UI drift reads generated 1.0 schemas; `AGUIRunStartedEvent` gains optional `protocolVersion` (#469)
+- Drift reports list `unverifiedSurfaces`; offline Bedrock/Vertex checks no longer skip silently (#460)
+- Drift docs match actual coverage; ElevenLabs drift separates vendor observations from fixture checks (#465)
+- Chaos no longer treats committed headers as a dead response; only status-writing actions are skipped (#449)
+- Chaos skip logs name what happened; `aimock_chaos_triggered_total` counts only written responses (#449)
+- A request whose chaos latency was cancelled by client hang-up is no longer served or journalled (#449)
 - Moderations echoes the request's `model`; default is now `omni-moderation-latest` (#459)
 - Image endpoints default to `gpt-image-1` — `dall-e-2`/`dall-e-3` were removed (#459)
-- AG-UI record/proxy mode forwards the caller's headers and the raw request body to the upstream agent, instead of rebuilding the request from an `Authorization` / `x-api-key` allowlist and a re-serialized payload. An agent whose runtime contract travels in headers — session affinity, per-request agent configuration, a request signature over the body — now keeps it across the hop. `Accept` is forced to `text/event-stream` (AG-UI is an SSE protocol and the recorder can only parse an event stream); `Content-Type` is only defaulted, since the caller owns it and a signature may cover it (#455)
-- The AG-UI recorder refuses to write a fixture when a 2xx upstream answers with something other than an event stream, or with a stream holding no parseable events, instead of persisting `"events": []` — a fixture that matched on replay and streamed nothing, silently (#455)
+- AG-UI record/proxy forwards the caller's headers and raw body upstream; `Accept` is forced to SSE (#455)
+- The AG-UI recorder refuses to write a fixture from a non-stream or empty 2xx upstream reply (#455)
 - A MINTED `x-request-id` is no longer forwarded upstream in record/proxy mode (#450)
+
+## [1.42.1] - 2026-09-18
+
+### Fixed
+
+- Identify reasoning-first tool streams as assistant messages for MCP Apps (#470).
 
 ## [1.42.0] - 2026-09-13
 
