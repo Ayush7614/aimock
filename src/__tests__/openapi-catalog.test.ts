@@ -293,7 +293,7 @@ describe("OpenAPI route catalog", () => {
       const operation = doc.paths[r.path]?.[r.method.toLowerCase()] as
         | Record<string, unknown>
         | undefined;
-      expect(operation !== undefined, `missing operation ${r.method} ${r.path}`).toBe(true);
+      if (operation === undefined) throw new Error(`missing operation ${r.method} ${r.path}`);
       const responses = operation.responses as Record<string, unknown>;
       // 400 is always the validation error; anything else (200, 204, or the
       // documented 404 replay of a removed route) is the success outcome.
