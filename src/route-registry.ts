@@ -3,9 +3,19 @@
  *
  * Both the HTTP dispatcher (`server.ts`) and the machine-readable catalog
  * (`openapi.ts` → `GET /__aimock/openapi.json` + `GET /__aimock/routes`) import
- * from this module, so the catalog cannot drift from the router: adding a
- * surface means adding it here, and the dispatcher consumes the same path
- * constants and patterns.
+ * from this module. Drift is prevented three ways, not one:
+ *
+ * 1. Shared bindings — the dispatcher matches against the exact `*_PATH`
+ *    constants and `*_RE` patterns defined here (never inline literals), and
+ *    `metrics.ts` path-label normalization imports the same patterns, so the
+ *    three consumers cannot disagree on what a route looks like.
+ * 2. Bidirectional tests (`openapi-catalog.test.ts`) — every catalog entry is
+ *    probed against the live router (catalog → router) AND every dispatch
+ *    literal/pattern imported from this module must have a catalog entry
+ *    whose example path it matches (router → catalog).
+ * 3. Runtime drift guard — the dispatcher's terminal 404 consults
+ *    `matchRouteDefinition` and warns when the registry claims a route the
+ *    dispatcher just missed.
  *
  * `path` is the OpenAPI path template (`{param}` for dynamic segments).
  * `examplePath` is a concrete path the drift test probes against the live
@@ -13,7 +23,11 @@
  *
  * Plugin mounts (`Mountable`: A2A/MCP/AG-UI/vector) are dynamic per-server and
  * intentionally excluded — this registry covers the built-in first-class
- * surfaces only.
+ * surfaces only. Likewise excluded: the WebSocket upgrades (`/v1/realtime`,
+ * the Gemini Live path — same URL as an HTTP route or no HTTP method at all,
+ * so they cannot appear in an HTTP catalog) and the header-gated fal.ai proxy
+ * branch (`FAL_PREFIX_RE` + `x-fal-target-host`, a dynamic upstream mirror
+ * rather than a fixed route).
  */
 
 export const COMPLETIONS_PATH = "/v1/chat/completions";
@@ -35,7 +49,25 @@ export const SPEECH_PATH = "/v1/audio/speech";
 export const TRANSCRIPTIONS_PATH = "/v1/audio/transcriptions";
 export const TRANSLATIONS_PATH = "/v1/audio/translations";
 export const VIDEOS_PATH = "/v1/videos";
+// Grok submit is an exact literal; Grok status reuses the OpenAI
+// `/v1/videos/{id}` shape (dispatch guards `id !== "generations"` and the
+// job-map lookup disambiguates Sora). Shared with metrics.ts normalization.
+export const GROK_VIDEO_SUBMIT_PATH = "/v1/videos/generations";
+export const GROK_VIDEO_STATUS_RE = /^\/v1\/videos\/([^/]+)$/;
+export const OPENAI_VIDEO_STATUS_RE = /^\/v1\/videos\/([^/]+)$/;
 export const GEMINI_PREDICT_RE = /^\/v1beta\/models\/([^:]+):predict$/;
+// Veo submit (`:predictLongRunning`, anchored so it never collides with the
+// bare Gemini `:predict` route) + Veo operation polling. The operation RE
+// allows multi-segment names (`operations/.+`); the catalog template below
+// uses the single-segment canonical form. Shared with metrics.ts.
+export const VEO_PREDICT_LRO_RE = /^\/v1beta\/models\/([^:]+):predictLongRunning$/;
+export const VEO_OPERATION_RE = /^\/v1beta\/(operations\/.+)$/;
+// BytePlus Ark (Seedance) task lifecycle. The `/api/v3` prefix is ENUMERATED
+// rather than wildcarded: a tolerant prefix would additionally claim
+// `/fal/contents/generations/tasks`, which dispatches pre-rewrite ~1,100
+// lines ahead of every fal branch. Shared with metrics.ts normalization.
+export const BYTEPLUS_VIDEO_SUBMIT_RE = /^(?:\/api\/v3)?\/contents\/generations\/tasks$/;
+export const BYTEPLUS_VIDEO_STATUS_RE = /^(?:\/api\/v3)?\/contents\/generations\/tasks\/([^/]+)$/;
 export const ELEVENLABS_SOUND_GENERATION_PATH = "/v1/sound-generation";
 export const ELEVENLABS_TTS_RE = /^\/v1\/text-to-speech\/([^/]+)$/;
 export const ELEVENLABS_MUSIC_RE = /^\/v1\/music(?:\/(.+))?$/;
@@ -67,16 +99,27 @@ export const OLLAMA_TAGS_PATH = "/api/tags";
 
 export const OPENROUTER_VIDEOS_PATH = "/api/v1/videos";
 export const OPENROUTER_VIDEO_MODELS_PATH = "/api/v1/videos/models";
+export const OPENROUTER_MODELS_PATH = "/api/v1/models";
+export const OPENROUTER_KEY_PATH = "/api/v1/key";
+export const OPENROUTER_CREDITS_PATH = "/api/v1/credits";
+// Dispatched in server.ts (content RE → models exact → status RE → submit
+// exact) and reused by metrics.ts path-label normalization — one binding so
+// dispatch, catalog, and metric labels cannot disagree.
+export const OPENROUTER_VIDEO_CONTENT_RE = /^\/api\/v1\/videos\/([^/]+)\/content$/;
+export const OPENROUTER_VIDEO_STATUS_RE = /^\/api\/v1\/videos\/([^/]+)$/;
 
 export const HEALTH_PATH = "/health";
 export const READY_PATH = "/ready";
+export const METRICS_PATH = "/metrics";
 export const MODELS_PATH = "/v1/models";
 export const REQUESTS_PATH = "/v1/_requests";
 
 export const FILES_PATH = "/v1/files";
-// FILES_ID_RE / FILES_CONTENT_RE live in metrics.js alongside every other
-// shared route regex (OpenRouter/Veo/Grok/BytePlus) so dispatch and metrics
-// path-labels cannot disagree; the registry only holds the exact base path.
+// Shared with metrics.ts path-label normalization (file ids are random
+// `file-…` values; labels collapse to `{id}`). Content reads before id: the
+// id RE would otherwise swallow the content suffix.
+export const FILES_CONTENT_RE = /^\/v1\/files\/([^/]+)\/content$/;
+export const FILES_ID_RE = /^\/v1\/files\/([^/]+)$/;
 export const FINE_TUNING_JOBS_PATH = "/v1/fine_tuning/jobs";
 export const FINE_TUNING_ID_RE = /^\/v1\/fine_tuning\/jobs\/([^/]+)$/;
 export const FINE_TUNING_CANCEL_RE = /^\/v1\/fine_tuning\/jobs\/([^/]+)\/cancel$/;
@@ -179,14 +222,19 @@ export const ROUTE_DEFINITIONS: RouteDefinition[] = [
   // OpenRouter discovery
   {
     method: "GET",
-    path: "/api/v1/models",
+    path: OPENROUTER_MODELS_PATH,
     service: "openrouter",
     description: "OpenRouter models",
   },
-  { method: "GET", path: "/api/v1/key", service: "openrouter", description: "OpenRouter key info" },
   {
     method: "GET",
-    path: "/api/v1/credits",
+    path: OPENROUTER_KEY_PATH,
+    service: "openrouter",
+    description: "OpenRouter key info",
+  },
+  {
+    method: "GET",
+    path: OPENROUTER_CREDITS_PATH,
     service: "openrouter",
     description: "OpenRouter credits",
   },
@@ -208,7 +256,7 @@ export const ROUTE_DEFINITIONS: RouteDefinition[] = [
   // Ops
   { method: "GET", path: HEALTH_PATH, service: "ops", description: "Health probe (public)" },
   { method: "GET", path: READY_PATH, service: "ops", description: "Readiness probe (public)" },
-  { method: "GET", path: "/metrics", service: "ops", description: "Prometheus metrics (public)" },
+  { method: "GET", path: METRICS_PATH, service: "ops", description: "Prometheus metrics (public)" },
   // Models + legacy journal
   { method: "GET", path: MODELS_PATH, service: "openai", description: "Models listing" },
   { method: "GET", path: REQUESTS_PATH, service: "control", description: "Legacy journal listing" },
@@ -580,3 +628,44 @@ export const ROUTE_DEFINITIONS: RouteDefinition[] = [
   },
   { method: "GET", path: "/__aimock/routes", service: "control", description: "Flat route list" },
 ];
+
+/**
+ * Compile an OpenAPI path template (`{param}` segments) to the equivalent
+ * single-segment matcher. Every `{param}` becomes `[^/]+`; everything else
+ * matches literally (including `:action` suffixes like `:predict`).
+ *
+ * This is intentionally the CANONICAL matcher, not a copy of each
+ * dispatcher's regex: a couple of dispatch regexes are deliberately wider
+ * (e.g. `VEO_OPERATION_RE` allows multi-segment operation names), so the
+ * registry matcher may miss exotic paths the dispatcher serves — but it must
+ * never CLAIM a path the dispatcher does not serve, which is the direction
+ * the runtime drift guard relies on.
+ */
+export function templateToRegExp(template: string): RegExp {
+  const pattern = template
+    .split(/(\{[^}]+\})/g)
+    .map((part) =>
+      /^\{[^}]+\}$/.test(part) ? "[^/]+" : part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"),
+    )
+    .join("");
+  return new RegExp(`^${pattern}$`);
+}
+
+/**
+ * Find the registry entry serving `METHOD pathname`, in dispatcher order
+ * (first match wins — `ROUTE_DEFINITIONS` is kept in dispatch order for
+ * exactly this reason). Returns `undefined` when no catalog entry covers the
+ * request. Method comparison is case-insensitive, like the dispatcher.
+ */
+export function matchRouteDefinition(
+  method: string,
+  pathname: string,
+): RouteDefinition | undefined {
+  const want = method.toUpperCase();
+  for (const def of ROUTE_DEFINITIONS) {
+    if (def.method.toUpperCase() !== want) continue;
+    if (def.path === pathname) return def;
+    if (def.path.includes("{") && templateToRegExp(def.path).test(pathname)) return def;
+  }
+  return undefined;
+}

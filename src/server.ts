@@ -164,7 +164,10 @@ import {
 import { buildOpenApiDocument, CATALOG_ROUTES } from "./openapi.js";
 // Route paths/patterns are the router's single source of truth — shared with
 // the machine-readable catalog (`route-registry.ts` → `openapi.ts`), so the
-// catalog cannot drift from the dispatcher.
+// catalog cannot drift from the dispatcher. Every literal and pattern matched
+// below comes from this module: adding a surface means adding it there, and
+// `matchRouteDefinition` (used by the terminal-404 drift guard) resolves
+// against the same table the catalog is derived from.
 import {
   COMPLETIONS_PATH,
   RESPONSES_PATH,
@@ -184,6 +187,10 @@ import {
   TRANSCRIPTIONS_PATH,
   TRANSLATIONS_PATH,
   VIDEOS_PATH,
+  GROK_VIDEO_SUBMIT_PATH,
+  GROK_VIDEO_STATUS_RE,
+  VEO_PREDICT_LRO_RE,
+  VEO_OPERATION_RE,
   GEMINI_PREDICT_RE,
   ELEVENLABS_SOUND_GENERATION_PATH,
   ELEVENLABS_TTS_RE,
@@ -211,31 +218,29 @@ import {
   OLLAMA_TAGS_PATH,
   OPENROUTER_VIDEOS_PATH,
   OPENROUTER_VIDEO_MODELS_PATH,
+  OPENROUTER_MODELS_PATH,
+  OPENROUTER_KEY_PATH,
+  OPENROUTER_CREDITS_PATH,
+  OPENROUTER_VIDEO_CONTENT_RE,
+  OPENROUTER_VIDEO_STATUS_RE,
   HEALTH_PATH,
   READY_PATH,
+  METRICS_PATH,
   MODELS_PATH,
   REQUESTS_PATH,
   FILES_PATH,
+  FILES_ID_RE,
+  FILES_CONTENT_RE,
+  BYTEPLUS_VIDEO_SUBMIT_RE,
+  BYTEPLUS_VIDEO_STATUS_RE,
   FINE_TUNING_JOBS_PATH,
   FINE_TUNING_ID_RE,
   FINE_TUNING_CANCEL_RE,
   FINE_TUNING_EVENTS_RE,
   CONTROL_PREFIX,
+  matchRouteDefinition,
 } from "./route-registry.js";
-import {
-  createMetricsRegistry,
-  normalizePathLabel,
-  BYTEPLUS_VIDEO_STATUS_RE,
-  BYTEPLUS_VIDEO_SUBMIT_RE,
-  OPENROUTER_VIDEO_CONTENT_RE,
-  OPENROUTER_VIDEO_STATUS_RE,
-  VEO_PREDICT_LRO_RE,
-  VEO_OPERATION_RE,
-  GROK_VIDEO_SUBMIT_PATH,
-  GROK_VIDEO_STATUS_RE,
-  FILES_ID_RE,
-  FILES_CONTENT_RE,
-} from "./metrics.js";
+import { createMetricsRegistry, normalizePathLabel } from "./metrics.js";
 import { proxyAndRecord } from "./recorder.js";
 import {
   resolveInboundAuth,
@@ -2246,7 +2251,7 @@ export async function createServerWithResolvedAuth(
 
     const isPublicProbe =
       req.method === "GET" &&
-      (pathname === HEALTH_PATH || pathname === READY_PATH || pathname === "/metrics");
+      (pathname === HEALTH_PATH || pathname === READY_PATH || pathname === METRICS_PATH);
     if (!isPublicProbe) {
       if (!validateRequestApiKey(req, resolvedAuth.policy).ok) {
         writeApiKeyHttpRejection(res, setCorsHeaders);
@@ -2671,15 +2676,15 @@ export async function createServerWithResolvedAuth(
     // (which does not rewrite these — /models etc. are excluded from
     // COMPAT_SUFFIXES — so they would otherwise 404), mirroring the
     // /api/v1/videos ordering above. Read-only metadata; no body.
-    if (pathname === "/api/v1/models" && req.method === "GET") {
+    if (pathname === OPENROUTER_MODELS_PATH && req.method === "GET") {
       handleOpenRouterModels(req, res, fixtures, journal, defaults, setCorsHeaders);
       return;
     }
-    if (pathname === "/api/v1/key" && req.method === "GET") {
+    if (pathname === OPENROUTER_KEY_PATH && req.method === "GET") {
       handleOpenRouterKey(req, res, journal, setCorsHeaders);
       return;
     }
-    if (pathname === "/api/v1/credits" && req.method === "GET") {
+    if (pathname === OPENROUTER_CREDITS_PATH && req.method === "GET") {
       handleOpenRouterCredits(req, res, journal, setCorsHeaders);
       return;
     }
@@ -2729,7 +2734,7 @@ export async function createServerWithResolvedAuth(
     }
 
     // Prometheus metrics
-    if (pathname === "/metrics" && req.method === "GET") {
+    if (pathname === METRICS_PATH && req.method === "GET") {
       if (!registry) {
         handleNotFound(res, "Not found");
         return;
@@ -4218,6 +4223,20 @@ export async function createServerWithResolvedAuth(
 
     // POST /v1/chat/completions — Chat Completions API
     if (pathname !== COMPLETIONS_PATH) {
+      // Registry drift guard: the catalog claims every ROUTE_DEFINITIONS
+      // entry is mounted. If the registry matches a request the dispatcher
+      // just fell through, the two have drifted — warn loudly (the 404
+      // stands; this never changes serving behavior). Exempt: /metrics 404s
+      // by design when the server runs with `metrics: false`.
+      const catalogMatch = matchRouteDefinition(req.method ?? "", pathname);
+      if (catalogMatch && !(pathname === METRICS_PATH && !registry)) {
+        defaults.logger.warn(
+          `Route drift: ${req.method ?? "?"} ${pathname} matches the route catalog ` +
+            `(${catalogMatch.method} ${catalogMatch.path} — ${catalogMatch.description}) ` +
+            `but no dispatcher branch served it. The catalog entry or the dispatcher ` +
+            `is stale — see route-registry.ts.`,
+        );
+      }
       handleNotFound(res, "Not found");
       return;
     }

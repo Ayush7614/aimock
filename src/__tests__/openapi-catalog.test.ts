@@ -1,7 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { LLMock } from "../llmock.js";
 import { CATALOG_ROUTES, buildOpenApiDocument } from "../openapi.js";
-import { ROUTE_DEFINITIONS } from "../route-registry.js";
+import { ROUTE_DEFINITIONS, matchRouteDefinition, templateToRegExp } from "../route-registry.js";
+import * as registry from "../route-registry.js";
 
 describe("OpenAPI route catalog", () => {
   let mock: LLMock;
@@ -194,4 +195,142 @@ describe("OpenAPI route catalog", () => {
       ).toBe(false);
     }
   }, 60000);
+
+  it("every dispatch pattern has a catalog entry (router → catalog, no drift)", () => {
+    // The reverse direction of the probe above: the dispatcher matches
+    // against the `*_PATH` / `*_RE` bindings imported from route-registry.ts,
+    // so each of those bindings must resolve to at least one catalog entry.
+    // A new dispatch branch that forgets its ROUTE_DEFINITIONS entry fails
+    // here instead of silently drifting.
+    //
+    // Deliberately NOT covered (documented in route-registry.ts): the
+    // WebSocket-only upgrade paths (no HTTP method, so no OpenAPI operation),
+    // CONTROL_PREFIX (a prefix, not a route), and FAL_PREFIX_RE (a
+    // header-gated upstream mirror, not a fixed route).
+    const WS_ONLY = new Set(["REALTIME_PATH", "GEMINI_LIVE_PATH"]);
+    const NON_ROUTES = new Set(["CONTROL_PREFIX", "FAL_PREFIX_RE"]);
+    const catalogPaths = new Set(ROUTE_DEFINITIONS.map((r) => `${r.method} ${r.path}`));
+    const catalogExamples = ROUTE_DEFINITIONS.map((r) => ({
+      key: `${r.method} ${r.path}`,
+      method: r.method,
+      probe: r.examplePath ?? r.path,
+    }));
+
+    for (const [name, value] of Object.entries(registry)) {
+      if (NON_ROUTES.has(name) || WS_ONLY.has(name)) continue;
+      if (typeof value === "string" && name.endsWith("_PATH")) {
+        const covered = ROUTE_DEFINITIONS.some((r) => r.path === value);
+        expect(covered, `dispatch path ${name} (${value}) has no catalog entry`).toBe(true);
+      } else if (value instanceof RegExp && name.endsWith("_RE")) {
+        const covered = catalogExamples.filter((e) => value.test(e.probe));
+        expect(
+          covered.length > 0,
+          `dispatch pattern ${name} (${value}) matches no catalog examplePath`,
+        ).toBe(true);
+      }
+    }
+    // Sanity: the loop above actually inspected the dispatch surface.
+    const pathCount = Object.keys(registry).filter((k) => k.endsWith("_PATH")).length;
+    expect(pathCount).toBeGreaterThan(20);
+    expect(catalogPaths.size).toBe(ROUTE_DEFINITIONS.length);
+  });
+
+  it("every catalog operation carries a real schema (no bare paths)", async () => {
+    const res = await fetch(`${mock.url}/__aimock/openapi.json`);
+    expect(res.status).toBe(200);
+    const doc = (await res.json()) as {
+      components: { schemas: Record<string, unknown> };
+      paths: Record<string, Record<string, Record<string, unknown>>>;
+    };
+    const schemas = doc.components.schemas;
+
+    // Every $ref in the document resolves.
+    const refs = new Set<string>();
+    const collect = (node: unknown): void => {
+      if (Array.isArray(node)) {
+        for (const item of node) collect(item);
+        return;
+      }
+      if (node !== null && typeof node === "object") {
+        for (const [key, entry] of Object.entries(node as Record<string, unknown>)) {
+          if (key === "$ref" && typeof entry === "string") refs.add(entry);
+          else collect(entry);
+        }
+      }
+    };
+    collect(doc.paths);
+    expect(refs.size).toBeGreaterThan(20);
+    for (const ref of refs) {
+      const name = ref.replace("#/components/schemas/", "");
+      expect(schemas[name] !== undefined, `unresolved $ref ${ref}`).toBe(true);
+    }
+
+    // No operation is a bare path: each has a requestBody, a success body, or
+    // an explicit non-200 success status (replayed removals, 204 clears).
+    // In particular the review-flagged families must have real schemas.
+    const mustHaveSchemas = [
+      "POST /v1/messages",
+      "GET /v1/files",
+      "POST /v1/files",
+      "GET /v1/files/{file_id}",
+      "DELETE /v1/files/{file_id}",
+      "GET /v1/files/{file_id}/content",
+      "POST /v1/fine_tuning/jobs",
+      "GET /v1/fine_tuning/jobs",
+      "GET /v1/fine_tuning/jobs/{job_id}",
+      "POST /v1/fine_tuning/jobs/{job_id}/cancel",
+      "GET /v1/fine_tuning/jobs/{job_id}/events",
+    ];
+    for (const r of ROUTE_DEFINITIONS) {
+      const operation = doc.paths[r.path]?.[r.method.toLowerCase()] as
+        | Record<string, unknown>
+        | undefined;
+      expect(operation !== undefined, `missing operation ${r.method} ${r.path}`).toBe(true);
+      const responses = operation.responses as Record<string, unknown>;
+      // 400 is always the validation error; anything else (200, 204, or the
+      // documented 404 replay of a removed route) is the success outcome.
+      const successKey = Object.keys(responses).find((s) => s !== "400");
+      expect(successKey !== undefined, `no success response for ${r.method} ${r.path}`).toBe(true);
+      const hasRequest = operation.requestBody !== undefined;
+      const success = responses[successKey!] as { content?: unknown };
+      const hasSuccessBody = success.content !== undefined;
+      const nonJsonSuccess = successKey !== "200";
+      expect(
+        hasRequest || hasSuccessBody || nonJsonSuccess,
+        `${r.method} ${r.path} is a bare path with no schema`,
+      ).toBe(true);
+      if (mustHaveSchemas.includes(`${r.method} ${r.path}`)) {
+        expect(hasRequest || hasSuccessBody).toBe(true);
+      }
+    }
+  });
+
+  it("matchRouteDefinition agrees with the registry table", () => {
+    // Exact paths resolve.
+    expect(matchRouteDefinition("POST", "/v1/chat/completions")?.service).toBe("openai");
+    expect(matchRouteDefinition("get", "/health")?.service).toBe("ops");
+    // Templates resolve their example paths.
+    expect(matchRouteDefinition("POST", "/v1/text-to-speech/test-voice")?.service).toBe(
+      "elevenlabs",
+    );
+    expect(matchRouteDefinition("GET", "/v1/fine_tuning/jobs/ftjob-test123/events")?.service).toBe(
+      "fine-tuning",
+    );
+    // Method mismatches and unknown paths miss.
+    expect(matchRouteDefinition("GET", "/v1/chat/completions")).toBeUndefined();
+    expect(matchRouteDefinition("POST", "/v1/_requests")).toBeUndefined();
+    expect(matchRouteDefinition("GET", "/nope/not-a-route")).toBeUndefined();
+    // Self-consistency: every entry's probe path resolves to an entry.
+    for (const r of ROUTE_DEFINITIONS) {
+      const hit = matchRouteDefinition(r.method, r.examplePath ?? r.path);
+      expect(hit !== undefined, `${r.method} ${r.examplePath ?? r.path} misses`).toBe(true);
+    }
+    // templateToRegExp compiles single-segment params and literal actions.
+    expect(
+      templateToRegExp("/v1beta/models/{model}:predict").test("/v1beta/models/a:predict"),
+    ).toBe(true);
+    expect(
+      templateToRegExp("/v1beta/models/{model}:predict").test("/v1beta/models/a/b:predict"),
+    ).toBe(false);
+  });
 });
