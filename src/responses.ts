@@ -943,7 +943,7 @@ function buildResponseEnvelope(
   };
 }
 
-function buildTextResponse(
+export function buildTextResponse(
   content: string,
   model: string,
   reasoning?: string,

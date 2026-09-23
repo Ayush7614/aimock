@@ -66,7 +66,7 @@ describe("OpenAPI route catalog", () => {
       "GET /fal/queue/requests/{requestId}",
       "POST /fal/run/{model}",
       // New on main after the PR opened: Files API, fine-tuning jobs,
-      // ElevenLabs Voice Design slots.
+      // ElevenLabs Voice Design slots, Batches API.
       "GET /v1/files",
       "POST /v1/files",
       "GET /v1/files/{file_id}",
@@ -81,6 +81,10 @@ describe("OpenAPI route catalog", () => {
       "POST /v1/text-to-voice",
       "GET /v1/voices/{voice_id}",
       "DELETE /v1/voices/{voice_id}",
+      "POST /v1/batches",
+      "GET /v1/batches",
+      "GET /v1/batches/{batch_id}",
+      "POST /v1/batches/{batch_id}/cancel",
       "POST /__aimock/reset/journal",
       "GET /__aimock/journal",
       "GET /__aimock/openapi.json",
@@ -205,10 +209,10 @@ describe("OpenAPI route catalog", () => {
     //
     // Deliberately NOT covered (documented in route-registry.ts): the
     // WebSocket-only upgrade paths (no HTTP method, so no OpenAPI operation),
-    // CONTROL_PREFIX (a prefix, not a route), and FAL_PREFIX_RE (a
+    // CONTROL_PREFIX (a prefix, not a route), and FAL_ROUTE_RE (a
     // header-gated upstream mirror, not a fixed route).
-    const WS_ONLY = new Set(["REALTIME_PATH", "GEMINI_LIVE_PATH"]);
-    const NON_ROUTES = new Set(["CONTROL_PREFIX", "FAL_PREFIX_RE"]);
+    const WS_ONLY = new Set(["REALTIME_PATH", "GEMINI_LIVE_PATH", "LIVE_PATH"]);
+    const NON_ROUTES = new Set(["CONTROL_PREFIX", "FAL_ROUTE_RE"]);
     const catalogPaths = new Set(ROUTE_DEFINITIONS.map((r) => `${r.method} ${r.path}`));
     const catalogExamples = ROUTE_DEFINITIONS.map((r) => ({
       key: `${r.method} ${r.path}`,
@@ -270,6 +274,10 @@ describe("OpenAPI route catalog", () => {
     // In particular the review-flagged families must have real schemas.
     const mustHaveSchemas = [
       "POST /v1/messages",
+      "GET /v1/batches",
+      "POST /v1/batches",
+      "GET /v1/batches/{batch_id}",
+      "POST /v1/batches/{batch_id}/cancel",
       "GET /v1/files",
       "POST /v1/files",
       "GET /v1/files/{file_id}",

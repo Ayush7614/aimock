@@ -36,7 +36,7 @@ import {
   strictOverrideField,
   strictNoMatchMessage,
   strictNoMatchLogLine,
-  resolveFixtureBlocks,
+  resolveFixtureBlockOutcome,
 } from "./helpers.js";
 import { matchFixtureDiagnostic } from "./router.js";
 import { writeErrorResponse, delay, calculateDelay } from "./sse-writer.js";
@@ -395,13 +395,16 @@ export function buildInteractionsContentWithToolCallsResponse(
   // concatenated text steps regardless of where they appear in `steps`.
   let outputText = "";
 
+  let hasToolCalls = true;
   if (blocks && blocks.length > 0) {
     // NEW PATH: the non-stream `steps[]` array is index/step-addressed and
     // ordered, so emit one step per block in fixture ARRAY ORDER. A toolCall
     // block placed before a text block therefore yields a function_call step
     // ahead of the model_output step — tool-first, the opposite of the legacy
     // (text-step-always-first) shape below.
-    const ordered = resolveFixtureBlocks(blocks);
+    const outcome = resolveFixtureBlockOutcome(blocks);
+    const ordered = outcome.ordered;
+    hasToolCalls = outcome.hasToolCalls;
     for (const block of ordered) {
       if (block.type === "text") {
         steps.push({ type: "model_output", content: [{ type: "text", text: block.text }] });
@@ -427,7 +430,7 @@ export function buildInteractionsContentWithToolCallsResponse(
 
   return {
     id: interactionId,
-    status: "requires_action",
+    status: hasToolCalls ? "requires_action" : "completed",
     model: overrides?.model ?? model,
     role: "model",
     output_text: outputText,
@@ -711,12 +714,15 @@ export function buildInteractionsContentWithToolCallsSSEEvents(
     event_id: nextEventId(),
   });
 
+  let hasToolCalls = true;
   if (blocks && blocks.length > 0) {
     // NEW PATH: stream one step per block in fixture ARRAY ORDER. The step
     // `index` increments with array position, so a toolCall block before a text
     // block yields a function_call step at a LOWER index than the model_output
     // step — tool-first, the opposite of the legacy (text-at-index-0) shape.
-    const ordered = resolveFixtureBlocks(blocks);
+    const outcome = resolveFixtureBlockOutcome(blocks);
+    const ordered = outcome.ordered;
+    hasToolCalls = outcome.hasToolCalls;
     let idx = 0;
     for (const block of ordered) {
       if (block.type === "text") {
@@ -745,7 +751,7 @@ export function buildInteractionsContentWithToolCallsSSEEvents(
     event_type: "interaction.completed",
     interaction: {
       id: interactionId,
-      status: "requires_action",
+      status: hasToolCalls ? "requires_action" : "completed",
       usage: interactionsUsage(overrides),
     },
     event_id: nextEventId(),

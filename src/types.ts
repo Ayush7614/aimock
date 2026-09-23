@@ -1,6 +1,7 @@
 import type * as http from "node:http";
 import type * as net from "node:net";
 import type { Journal } from "./journal.js";
+import type { LiveFixtureResponse, LiveOptions } from "./live-types.js";
 import type { Logger } from "./logger.js";
 import type { MetricsRegistry } from "./metrics.js";
 
@@ -164,7 +165,8 @@ export interface FixtureMatch {
     | "fal"
     | "realtime"
     | "realtime-transcription"
-    | "realtime-translation";
+    | "realtime-translation"
+    | "openai-live";
   context?: string;
 }
 
@@ -502,7 +504,8 @@ export type FixtureResponse =
   | AudioResponse
   | TranscriptionResponse
   | VideoResponse
-  | RawJSONResponse;
+  | RawJSONResponse
+  | LiveFixtureResponse;
 
 // GA Realtime session types
 
@@ -781,7 +784,8 @@ export type FixtureFileResponse =
   | AudioResponse
   | TranscriptionResponse
   | VideoResponse
-  | RawJSONResponse;
+  | RawJSONResponse
+  | LiveFixtureResponse;
 
 export interface FixtureFile {
   fixtures: FixtureFileEntry[];
@@ -834,7 +838,8 @@ export interface FixtureFileEntry {
       | "fal"
       | "realtime"
       | "realtime-transcription"
-      | "realtime-translation";
+      | "realtime-translation"
+      | "openai-live";
     context?: string;
     // predicate not supported in JSON files
   };
@@ -908,6 +913,12 @@ export interface JournalEntry {
     source?: "fixture" | "proxy" | "internal";
     interrupted?: boolean;
     interruptReason?: string;
+    /**
+     * The handler crashed AFTER the response completed. The client received
+     * `status` in full, so this is not an interruption; the message is what
+     * the crash said.
+     */
+    error?: string;
     chaosAction?: ChaosAction;
     /** When the X-AIMock-Strict header overrode the server default. */
     strictOverride?: boolean;
@@ -1175,6 +1186,7 @@ export interface FalRecordConfig {
 }
 
 export interface MockServerOptions {
+  live?: LiveOptions;
   /** Optional inbound test-client access keys. Omit to preserve permissive behavior. */
   auth?: ApiKeyAuthConfig;
   port?: number;

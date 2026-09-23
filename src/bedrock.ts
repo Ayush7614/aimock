@@ -41,7 +41,7 @@ import {
   getContext,
   getTestId,
   resolveResponse,
-  resolveFixtureBlocks,
+  resolveFixtureBlockOutcome,
   resolveReasoningForModel,
   resolveStrictMode,
   strictOverrideField,
@@ -370,7 +370,8 @@ function buildBedrockBlocksResponse(
     contentBlocks.push({ type: "thinking", thinking: reasoning, signature: "" });
   }
 
-  const ordered = resolveFixtureBlocks(blocks);
+  const outcome = resolveFixtureBlockOutcome(blocks);
+  const ordered = outcome.ordered;
   for (const block of ordered) {
     if (block.type === "text") {
       contentBlocks.push({ type: "text", text: block.text });
@@ -399,7 +400,10 @@ function buildBedrockBlocksResponse(
     role: "assistant",
     content: contentBlocks,
     model: overrides?.model ?? model,
-    stop_reason: bedrockStopReason(overrides?.finishReason, "tool_use"),
+    stop_reason: bedrockStopReason(
+      overrides?.finishReason,
+      outcome.hasToolCalls ? "tool_use" : "end_turn",
+    ),
     stop_sequence: null,
     usage: bedrockUsage(overrides),
   };
@@ -1002,7 +1006,8 @@ export function buildBedrockStreamContentWithToolCallsEvents(
     // positional, so a `toolCall` block can take a lower `index` than a `text`
     // block (tool-first is wire-expressible). Indices continue from any leading
     // thinking block above.
-    const ordered = resolveFixtureBlocks(blocks);
+    const outcome = resolveFixtureBlockOutcome(blocks);
+    const ordered = outcome.ordered;
     for (const block of ordered) {
       if (block.type === "text") {
         events.push({
@@ -1068,7 +1073,9 @@ export function buildBedrockStreamContentWithToolCallsEvents(
     }
 
     events.push(
-      buildBedrockInvokeMessageDelta(bedrockStopReason(overrides?.finishReason, "tool_use")),
+      buildBedrockInvokeMessageDelta(
+        bedrockStopReason(overrides?.finishReason, outcome.hasToolCalls ? "tool_use" : "end_turn"),
+      ),
     );
     events.push(buildBedrockInvokeMessageStop());
     return events;

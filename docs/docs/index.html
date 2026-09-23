@@ -248,9 +248,9 @@
               </div>
               <pre><code>{
   <span class="key">"llm"</span>:    { <span class="key">"fixtures"</span>: <span class="str">"./fixtures/llm"</span> },
-  <span class="key">"mcp"</span>:    { <span class="key">"tools"</span>: [<span class="str">"search"</span>, <span class="str">"fetch"</span>] },
-  <span class="key">"a2a"</span>:    { <span class="key">"agents"</span>: [<span class="str">"planner"</span>] },
-  <span class="key">"vector"</span>: { <span class="key">"provider"</span>: <span class="str">"pinecone"</span> }
+  <span class="key">"mcp"</span>:    { <span class="key">"tools"</span>: [{ <span class="key">"name"</span>: <span class="str">"search"</span>, <span class="key">"result"</span>: <span class="str">"3 results"</span> }] },
+  <span class="key">"a2a"</span>:    { <span class="key">"agents"</span>: [{ <span class="key">"name"</span>: <span class="str">"planner"</span> }] },
+  <span class="key">"vector"</span>: { <span class="key">"collections"</span>: [{ <span class="key">"name"</span>: <span class="str">"docs"</span>, <span class="key">"dimension"</span>: <span class="num">1536</span> }] }
 }</code></pre>
             </div>
             <p><a href="/aimock-cli">Quick Start: full suite &rarr;</a></p>

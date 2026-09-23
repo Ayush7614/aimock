@@ -4,10 +4,17 @@
  *
  * LIVE COVERAGE: NONE. Read this before adding a row that says "Covered".
  *
- * Not one leg in this file reaches `api.elevenlabs.io`. No ElevenLabs API key
- * is reachable from this repo (1Password holds an `elevenlabs.io` web login,
- * not a key), so no successful Voice Design response has ever been observed
- * here — see the provenance block at the top of `src/elevenlabs-voice.ts`.
+ * Not one leg in this file reaches `api.elevenlabs.io`. That is the ONLY
+ * reason there is no live coverage: a key is WIRED into CI — both drift
+ * workflows (`.github/workflows/test-drift.yml`, `fix-drift.yml`) pass
+ * `secrets.ELEVENLABS_API_KEY` as `ELEVENLABS_API_KEY` to the drift run;
+ * whether that secret is populated is not visible from the repo — but no case
+ * here fetches the vendor with it, so setting the key changes nothing in this
+ * file. These routes have no vendor leg; they are offline-only. No successful
+ * Voice Design response has been observed from this repo — see the provenance
+ * block at the top of `src/elevenlabs-voice.ts`.
+ * Earning "live" here means adding a leg that spends Voice Design credits
+ * against the real service, not flipping the registry.
  * These cases drive the LOCAL aimock server and grade its output against the
  * SDK-derived shapes below, which is offline CONFORMANCE (it reds when
  * aimock's own builder changes shape) and NOT drift detection: nothing in this
@@ -161,13 +168,17 @@ const VOICE_DESCRIPTION = "A weathered sea captain in his sixties, gravelly, unh
 let mock: LLMock;
 
 beforeAll(async () => {
-  mock = new LLMock({ port: 0 });
-  mock.onElevenLabsVoiceDesign(VOICE_DESCRIPTION, VOICE_DESIGN_SOURCE);
-  await mock.start();
+  const server = new LLMock({ port: 0 });
+  server.onElevenLabsVoiceDesign(VOICE_DESCRIPTION, VOICE_DESIGN_SOURCE);
+  await server.start();
+  // Assigned only once started: `afterAll` below skips `stop()` otherwise,
+  // because `stop()` on an unstarted LLMock throws and that throw would REPLACE
+  // the `beforeAll` failure in the report.
+  mock = server;
 });
 
 afterAll(async () => {
-  await mock.stop();
+  if (mock) await mock.stop();
   // The `/v1/text-to-voice` case below ("the created voice carries exactly the
   // Voice keys aimock claims to emit") writes `preview_captain` into the
   // MODULE-GLOBAL voice store (src/elevenlabs-voice.ts), which `stop()` does
@@ -273,8 +284,14 @@ describe("ElevenLabs Voice Design conformance (offline) — /v1/text-to-voice/de
     bare.onElevenLabsVoiceDesign(VOICE_DESCRIPTION, {
       previews: [{ generated_voice_id: "", audio_base_64: "" }],
     });
-    await bare.start();
+    // The server is constructed above the `try`; `start()` (which binds the
+    // port) and the request run inside it, so a failure in either still reaches
+    // the `finally`. `started` guards `stop()` because stopping an unstarted
+    // LLMock throws and would hide the original error.
+    let started = false;
     try {
+      await bare.start();
+      started = true;
       const res = await httpPost(`${bare.url}/v1/text-to-voice/design`, {
         voice_description: VOICE_DESCRIPTION,
       });
@@ -296,7 +313,7 @@ describe("ElevenLabs Voice Design conformance (offline) — /v1/text-to-voice/de
       expect(Object.hasOwn(body.previews[0], "language")).toBe(false);
       expect(body.text).toBe("");
     } finally {
-      await bare.stop();
+      if (started) await bare.stop();
     }
   });
 
@@ -307,9 +324,12 @@ describe("ElevenLabs Voice Design conformance (offline) — /v1/text-to-voice/de
     expect(res.headers["content-type"]).toContain("application/json");
 
     const body = JSON.parse(res.text);
-    // KNOWN DIVERGENCE: the real service answers `{ detail: {...} }` (observed
-    // keyless, 2026-09-15). aimock answers its house envelope on purpose; this
-    // pins aimock's contract, not ElevenLabs'.
+    // KNOWN DIVERGENCE: the real service answers a missing or short body field
+    // with 422 `{ detail: [ { type, loc, msg, ... } ] }` — an ARRAY, and body
+    // validation runs before auth, so it was observed keyless on 2026-09-15 —
+    // and an auth failure with 401 `{ detail: { type, code, message, status,
+    // request_id } }`, an object. aimock answers its house 400 envelope on
+    // purpose; this pins aimock's contract, not ElevenLabs'.
     expect(sortedKeys(body)).toEqual(sortedKeys(AIMOCK_ERROR_ENVELOPE));
     expect(sortedKeys(body.error)).toEqual(sortedKeys(AIMOCK_ERROR_ENVELOPE.error));
 

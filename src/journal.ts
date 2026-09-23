@@ -114,7 +114,9 @@ function matchCriteriaEqual(a: FixtureMatch, b: FixtureMatch): boolean {
     fieldEqual(a.predicate, b.predicate) &&
     fieldEqual(a.endpoint, b.endpoint) &&
     fieldEqual(a.turnIndex, b.turnIndex) &&
-    fieldEqual(a.hasToolResult, b.hasToolResult)
+    fieldEqual(a.hasToolResult, b.hasToolResult) &&
+    fieldEqual(a.toolResultContains, b.toolResultContains) &&
+    fieldEqual(a.context, b.context)
   );
 }
 
@@ -142,15 +144,31 @@ export interface JournalOptions {
    * servers that see many unique testIds.
    */
   fixtureCountsMaxTestIds?: number;
+  /**
+   * Called with every entry {@link Journal.add} creates, right after it is
+   * recorded. The hook exists so an embedder can attribute an entry to the
+   * request that produced it WITHOUT touching each of the ~100 `journal.add`
+   * call sites spread across the handler modules: the server binds the entry
+   * to the in-flight `IncomingMessage` here, and its error arm then amends
+   * that exact object rather than guessing from a caller-supplied header.
+   *
+   * The entry is already recorded when the hook runs, so a hook that throws
+   * does not lose the write — but it does propagate out of `add` into the
+   * caller's error path, so a hook must not throw.
+   */
+  onAdd?: (entry: JournalEntry) => void;
 }
 
 export class Journal {
   private entries: JournalEntry[] = [];
+  private readonly matchedFixtures = new WeakMap<JournalEntry, Fixture>();
   private readonly fixtureMatchCountsByTestId: Map<string, Map<Fixture, number>> = new Map();
   private readonly maxEntries: number;
   private readonly fixtureCountsMaxTestIds: number;
+  private readonly onAdd?: (entry: JournalEntry) => void;
 
   constructor(options: JournalOptions = {}) {
+    this.onAdd = options.onAdd;
     // Treat 0 or negative as "unbounded" to preserve prior behavior when
     // the option is omitted or explicitly disabled.
     const cap = options.maxEntries;
@@ -164,13 +182,15 @@ export class Journal {
     return this.getFixtureMatchCountsForTest(DEFAULT_TEST_ID);
   }
 
-  add(entry: Omit<JournalEntry, "id" | "timestamp">): JournalEntry {
+  /** @internal matchedFixture preserves identity when Live supplies safe diagnostics. */
+  add(entry: Omit<JournalEntry, "id" | "timestamp">, matchedFixture?: Fixture): JournalEntry {
     const full: JournalEntry = {
       id: generateId("req"),
       timestamp: Date.now(),
       ...entry,
       body: capBody(entry.body),
     };
+    if (matchedFixture) this.matchedFixtures.set(full, matchedFixture);
     this.entries.push(full);
     // FIFO eviction when over capacity. Array.prototype.shift() is O(n)
     // regardless of how many we drop per add; we accept it at small caps
@@ -180,12 +200,24 @@ export class Journal {
     if (this.maxEntries > 0 && this.entries.length > this.maxEntries) {
       this.entries.shift();
     }
+    this.onAdd?.(full);
     return full;
   }
 
+  /**
+   * Return every entry, or with `limit` the most recent `limit` entries.
+   * `0` returns `[]` — exactly what `GET /__aimock/journal?limit=0` answers.
+   * `slice(-0)` is `slice(0)`, so a `0` used to return the ENTIRE journal; it
+   * is special-cased so the library and the HTTP route agree. This is a public
+   * library API, so odd limits are tolerated rather than thrown on: a
+   * non-finite limit (`NaN`, `Infinity`) means "no limit", a fractional limit
+   * floors, and any limit at or below `0` asks for nothing.
+   */
   getAll(opts?: { limit?: number }): JournalEntry[] {
-    if (opts?.limit !== undefined) {
-      return this.entries.slice(-opts.limit);
+    if (opts?.limit !== undefined && Number.isFinite(opts.limit)) {
+      const limit = Math.floor(opts.limit);
+      if (limit <= 0) return [];
+      return this.entries.slice(-limit);
     }
     return this.entries.slice();
   }
@@ -195,7 +227,9 @@ export class Journal {
   }
 
   findByFixture(fixture: Fixture): JournalEntry[] {
-    return this.entries.filter((e) => e.response.fixture === fixture);
+    return this.entries.filter(
+      (e) => (this.matchedFixtures.get(e) ?? e.response.fixture) === fixture,
+    );
   }
 
   /**

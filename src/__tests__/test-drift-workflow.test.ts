@@ -451,6 +451,11 @@ const observeCollectorLeg = (
       ].join("\n"),
       { mode: 0o755 },
     );
+    writeFileSync(
+      join(bin, "git"),
+      '#!/bin/sh\ncase "$*" in *rev-parse*) echo pinned-agui;; esac\n',
+      { mode: 0o755 },
+    );
     const step = stepByName(stepName, job);
     const script = join(dir, "step.sh");
     writeFileSync(script, step.run);
@@ -465,6 +470,8 @@ const observeCollectorLeg = (
         GITHUB_WORKSPACE: dir,
         GITHUB_OUTPUT: outFile,
         LIVE_LEGS_RAN: "true",
+        AGUI_REPO_PATH: dir,
+        AGUI_UPSTREAM_SHA: "pinned-agui",
       },
     });
     return {
@@ -692,6 +699,7 @@ const observeBaseLeg = (
       join(bin, "npx"),
       [
         "#!/bin/sh",
+        'case "$*" in *drift-agui-baseline.ts*) echo true; exit 0;; esac',
         `cat > ${JSON.stringify(join(ws, "drift-report-base.json"))} <<'REPORT'`,
         report,
         "REPORT",
@@ -716,6 +724,7 @@ const observeBaseLeg = (
         GITHUB_WORKSPACE: ws,
         GITHUB_OUTPUT: outFile,
         LIVE_LEGS_RAN: "true",
+        AGUI_REPO_PATH: parent,
         REPO: "CopilotKit/aimock",
         GH_TOKEN: "stub",
       },

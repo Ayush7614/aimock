@@ -1,6 +1,9 @@
+import type { LiveOptions } from "./live-types.js";
+import { normalizeLiveFixture } from "./live-fixture.js";
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import type {
+  ChatCompletionRequest,
   Fixture,
   FixtureFile,
   FixtureFileEntry,
@@ -9,6 +12,7 @@ import type {
   ResponseOverrides,
 } from "./types.js";
 import {
+  isLiveResponse,
   isTextResponse,
   isToolCallResponse,
   isContentWithToolCallsResponse,
@@ -21,6 +25,7 @@ import {
   isJSONResponse,
 } from "./helpers.js";
 import type { Logger } from "./logger.js";
+import { CHAOS_FIELDS, CHAOS_FIELD_NAMES, parseChaosField } from "./chaos.js";
 
 /**
  * Auto-stringify object-valued `content` and `toolCalls[].arguments` fields.
@@ -29,7 +34,11 @@ import type { Logger } from "./logger.js";
  * `fallthrough` OpenRouter-failover flag) pass through unmodified via the
  * shallow clone below.
  */
-export function normalizeResponse(raw: FixtureFileResponse): FixtureResponse {
+export function normalizeResponse(
+  raw: FixtureFileResponse,
+  liveOptions?: LiveOptions,
+): FixtureResponse {
+  if (isLiveResponse(raw)) return normalizeLiveFixture(raw, liveOptions);
   // Shallow-clone so we don't mutate the parsed JSON input.
   const response = { ...raw } as Record<string, unknown>;
 
@@ -70,7 +79,11 @@ export function normalizeResponse(raw: FixtureFileResponse): FixtureResponse {
   return response as unknown as FixtureResponse;
 }
 
-export function entryToFixture(entry: FixtureFileEntry, logger?: Logger): Fixture {
+export function entryToFixture(
+  entry: FixtureFileEntry,
+  logger?: Logger,
+  liveOptions?: LiveOptions,
+): Fixture {
   const fixture: Fixture = {
     match: {
       userMessage: entry.match.userMessage,
@@ -91,7 +104,10 @@ export function entryToFixture(entry: FixtureFileEntry, logger?: Logger): Fixtur
       }),
       ...(entry.match.context !== undefined && { context: entry.match.context }),
     },
-    response: normalizeResponse(entry.response),
+    response:
+      entry.match.endpoint === "openai-live"
+        ? normalizeLiveFixture(entry.response, liveOptions)
+        : normalizeResponse(entry.response, liveOptions),
     ...(entry.latency !== undefined && { latency: entry.latency }),
     ...(entry.chunkSize !== undefined && { chunkSize: entry.chunkSize }),
     ...(entry.truncateAfterChunks !== undefined && {
@@ -151,7 +167,11 @@ function warn(logger: Logger | undefined, msg: string, ...rest: unknown[]): void
   }
 }
 
-export function loadFixtureFile(filePath: string, logger?: Logger): Fixture[] {
+export function loadFixtureFile(
+  filePath: string,
+  logger?: Logger,
+  liveOptions?: LiveOptions,
+): Fixture[] {
   let raw: string;
   try {
     raw = readFileSync(filePath, "utf-8");
@@ -177,10 +197,14 @@ export function loadFixtureFile(filePath: string, logger?: Logger): Fixture[] {
     return [];
   }
 
-  return (parsed as FixtureFile).fixtures.map((e) => entryToFixture(e, logger));
+  return (parsed as FixtureFile).fixtures.map((e) => entryToFixture(e, logger, liveOptions));
 }
 
-export function loadFixturesFromDir(dirPath: string, logger?: Logger): Fixture[] {
+export function loadFixturesFromDir(
+  dirPath: string,
+  logger?: Logger,
+  liveOptions?: LiveOptions,
+): Fixture[] {
   let entries: string[];
   try {
     entries = readdirSync(dirPath);
@@ -214,14 +238,14 @@ export function loadFixturesFromDir(dirPath: string, logger?: Logger): Fixture[]
   const fixtures: Fixture[] = [];
   for (const name of jsonFiles) {
     const filePath = join(dirPath, name);
-    fixtures.push(...loadFixtureFile(filePath, logger));
+    fixtures.push(...loadFixtureFile(filePath, logger, liveOptions));
   }
 
   // Recurse into all subdirectories (full depth) to support nested layouts
   // like showcase/aimock/d6/<integration>/<feature>.json.
   subdirs.sort();
   for (const sub of subdirs) {
-    fixtures.push(...loadFixturesFromDir(join(dirPath, sub), logger));
+    fixtures.push(...loadFixturesFromDir(join(dirPath, sub), logger, liveOptions));
   }
 
   return fixtures;
@@ -510,7 +534,164 @@ export function isInjectableStatus(status: unknown): status is number {
   return Number.isInteger(status) && status >= 200 && status <= 999;
 }
 
-export function validateFixtures(fixtures: Fixture[]): ValidationResult[] {
+/**
+ * An injected error is only a valid response for endpoints that can carry an
+ * error envelope. Mirrors the router's endpoint-compat table
+ * (matchFixtureDiagnostic in router.ts): error responses are compatible with
+ * chat / embedding / realtime* / fal / the four elevenlabs-voice* slots and
+ * with requests that carry no endpoint type, but NOT with multimedia endpoints
+ * (image, speech, video, transcription, …). Whether files / fine-tuning /
+ * batches belong here is an open design question — not widened yet.
+ */
+function isErrorEndpointCompatible(req: ChatCompletionRequest): boolean {
+  const reqEndpoint = req._endpointType as string | undefined;
+  return (
+    reqEndpoint === undefined ||
+    reqEndpoint === "chat" ||
+    reqEndpoint === "embedding" ||
+    reqEndpoint.startsWith("realtime") ||
+    reqEndpoint === "fal" ||
+    reqEndpoint === "elevenlabs-voice-design" ||
+    reqEndpoint === "elevenlabs-voice" ||
+    reqEndpoint === "elevenlabs-voice-get" ||
+    reqEndpoint === "elevenlabs-voice-delete"
+  );
+}
+
+/**
+ * Queue a one-shot injected error at the FRONT of `fixtures` — shared by
+ * `LLMock.nextRequestError` and `POST /__aimock/error` so both doors gate and
+ * consume identically. The caller validates `status` (`isInjectableStatus`).
+ *
+ * The fixture is consumed exactly when its error body is actually WRITTEN to a
+ * client, not when its predicate is evaluated and not when its factory happens
+ * to run. Handlers that await chaos claim it synchronously at selection
+ * (`claimOneShotError`) so two concurrent requests cannot both pick it across
+ * the chaos-latency await, and RELEASES the claim (`releaseOneShotError`) on
+ * every exit that ends the request without writing that body — a terminal
+ * chaos action, or a client that left during the chaos-latency delay — unless
+ * the queue was cleared (`clearFixtureQueue`) in between, in which case the
+ * stale claim is dropped rather than re-armed into the reset queue. The
+ * claim cannot simply be deferred past the chaos gate instead: the chaos
+ * config is resolved FROM the selected fixture, and a claim taken after the
+ * latency await re-opens the concurrency race the claim-at-selection closes.
+ * The OpenRouter `models[]` loop cannot burn it by resolving a candidate it
+ * then fails past — the error is `fallthrough: false` (terminal) so the
+ * candidate that selects it serves it. The factory still performs the same
+ * idempotent claim for handlers that only reach the fixture via
+ * `resolveResponse` without an intervening await (realtime and fal). Consuming at
+ * predicate time burned the error unserved whenever a later fixture won
+ * selection (e.g. a behind-the-count `turnIndex` fixture) and spliced the
+ * array while the router was still iterating it, skipping the very fixture
+ * that then won. The predicate gate keeps an incompatible request (an image
+ * call) from selecting it at all, so the error stays pending for its intended
+ * endpoint.
+ */
+const oneShotErrorFixtures = new WeakSet<Fixture>();
+
+/** True for a fixture queued by `queueOneShotError` (still armed or not). */
+export function isOneShotError(fixture: Fixture): boolean {
+  return oneShotErrorFixtures.has(fixture);
+}
+
+/**
+ * Claim (consume) a one-shot error fixture. Returns true when this call
+ * removed it from `fixtures`; false when another request already claimed it,
+ * in which case the caller must NOT serve it and must re-select.
+ */
+export function claimOneShotError(fixtures: Fixture[], fixture: Fixture): boolean {
+  const idx = fixtures.indexOf(fixture);
+  if (idx === -1) return false;
+  fixtures.splice(idx, 1);
+  oneShotClaimGeneration.set(fixture, queueGeneration(fixtures));
+  return true;
+}
+
+/**
+ * Generation of each fixture queue, bumped by `clearFixtureQueue`. A one-shot
+ * claim records the generation it was taken under; a release under a LATER
+ * generation means the queue was cleared or reset while the claim was parked
+ * (in the chaos-latency await) and the claim is stale — re-arming it would
+ * plant the previous test's injection in the next test's freshly reset queue.
+ * Keyed by array identity: every clear path preserves the array reference
+ * (`length = 0`), so the counter follows the live queue.
+ */
+const fixtureQueueGeneration = new WeakMap<Fixture[], number>();
+const oneShotClaimGeneration = new WeakMap<Fixture, number>();
+
+function queueGeneration(fixtures: Fixture[]): number {
+  return fixtureQueueGeneration.get(fixtures) ?? 0;
+}
+
+/**
+ * Empty a fixture queue in place (array identity preserved — the running
+ * server reads this same array on every request) and invalidate every
+ * outstanding one-shot claim against it, so a release that lands after the
+ * clear is a no-op instead of re-arming into the emptied queue. The ONE door
+ * for `POST /__aimock/reset`, `DELETE /__aimock/fixtures` and
+ * `LLMock.clearFixtures`; a bare `fixtures.length = 0` misses the second half.
+ */
+export function clearFixtureQueue(fixtures: Fixture[]): void {
+  fixtures.length = 0;
+  fixtureQueueGeneration.set(fixtures, queueGeneration(fixtures) + 1);
+}
+
+/**
+ * Re-arm a one-shot error that was claimed for a request which then ended
+ * WITHOUT writing the error body — a terminal chaos action (drop / disconnect
+ * / rateLimit / malformed) or a client that hung up during the chaos-latency
+ * delay. Without this the injection is burned unserved and the NEXT request
+ * gets a 200, which is exactly the outcome `nextRequestError` promises not to
+ * produce. A no-op for a fixture that is not a one-shot, and for one still
+ * present in `fixtures` (never claimed, or already re-armed) so a double
+ * release cannot duplicate the injection — and for a claim taken before the
+ * queue was last cleared, so a reset that raced the request stays a reset.
+ */
+export function releaseOneShotError(fixtures: Fixture[], fixture: Fixture | null): void {
+  if (fixture === null || !oneShotErrorFixtures.has(fixture)) return;
+  if (fixtures.includes(fixture)) return;
+  // Claimed under an earlier generation: the queue was cleared/reset while
+  // this request was parked. The clear disarmed the injection — stay cleared.
+  if (oneShotClaimGeneration.get(fixture) !== queueGeneration(fixtures)) return;
+  // Front, matching `queueOneShotError`: the one-shot wins registration-order
+  // ties against everything else, exactly as it did before it was claimed.
+  fixtures.unshift(fixture);
+}
+
+export function queueOneShotError(
+  fixtures: Fixture[],
+  status: number,
+  errorBody?: { message?: string; type?: string; code?: string },
+): Fixture {
+  const errorResponse: FixtureResponse = {
+    error: {
+      message: errorBody?.message ?? "Injected error",
+      type: errorBody?.type ?? "server_error",
+      code: errorBody?.code,
+    },
+    status,
+    // Terminal in the OpenRouter `models[]` loop: the candidate that selects
+    // (and thereby claims) the one-shot serves it instead of failing past it.
+    fallthrough: false,
+  };
+  const fixture: Fixture = {
+    match: { predicate: isErrorEndpointCompatible },
+    response: () => {
+      // Idempotent: a no-op when the handler already claimed at selection.
+      claimOneShotError(fixtures, fixture);
+      return errorResponse;
+    },
+  };
+  oneShotErrorFixtures.add(fixture);
+  // Insert at front so it wins registration-order ties against everything else.
+  fixtures.unshift(fixture);
+  return fixture;
+}
+
+export function validateFixtures(
+  fixtures: Fixture[],
+  liveOptions?: LiveOptions,
+): ValidationResult[] {
   const results: ValidationResult[] = [];
 
   const seenUserMessages = new Map<string, number>();
@@ -518,6 +699,21 @@ export function validateFixtures(fixtures: Fixture[]): ValidationResult[] {
   for (let i = 0; i < fixtures.length; i++) {
     const f = fixtures[i];
     const response = f.response;
+
+    if (
+      typeof response !== "function" &&
+      (isLiveResponse(response) || f.match.endpoint === "openai-live")
+    ) {
+      try {
+        normalizeLiveFixture(response, liveOptions);
+      } catch (error) {
+        results.push({
+          severity: "error",
+          fixtureIndex: i,
+          message: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
 
     // Skip response-shape validation for function responses — they are
     // evaluated at runtime so we cannot statically inspect them.
@@ -539,13 +735,14 @@ export function validateFixtures(fixtures: Fixture[]): ValidationResult[] {
         !isAudioResponse(response) &&
         !isTranscriptionResponse(response) &&
         !isVideoResponse(response) &&
-        !isJSONResponse(response)
+        !isJSONResponse(response) &&
+        !isLiveResponse(response)
       ) {
         results.push({
           severity: "error",
           fixtureIndex: i,
           message:
-            "response is not a recognized type (must have content, toolCalls, error, embedding, image, audio, transcription, video, or json)",
+            "response is not a recognized type (must have content, toolCalls, error, embedding, image, audio, transcription, video, json, or live)",
         });
       }
 
@@ -915,41 +1112,27 @@ export function validateFixtures(fixtures: Fixture[]): ValidationResult[] {
       }
     }
     if (f.chaos !== undefined) {
-      const ch = f.chaos;
-      if (ch.dropRate !== undefined && (ch.dropRate < 0 || ch.dropRate > 1)) {
-        results.push({
-          severity: "error",
-          fixtureIndex: i,
-          message: "chaos.dropRate must be between 0 and 1",
-        });
-      }
-      if (ch.malformedRate !== undefined && (ch.malformedRate < 0 || ch.malformedRate > 1)) {
-        results.push({
-          severity: "error",
-          fixtureIndex: i,
-          message: "chaos.malformedRate must be between 0 and 1",
-        });
-      }
-      if (ch.disconnectRate !== undefined && (ch.disconnectRate < 0 || ch.disconnectRate > 1)) {
-        results.push({
-          severity: "error",
-          fixtureIndex: i,
-          message: "chaos.disconnectRate must be between 0 and 1",
-        });
-      }
-      if (ch.rateLimitRate !== undefined && (ch.rateLimitRate < 0 || ch.rateLimitRate > 1)) {
-        results.push({
-          severity: "error",
-          fixtureIndex: i,
-          message: "chaos.rateLimitRate must be between 0 and 1",
-        });
-      }
-      if (ch.latencyMs !== undefined && (ch.latencyMs < 0 || ch.latencyMs > 30000)) {
-        results.push({
-          severity: "error",
-          fixtureIndex: i,
-          message: "chaos.latencyMs must be between 0 and 30000",
-        });
+      // EVERY chaos field is routed through the ONE chaos table, so a fixture
+      // cannot accept a value the CLI, the header and the runtime reject. The
+      // hand-rolled `< 0 || > 1` checks this replaces let `NaN`, `-0` and a
+      // numeric string (`dropRate: "0.5"`) validate clean, and `latencyMs: 1.5`
+      // through; the runtime then rejected the fixture value on every request.
+      // A fixture is typed data, like the control API's JSON body: the field
+      // must be a number. A numeric STRING is a type error here, not a wire
+      // spelling to be parsed — the header API is the surface that takes text.
+      const ch = f.chaos as Record<string, unknown>;
+      for (const field of CHAOS_FIELD_NAMES) {
+        const value = ch[field];
+        if (value === undefined) continue;
+        const accepted = typeof value === "number" ? parseChaosField(field, value) : undefined;
+        if (accepted === undefined) {
+          const shape = CHAOS_FIELDS[field].integer ? "a whole number of ms" : "a number";
+          results.push({
+            severity: "error",
+            fixtureIndex: i,
+            message: `chaos.${field} must be ${shape} between 0 and ${CHAOS_FIELDS[field].max}`,
+          });
+        }
       }
     }
 

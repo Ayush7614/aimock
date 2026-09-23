@@ -1437,6 +1437,96 @@ const COMPONENTS: Record<string, unknown> = {
       has_more: { type: "boolean" },
     },
   },
+  BatchCreateRequest: {
+    type: "object",
+    required: ["input_file_id", "endpoint", "completion_window"],
+    properties: {
+      input_file_id: { type: "string" },
+      endpoint: {
+        type: "string",
+        enum: ["/v1/responses", "/v1/chat/completions", "/v1/embeddings", "/v1/completions"],
+      },
+      completion_window: { type: "string", enum: ["24h"] },
+      metadata: { type: "object" },
+    },
+  },
+  BatchObject: {
+    type: "object",
+    required: [
+      "id",
+      "object",
+      "endpoint",
+      "input_file_id",
+      "completion_window",
+      "status",
+      "created_at",
+    ],
+    properties: {
+      id: { type: "string" },
+      object: { type: "string", enum: ["batch"] },
+      endpoint: { type: "string" },
+      input_file_id: { type: "string" },
+      completion_window: { type: "string" },
+      status: {
+        type: "string",
+        enum: [
+          "validating",
+          "in_progress",
+          "completed",
+          "failed",
+          "expired",
+          "cancelling",
+          "cancelled",
+        ],
+      },
+      created_at: { type: "integer" },
+      metadata: { type: "object" },
+      in_progress_at: { type: "integer" },
+      completed_at: { type: "integer" },
+      failed_at: { type: "integer" },
+      expired_at: { type: "integer" },
+      cancelling_at: { type: "integer" },
+      cancelled_at: { type: "integer" },
+      output_file_id: { type: "string" },
+      error_file_id: { type: "string" },
+      errors: {
+        type: "object",
+        properties: {
+          object: { type: "string", enum: ["list"] },
+          data: {
+            type: "array",
+            items: {
+              type: "object",
+              properties: {
+                code: { type: "string" },
+                message: { type: "string" },
+                param: { type: ["string", "null"] },
+                line: { type: ["integer", "null"] },
+              },
+            },
+          },
+        },
+      },
+      request_counts: {
+        type: "object",
+        properties: {
+          total: { type: "integer" },
+          completed: { type: "integer" },
+          failed: { type: "integer" },
+        },
+      },
+    },
+  },
+  BatchListResponse: {
+    type: "object",
+    properties: {
+      object: { type: "string", enum: ["list"] },
+      data: { type: "array", items: { $ref: "#/components/schemas/BatchObject" } },
+      has_more: { type: "boolean" },
+      first_id: { type: ["string", "null"] },
+      last_id: { type: ["string", "null"] },
+    },
+  },
   ModelsListResponse: {
     type: "object",
     properties: {
@@ -1698,6 +1788,17 @@ const SCHEMA_REFS: Record<string, OperationSchemas> = {
   "POST /api/embeddings": { request: "OllamaEmbedRequest", response: "OllamaEmbedResponse" },
   "POST /api/embed": { request: "OllamaEmbedRequest", response: "OllamaEmbedResponse" },
   "GET /api/tags": { response: "OllamaTagsResponse" },
+  // OpenAI Batches API
+  "POST /v1/batches/{batch_id}/cancel": { response: "BatchObject" },
+  "GET /v1/batches/{batch_id}": { response: "BatchObject" },
+  "GET /v1/batches": {
+    response: "BatchListResponse",
+    query: [
+      { name: "limit", description: "Max batches", schema: { type: "integer" } },
+      { name: "after", description: "Pagination cursor", schema: { type: "string" } },
+    ],
+  },
+  "POST /v1/batches": { request: "BatchCreateRequest", response: "BatchObject" },
   // OpenAI Files API
   "GET /v1/files/{file_id}/content": { respContent: OCTET },
   "GET /v1/files/{file_id}": { response: "FileObject" },

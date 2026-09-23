@@ -17,6 +17,9 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { knownVoiceModelFamilies } from "./drift/voice-models.js";
+import { excludeFamilies } from "./drift/model-registry.js";
+import { unclassifiedFamilies } from "./drift/text-drift.js";
 import { formatDriftReport } from "./drift/schema.js";
 import type { ShapeDiff } from "./drift/schema.js";
 import {
@@ -26,6 +29,7 @@ import {
   extractScenario,
   parseKnownModelsCanary,
   collectDriftEntries,
+  collectUnverifiedSurfaces,
   collectAgUiDriftEntries,
   runAgUiVitest,
   classifyAgUiCheckout,
@@ -3256,7 +3260,8 @@ function deriveLiveCapableSurfaces(): {
     "httpPostForm",
     "httpRequest",
   ]);
-  const LIVE_CLIENT_MODULES = ["./providers.js", "./ws-providers.js"];
+  // Live uses the production raw WebSocket connector; the installed SDK has no Live client.
+  const LIVE_CLIENT_MODULES = ["./providers.js", "./ws-providers.js", "./live-scenarios.js"];
 
   for (const file of files) {
     const abs = resolve(driftDir, file);
@@ -3611,6 +3616,7 @@ describe("classifyAgUiCheckout — a directory named ag-ui is not a canonical ch
     const canonicalDir = join(agUi, "sdks", "typescript", "packages", "core", "src");
     mkdirSync(canonicalDir, { recursive: true });
     writeFileSync(join(canonicalDir, "types.ts"), "export type Placeholder = never;\n");
+    writeFileSync(join(canonicalDir, "events.ts"), "export enum EventType {}\n");
     expect(classifyAgUiCheckout(agUi)).toEqual({ kind: "ok" });
   });
 
@@ -3620,5 +3626,129 @@ describe("classifyAgUiCheckout — a directory named ag-ui is not a canonical ch
     const exitCode = computeExitCode(0, 0, true, 0);
     expect(exitCode).toBe(1);
     expect(conclusionForExitCode(exitCode)).toBe("skipped");
+  });
+});
+
+// Verbatim retained real-provider refusal messages from the Live canary run.
+const LIVE_REFUSALS = [
+  "Error: Upstream WebSocket refused (HTTP 401)\n    at fail (/Users/jpr5/.local/state/copilotkit/worktrees/aimock/blitz-aimock-gpt-live-canary/src/ws-upstream.ts:83:14)\n    at IncomingMessage.<anonymous> (/Users/jpr5/.local/state/copilotkit/worktrees/aimock/blitz-aimock-gpt-live-canary/src/ws-upstream.ts:101:9)\n    at IncomingMessage.wrapper (node:events:639:12)\n    at IncomingMessage.emit (node:events:526:24)\n    at endReadableNT (node:internal/streams/readable:1966:12)\n    at processTicksAndRejections (node:internal/process/task_queues:90:21)",
+  "Error: OpenAI Live unavailable: earlier provider refusal; no retry\n    at runLiveProvider (/Users/jpr5/.local/state/copilotkit/worktrees/aimock/blitz-aimock-gpt-live-canary/src/__tests__/drift/live-scenarios.ts:245:11)\n    at /Users/jpr5/.local/state/copilotkit/worktrees/aimock/blitz-aimock-gpt-live-canary/src/__tests__/drift/ws-live.drift.ts:12:26\n    at file:///Users/jpr5/.local/state/copilotkit/worktrees/aimock/blitz-aimock-gpt-live-canary/node_modules/.pnpm/@vitest+runner@3.2.4/node_modules/@vitest/runner/dist/chunk-hooks.js:155:11\n    at file:///Users/jpr5/.local/state/copilotkit/worktrees/aimock/blitz-aimock-gpt-live-canary/node_modules/.pnpm/@vitest+runner@3.2.4/node_modules/@vitest/runner/dist/chunk-hooks.js:752:26\n    at file:///Users/jpr5/.local/state/copilotkit/worktrees/aimock/blitz-aimock-gpt-live-canary/node_modules/.pnpm/@vitest+runner@3.2.4/node_modules/@vitest/runner/dist/chunk-hooks.js:1897:20\n    at new Promise (<anonymous>)\n    at runWithTimeout (file:///Users/jpr5/.local/state/copilotkit/worktrees/aimock/blitz-aimock-gpt-live-canary/node_modules/.pnpm/@vitest+runner@3.2.4/node_modules/@vitest/runner/dist/chunk-hooks.js:1863:10)\n    at runTest (file:///Users/jpr5/.local/state/copilotkit/worktrees/aimock/blitz-aimock-gpt-live-canary/node_modules/.pnpm/@vitest+runner@3.2.4/node_modules/@vitest/runner/dist/chunk-hooks.js:1574:12)\n    at processTicksAndRejections (node:internal/process/task_queues:104:5)\n    at runSuite (file:///Users/jpr5/.local/state/copilotkit/worktrees/aimock/blitz-aimock-gpt-live-canary/node_modules/.pnpm/@vitest+runner@3.2.4/node_modules/@vitest/runner/dist/chunk-hooks.js:1729:8)",
+];
+
+function liveResult(status: string, messages: string[] = []): VitestJsonResult {
+  return makeResult(
+    ["client lifecycle", "managed lifecycle"].map((title, index) =>
+      makeAssertion({
+        ancestorTitles: ["OpenAI Live API drift"],
+        title,
+        status,
+        failureMessages: messages[index] ? [messages[index]] : [],
+      }),
+    ),
+  );
+}
+
+describe("OpenAI Live collector attribution and runtime coverage", () => {
+  it("attributes supported-invariant drift to the actual Live handler and descriptors", () => {
+    const result = resultFor(
+      formatDriftReport("OpenAI Live (client lifecycle)", [SAMPLE_DIFF], "openai-live"),
+      "OpenAI Live API drift",
+    );
+    expect(entriesOf(result)[0]).toMatchObject({
+      provider: "OpenAI Live",
+      builderFile: "src/ws-live.ts",
+      builderFunctions: ["handleLiveSession"],
+      typesFile: "src/live-types.ts",
+      sdkShapesFile: "src/__tests__/drift/live-scenarios.ts",
+    });
+    expect(exitCodeOf(result)).toBe(2);
+  });
+  it("records absent-key runtime skips without treating source capability as execution", () => {
+    expect(collectUnverifiedSurfaces(liveResult("pending"))).toContainEqual({
+      surface: "openai-live",
+      provider: "OpenAI Live",
+      note: "This run: 0 passed, 0 failed, 2 skipped, 0 other Live assertions. Live compatibility was not fully verified.",
+    });
+    expect(entriesOf(liveResult("pending"))).toEqual([]);
+    expect(quarantineOf(liveResult("pending"))).toEqual([]);
+  });
+  it("does not declare a partially skipped surface verified", () => {
+    const result = liveResult("passed");
+    result.testResults[0].assertionResults[1].status = "skipped";
+    expect(
+      collectUnverifiedSurfaces(result).find((s) => s.surface === "openai-live")?.note,
+    ).toContain("1 passed, 0 failed, 1 skipped");
+  });
+  it("distinguishes a successful live run from an unexecuted surface", () => {
+    expect(
+      collectUnverifiedSurfaces(liveResult("passed")).some((s) => s.surface === "openai-live"),
+    ).toBe(false);
+    expect(
+      collectUnverifiedSurfaces(makeResult([])).find((s) => s.surface === "openai-live")?.note,
+    ).toContain("No Live assertions");
+  });
+  it("does not claim both modes from a filtered single-mode report", () => {
+    const result = liveResult("passed");
+    result.testResults[0].assertionResults.pop();
+    expect(
+      collectUnverifiedSurfaces(result).find((s) => s.surface === "openai-live")?.note,
+    ).toContain("not fully verified");
+  });
+  it("keeps actual 401 and latched refusal visible as unavailable, not protocol drift or skip", () => {
+    const result = liveResult("failed", LIVE_REFUSALS);
+    expect(entriesOf(result)).toEqual([]);
+    expect(quarantineOf(result).map((q) => q.provider)).toEqual(["OpenAI Live", "OpenAI Live"]);
+    expect(quarantineOf(result).map((q) => q.message)).toEqual(LIVE_REFUSALS);
+    expect(exitCodeOf(result)).toBe(5);
+    expect(
+      collectUnverifiedSurfaces(result).find((s) => s.surface === "openai-live")?.note,
+    ).toContain("0 passed, 2 failed, 0 skipped");
+  });
+  it.each([401, 403, 429])("keeps HTTP %i unavailable even beside valid drift", (status) => {
+    const result = liveResult("failed", [
+      `Error: Upstream WebSocket refused (HTTP ${status})`,
+      formatDriftReport("OpenAI Live (managed lifecycle)", [SAMPLE_DIFF], "openai-live"),
+    ]);
+    expect(quarantineOf(result)[0]?.provider).toBe("OpenAI Live");
+    expect(entriesOf(result)).toHaveLength(1);
+    expect(exitCodeOf(result)).toBe(2);
+  });
+  it("retains an untrusted Live failure even alongside another trusted finding", () => {
+    const result = liveResult("failed", [
+      "Error: API DRIFT DETECTED: untrusted marker without a numbered diagnostic",
+      formatDriftReport("OpenAI Live (managed lifecycle)", [SAMPLE_DIFF], "openai-live"),
+    ]);
+    expect(quarantineOf(result)[0]?.provider).toBe("OpenAI Live");
+  });
+  it("quarantines untrusted marker alone", () => {
+    expect(
+      exitCodeOf(resultFor("Error: API DRIFT DETECTED: untrusted marker", "OpenAI Live API drift")),
+    ).toBe(5);
+  });
+  it("keeps zero-message deadline in the existing timeout lane", () => {
+    const result = resultFor(
+      "Error: waitUntil timeout after 15000ms. Collected 0 messages: OpenAI Live upgrade",
+      "OpenAI Live API drift",
+    );
+    expect(timeoutsOf(result)[0].timeoutMs).toBe(15000);
+    expect(exitCodeOf(result)).toBe(6);
+  });
+  it("attributes handshake protocol errors independently of Realtime", () => {
+    const result = resultFor(
+      'Error: waitUntil timeout after 30000ms. Collected 1 messages: [error] bodies=[{"type":"error","error":{"type":"invalid_request_error","code":"invalid_config","message":"Invalid session config"}}]',
+      "OpenAI Live API drift",
+    );
+    expect(entriesOf(result)[0]).toMatchObject({
+      provider: "OpenAI Live",
+      builderFile: "src/ws-live.ts",
+      sdkShapesFile: "src/__tests__/drift/live-scenarios.ts",
+    });
+    expect(exitCodeOf(result)).toBe(2);
+  });
+  it("preserves text exclusion and the mini negative control", () => {
+    expect(knownVoiceModelFamilies.has("gpt-live-1")).toBe(true);
+    expect(excludeFamilies.openai.has("gpt-live-1")).toBe(true);
+    expect(knownVoiceModelFamilies.has("gpt-live-1-mini")).toBe(false);
+    expect(unclassifiedFamilies(["gpt-live-1-mini"], "openai")).toContain("gpt-live-1-mini");
   });
 });

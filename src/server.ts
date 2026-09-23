@@ -1,4 +1,5 @@
 import * as http from "node:http";
+import { AsyncLocalStorage } from "node:async_hooks";
 import type {
   Fixture,
   FixtureFileEntry,
@@ -18,6 +19,11 @@ import {
   entryToFixture,
   isInjectableStatus,
   INJECTED_STATUS_RANGE,
+  queueOneShotError,
+  isOneShotError,
+  claimOneShotError,
+  clearFixtureQueue,
+  releaseOneShotError,
 } from "./fixture-loader.js";
 import { writeSSEStream, writeErrorResponse } from "./sse-writer.js";
 import { createInterruptionSignal } from "./interruption.js";
@@ -30,7 +36,7 @@ import {
   buildContentWithToolCallsCompletion,
   buildUsageChunk,
   resolveUsage,
-  resolveFixtureBlocks,
+  resolveFixtureBlockOutcome,
   extractOverrides,
   isTextResponse,
   isToolCallResponse,
@@ -47,17 +53,21 @@ import {
   flattenHeaders,
   isJsonObject,
   getTestId,
+  resolveTestId,
   readBody,
   readBodyBufferBounded,
+  RequestBodyTooLargeError,
   resolveRequestId,
   markMintedRequestId,
   resolveResponse,
   resolveStrictMode,
+  wouldProxyMiss,
   resolveReasoningForModel,
   strictOverrideField,
   strictNoMatchMessage,
   strictNoMatchLogLine,
   getContext,
+  describeMatch,
 } from "./helpers.js";
 import { DEFAULT_TEST_ID } from "./constants.js";
 import {
@@ -125,6 +135,13 @@ import { handleSearch, type SearchFixture } from "./search.js";
 import { handleRerank, type RerankFixture } from "./rerank.js";
 import { handleModeration, type ModerationFixture } from "./moderation.js";
 import {
+  handleBatchesCreate,
+  handleBatchesList,
+  handleBatchesRetrieve,
+  handleBatchesCancel,
+  clearBatchStore,
+} from "./batches.js";
+import {
   handleFilesCreate,
   handleFilesList,
   handleFilesRetrieve,
@@ -144,6 +161,8 @@ import {
   clearFineTuningStore,
 } from "./fine-tuning.js";
 import { upgradeToWebSocket, type WebSocketConnection } from "./ws-framing.js";
+import { handleLiveSession } from "./ws-live.js";
+import { normalizeLiveOptions } from "./live-fixture.js";
 import { handleWebSocketResponses } from "./ws-responses.js";
 import { handleWebSocketRealtime } from "./ws-realtime.js";
 import { handleWebSocketGeminiLive } from "./ws-gemini-live.js";
@@ -169,9 +188,13 @@ import { buildOpenApiDocument, CATALOG_ROUTES } from "./openapi.js";
 // `matchRouteDefinition` (used by the terminal-404 drift guard) resolves
 // against the same table the catalog is derived from.
 import {
+  BATCHES_PATH,
+  BATCHES_ID_RE,
+  BATCHES_CANCEL_RE,
   COMPLETIONS_PATH,
   RESPONSES_PATH,
   REALTIME_PATH,
+  LIVE_PATH,
   GEMINI_LIVE_PATH,
   MESSAGES_PATH,
   EMBEDDINGS_PATH,
@@ -201,7 +224,7 @@ import {
   FAL_QUEUE_SUBMIT_RE,
   FAL_QUEUE_REQUESTS_RE,
   FAL_RUN_RE,
-  FAL_PREFIX_RE,
+  FAL_ROUTE_RE,
   GEMINI_INTERACTIONS_PATH,
   GEMINI_PATH_RE,
   GEMINI_EMBED_RE,
@@ -240,7 +263,7 @@ import {
   CONTROL_PREFIX,
   matchRouteDefinition,
 } from "./route-registry.js";
-import { createMetricsRegistry, normalizePathLabel } from "./metrics.js";
+import { createMetricsRegistry, normalizePathLabel, DESTROYED_STATUS_LABEL } from "./metrics.js";
 import { proxyAndRecord } from "./recorder.js";
 import {
   resolveInboundAuth,
@@ -251,7 +274,10 @@ import {
   type ResolvedInboundAuth,
 } from "./api-key-auth.js";
 
+const liveClosers = new WeakMap<HandlerDefaults, (testId?: string) => void>();
+
 export interface ServerInstance {
+  closeLiveSessions(testId?: string): void;
   server: http.Server;
   journal: Journal;
   url: string;
@@ -311,8 +337,8 @@ function normalizeCompatPath(pathname: string, logger?: Logger): string {
 // OpenRouter async video lifecycle (/api/v1/videos). Dispatch order matters:
 // content RE → models exact → status RE → submit exact. The status RE's
 // `[^/]+` segment would otherwise swallow the `models` listing path. The
-// content/status REs are shared with metrics.ts path-label normalization
-// (imported above).
+// content/status REs are shared with the route registry and metrics.ts
+// path-label normalization (imported above).
 
 const DEFAULT_MODELS = [
   "gpt-4",
@@ -403,15 +429,18 @@ export interface FullResetTargets {
  * `POST /__aimock/reset/fixtures` alias, and `LLMock.reset()`.
  */
 export function performFullReset(fixtures: Fixture[], targets: FullResetTargets | null): void {
-  fixtures.length = 0;
+  // Also invalidates one-shot claims parked in flight (see `clearFixtureQueue`).
+  clearFixtureQueue(fixtures);
   falJobs.clear();
   falQueueStates.clear();
+  clearBatchStore();
   clearElevenLabsVoices();
   clearFileStore();
   clearFineTuningStore();
   resetInteractionCounter();
   resetEventIdCounter();
   if (!targets) return;
+  liveClosers.get(targets.defaults)?.();
   targets.journal.clear();
   // Chaos warning latches are per-server state too: a suite that resets between
   // tests must see a bad static chaos value reported again, not inherit the
@@ -480,22 +509,18 @@ function fixtureResponseKind(response: Fixture["response"]): string {
 }
 
 /**
- * Resolve a journal entry's testId exactly the way `getTestId` resolves an
- * incoming request's: the `X-Test-Id` header wins, then `?testId=` parsed out
- * of the query string, then `DEFAULT_TEST_ID`. The
- * filter and the server's own per-test isolation must never disagree — and a
- * raw `path.includes("testId=t1")` both prefix-collides with `t10` and matches
- * unrelated params like `notTestId`.
+ * The testId a journal entry was scoped under — `resolveTestId` applied to the
+ * journaled headers and path, i.e. the SAME function that scoped the request
+ * (fixture match-counts, chaos) when it arrived. Node folds a repeated
+ * `X-Test-Id` into one string ("a, a") before either side sees it, and the
+ * request is counted and chaos-evaluated under that folded string, so the
+ * `?testId=` filter matches it verbatim too: no token-splitting here that the
+ * scoping path does not also do. (Splitting on "," additionally broke every
+ * legitimately comma-bearing id.) A raw `path.includes("testId=t1")` both
+ * prefix-collides with `t10` and matches unrelated params like `notTestId`.
  */
 function journalEntryTestId(entry: JournalEntry): string {
-  const header = entry.headers["x-test-id"];
-  if (header) return header;
-  const qIdx = entry.path.indexOf("?");
-  if (qIdx !== -1) {
-    const queryValue = new URLSearchParams(entry.path.slice(qIdx + 1)).get("testId");
-    if (queryValue) return queryValue;
-  }
-  return DEFAULT_TEST_ID;
+  return resolveTestId(entry.headers, entry.path);
 }
 
 /**
@@ -700,8 +725,12 @@ async function handleControlAPI(
           index,
           match: redactForInspection(fixture.match),
           // NOT `response` — that name already means the response ITSELF on
-          // `Fixture`, and this is only a one-word kind label.
-          responseKind: fixtureResponseKind(fixture.response),
+          // `Fixture`, and this is only a one-word kind label. A queued
+          // one-shot error carries a FACTORY response (the factory performs
+          // the idempotent claim), so the shape test alone reports "factory"
+          // and this surface loses the one signal it exists to give: that an
+          // injection is armed. Take the kind from the one-shot MARKER.
+          responseKind: isOneShotError(fixture) ? "error" : fixtureResponseKind(fixture.response),
           ...(fixture.latency !== undefined ? { latency: fixture.latency } : {}),
           ...(fixture.chaos !== undefined ? { chaos: fixture.chaos } : {}),
         })),
@@ -892,7 +921,7 @@ async function handleControlAPI(
 
   // DELETE /__aimock/fixtures — clear all fixtures
   if (subPath === "/fixtures" && req.method === "DELETE") {
-    fixtures.length = 0;
+    clearFixtureQueue(fixtures);
     if (defaults.registry) {
       defaults.registry.setGauge("aimock_fixtures_loaded", {}, fixtures.length);
     }
@@ -1008,37 +1037,9 @@ async function handleControlAPI(
         }
       }
     }
-    const errorFixture: Fixture = {
-      match: { predicate: () => true },
-      response: {
-        error: {
-          message: errorBody?.message ?? "Injected error",
-          type: errorBody?.type ?? "server_error",
-          code: errorBody?.code,
-        },
-        status,
-      },
-    };
-    // Insert at front so it matches before everything else
-    fixtures.unshift(errorFixture);
-    // One-shot: match once then self-remove.  We use a `consumed` flag to
-    // prevent double-matching from concurrent requests and defer the actual
-    // splice via queueMicrotask so it never mutates the fixtures array while
-    // matchFixture is iterating over it.
-    let consumed = false;
-    const original = errorFixture.match.predicate!;
-    errorFixture.match.predicate = (req) => {
-      if (consumed) return false;
-      const result = original(req);
-      if (result) {
-        consumed = true;
-        queueMicrotask(() => {
-          const idx = fixtures.indexOf(errorFixture);
-          if (idx !== -1) fixtures.splice(idx, 1);
-        });
-      }
-      return result;
-    };
+    // Shared with `LLMock.nextRequestError`: same endpoint gate, consumed when
+    // served rather than when its predicate is evaluated.
+    queueOneShotError(fixtures, status, errorBody ?? undefined);
 
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ queued: true }));
@@ -1048,6 +1049,24 @@ async function handleControlAPI(
   // Unknown control path
   handleNotFound(res, `Unknown control endpoint: ${pathname}`);
   return true;
+}
+
+/**
+ * The client tore the connection down before its request body had fully
+ * arrived. Node rejects the pending body read with `aborted` (ECONNRESET) and
+ * destroys the response, so the rejection surfaces in the handler's read arm
+ * looking like any other thrown error. It is caller behaviour, not a server
+ * fault: no status can reach the client, so none must be journaled as
+ * delivered. A body that blew its size cap also leaves the request destroyed
+ * and incomplete, but that one is aimock's own decision, not a peer abort.
+ */
+function clientAbortedMidBody(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  err: unknown,
+): boolean {
+  if (err instanceof RequestBodyTooLargeError) return false;
+  return res.destroyed && !req.complete;
 }
 
 async function handleCompletions(
@@ -1068,22 +1087,60 @@ async function handleCompletions(
     raw = await readBody(req);
   } catch (err) {
     const msg = err instanceof Error ? err.message : "Failed to read request body";
+    // Same classification every `routeError` route applies to this failure: a
+    // body that blew its size cap is the CALLER's fault, logged at warn.
+    // If the reader destroyed the socket, no status was delivered.
+    // This arm catches the read itself
+    // rather than letting it reach `routeError`, so it has to say so on its
+    // own — and it logs either way, because a read failure answered in
+    // silence is a request that vanishes from the logs.
+    const clientFault = err instanceof RequestBodyTooLargeError;
+    const route = `${req.method ?? "POST"} ${req.url ?? COMPLETIONS_PATH}`;
+    const clientAbort = clientAbortedMidBody(req, res, err);
+    const bodyLimitDisconnect = clientFault && (req.destroyed || res.destroyed);
+    if (clientAbort || bodyLimitDisconnect) {
+      // The body reader or caller destroyed the socket: nothing can be
+      // delivered and nothing crashed. Journal the torn socket the way the proxy arm
+      // and chaos `disconnect` do, never a status the client did not get.
+      const interruptReason = bodyLimitDisconnect
+        ? "request body exceeded size limit"
+        : "client aborted";
+      defaults.logger.warn(
+        bodyLimitDisconnect ? `${route}: ${msg}` : `${route}: client aborted mid-body (${msg})`,
+      );
+      journal.add({
+        method: req.method ?? "POST",
+        path: req.url ?? COMPLETIONS_PATH,
+        headers: flattenHeaders(req.headers),
+        body: null,
+        response: {
+          status: 0,
+          fixture: null,
+          interrupted: true,
+          interruptReason,
+        },
+      });
+      return;
+    }
+    const status = clientFault ? 400 : 500;
+    if (clientFault) defaults.logger.warn(`${route}: ${msg}`);
+    else defaults.logger.error(`${route}: ${msg}`);
     journal.add({
       method: req.method ?? "POST",
       path: req.url ?? COMPLETIONS_PATH,
       headers: flattenHeaders(req.headers),
       body: null,
-      response: { status: 500, fixture: null },
+      response: { status, fixture: null },
     });
     writeErrorResponse(
       res,
-      500,
+      status,
       openRouter
-        ? serializeOpenRouterError(500, `Request body read failed: ${msg}`)
+        ? serializeOpenRouterError(status, `Request body read failed: ${msg}`)
         : JSON.stringify({
             error: {
               message: `Request body read failed: ${msg}`,
-              type: "server_error",
+              type: clientFault ? "invalid_request_error" : "server_error",
             },
           }),
     );
@@ -1227,6 +1284,33 @@ async function handleCompletions(
   // (so the shared increment below does not double-count it).
   let fixtureCountIncremented = false;
   const openRouterFallback = openRouter && Array.isArray(body.models) && body.models.length > 0;
+  // Select the fixture to serve for `probe`, CLAIMING a one-shot injected error
+  // the instant it is selected — synchronously, before any chaos-latency await
+  // and before its factory runs — so exactly one request consumes it. A
+  // one-shot another in-flight request already claimed is no longer in
+  // `fixtures`, so re-running the match falls through to the next candidate.
+  const selectFixture = (
+    probe: ChatCompletionRequest,
+    counts: ReturnType<typeof journal.getFixtureMatchCountsForTest>,
+  ): ReturnType<typeof matchFixtureDiagnostic> => {
+    for (;;) {
+      const attempt = matchFixtureDiagnostic(
+        fixtures,
+        probe,
+        counts,
+        defaults.requestTransform,
+        matchOptions,
+      );
+      if (
+        attempt.fixture &&
+        isOneShotError(attempt.fixture) &&
+        !claimOneShotError(fixtures, attempt.fixture)
+      ) {
+        continue;
+      }
+      return attempt;
+    }
+  };
 
   if (openRouterFallback) {
     const candidates = buildOpenRouterCandidates(body);
@@ -1253,13 +1337,7 @@ async function handleCompletions(
       candidate: string,
     ): Promise<{ fixture: Fixture; response: FixtureResponse; isError: boolean } | null> => {
       const probe: ChatCompletionRequest = { ...body, model: candidate };
-      const attempt = matchFixtureDiagnostic(
-        fixtures,
-        probe,
-        matchCounts,
-        defaults.requestTransform,
-        matchOptions,
-      );
+      const attempt = selectFixture(probe, matchCounts);
       skippedBySequenceOrTurn = Math.max(skippedBySequenceOrTurn, attempt.skippedBySequenceOrTurn);
       if (!attempt.fixture) return null;
       const response = await resolveResponse(attempt.fixture, probe);
@@ -1311,13 +1389,7 @@ async function handleCompletions(
       preResolvedResponse = lastErrorResponse;
     }
   } else {
-    const single = matchFixtureDiagnostic(
-      fixtures,
-      body,
-      journal.getFixtureMatchCountsForTest(testId),
-      defaults.requestTransform,
-      matchOptions,
-    );
+    const single = selectFixture(body, journal.getFixtureMatchCountsForTest(testId));
     fixture = single.fixture;
     skippedBySequenceOrTurn = single.skippedBySequenceOrTurn;
   }
@@ -1326,7 +1398,11 @@ async function handleCompletions(
     // The fallback loop already advanced the served fixture's count; only the
     // single-match path still needs to increment here (never double-count).
     if (!fixtureCountIncremented) journal.incrementFixtureMatchCount(fixture, fixtures, testId);
-    defaults.logger.debug(`Fixture matched: ${JSON.stringify(fixture.match).slice(0, 120)}`);
+    // `JSON.stringify` drops functions/RegExps, so a predicate fixture logged
+    // as `{}`; `describeMatch` names every present matcher by kind.
+    defaults.logger.debug(
+      `Fixture matched: ${describeMatch(fixture.match, fixtures.indexOf(fixture))}`,
+    );
   } else {
     const lastUserMsg = body.messages.filter((m) => m.role === "user").pop();
     const snippet =
@@ -1376,6 +1452,9 @@ async function handleCompletions(
   // ever received.
   const goneAfterLatency = responseGoneReason(res);
   if (goneAfterLatency !== null) {
+    // Claimed at selection, but no error body ever reached a client — re-arm
+    // so the injection is not burned by a client that walked away.
+    releaseOneShotError(fixtures, fixture);
     defaults.logger.debug(
       `[chaos] ${method} ${path}: ${describeUnwritableReason(goneAfterLatency)} after the ` +
         `latency delay — not served, not journalled`,
@@ -1391,6 +1470,14 @@ async function handleCompletions(
     chaosConfig,
   );
   const chaosContext = { method, path, headers: flatHeaders, body };
+  // With no fixture, the response is aimock's own unless this request was
+  // going to be proxied — so the journal source is "internal", not "proxy",
+  // on the non-proxied path. A miss is only proxied when record mode has an
+  // upstream for THIS provider and strict is not refusing it first; the
+  // shared rule lives in `wouldProxyMiss` (also used by elevenlabs-voice.ts).
+  const effectiveStrict = resolveStrictMode(defaults.strict, req.headers);
+  const missWouldProxy = wouldProxyMiss(effectiveStrict, defaults.record, providerKey);
+  const noFixtureSource = missWouldProxy ? "proxy" : "internal";
 
   if (chaosAction === "drop" || chaosAction === "disconnect" || chaosAction === "rateLimit") {
     applyChaosAction(
@@ -1399,29 +1486,44 @@ async function handleCompletions(
       fixture,
       journal,
       chaosContext,
-      fixture ? "fixture" : "proxy",
+      fixture ? "fixture" : noFixtureSource,
       defaults.registry,
       defaults.logger,
     );
+    // The chaos action, not the fixture, answered this request — a claimed
+    // one-shot's error body was never written, so put it back in the queue.
+    releaseOneShotError(fixtures, fixture);
     return;
   }
 
-  if (fixture && chaosAction === "malformed") {
+  // `malformed` is applied here whenever there is no upstream response to
+  // mutate: a matched fixture, or a miss that would not be proxied (the 404
+  // and strict-503 paths). Only the proxied no-fixture case defers, to the
+  // `beforeWriteResponse` hook below — the same `wouldProxyMiss` rule as the
+  // source label above, so a strict-mode miss with an upstream configured is
+  // answered here rather than skipped for a 503 that never rolled. Before
+  // this, a rolled `malformed` on the no-fixture non-proxied path fell through
+  // to a plain 404 — never applied, journalled or counted. With no fixture,
+  // nothing here was ever proxied, so the source is aimock itself:
+  // `"internal"`, never `"proxy"`.
+  if (chaosAction === "malformed" && (fixture || !missWouldProxy)) {
     applyChaosAction(
       chaosAction,
       res,
       fixture,
       journal,
       chaosContext,
-      "fixture",
+      fixture ? "fixture" : "internal",
       defaults.registry,
       defaults.logger,
     );
+    // Same as the terminal actions above: malformed replaces the body, so a
+    // claimed one-shot's error was never served.
+    releaseOneShotError(fixtures, fixture);
     return;
   }
 
   if (!fixture) {
-    const effectiveStrict = resolveStrictMode(defaults.strict, req.headers);
     if (effectiveStrict) {
       const strictStatus = 503;
       const strictMessage = strictNoMatchMessage(skippedBySequenceOrTurn);
@@ -1503,29 +1605,79 @@ async function handleCompletions(
             }
           : undefined;
 
-      const outcome = await proxyAndRecord(
-        req,
-        res,
-        body,
-        providerKey,
-        req.url ?? COMPLETIONS_PATH,
-        fixtures,
-        defaults,
-        raw,
-        hookOptions,
-      );
+      // WHO killed a mid-flight stream decides what the journal says, and
+      // after the fact the two look identical: `req.aborted`, `req.destroyed`
+      // and `res.destroyed` all read the same whether the peer hung up or the
+      // recorder tore the response down. The one signal that separates them is
+      // the peer's FIN/RST, which arrives on the request socket as `end` (or
+      // `error`) and only ever when the CLIENT went away. Removed afterwards:
+      // a keep-alive socket outlives this request.
+      let clientHungUp = false;
+      const noteClientHangUp = (): void => {
+        if (!res.writableEnded) clientHungUp = true;
+      };
+      req.socket?.on("end", noteClientHangUp);
+      req.socket?.on("error", noteClientHangUp);
+      let outcome: Awaited<ReturnType<typeof proxyAndRecord>>;
+      try {
+        outcome = await proxyAndRecord(
+          req,
+          res,
+          body,
+          providerKey,
+          req.url ?? COMPLETIONS_PATH,
+          fixtures,
+          defaults,
+          raw,
+          hookOptions,
+        );
+      } finally {
+        req.socket?.off("end", noteClientHangUp);
+        req.socket?.off("error", noteClientHangUp);
+      }
       if (outcome === "handled_by_hook") return;
       if (outcome !== "not_configured") {
+        // A stream that died mid-flight still carries the 200 it opened with;
+        // mark it interrupted so the journal shows what the client actually
+        // got rather than a clean success, and name the side that killed it —
+        // a client hang-up is normal caller behaviour, an upstream/recorder
+        // tear-down is a fault worth chasing.
+        const destroyedMidStream = res.destroyed && !res.writableEnded;
         journal.add({
           method: req.method ?? "POST",
           path: req.url ?? COMPLETIONS_PATH,
           headers: flattenHeaders(req.headers),
           body,
-          response: { status: res.statusCode ?? 200, fixture: null, source: "proxy" },
+          response: {
+            status: res.statusCode ?? 200,
+            fixture: null,
+            source: "proxy",
+            ...(destroyedMidStream
+              ? {
+                  interrupted: true,
+                  interruptReason: clientHungUp ? "client aborted" : "proxy stream destroyed",
+                }
+              : {}),
+          },
         });
         return;
       }
-      // outcome === "not_configured" — fall through to 404
+      // outcome === "not_configured" — nothing was written; fall through to
+      // 404, unless a rolled `malformed` is still owed to the client. Nothing
+      // was proxied, so the source is `"internal"`.
+      if (chaosAction === "malformed") {
+        applyChaosAction(
+          chaosAction,
+          res,
+          null,
+          journal,
+          chaosContext,
+          "internal",
+          defaults.registry,
+          defaults.logger,
+        );
+        return;
+      }
     }
 
     journal.add({
@@ -1686,21 +1838,12 @@ async function handleCompletions(
       effectiveStrict,
       defaults.logger,
     );
-    // Resolve the ordered streaming blocks ONCE, BEFORE recording success in the
-    // journal. resolveFixtureBlocks validates and can throw on a malformed
-    // `blocks` array; doing it here (rather than inside the chunk builder AND a
-    // second time for the usage estimate, both of which previously ran AFTER
-    // journal.add) guarantees a malformed fixture never leaves a spurious
-    // status-200 journal entry. The single resolved array is reused for both
-    // chunk emission and the completion-token estimate — the builder re-normalizes
-    // it idempotently (a can't-fail pass on already-validated blocks), so this is
-    // the only resolution that can throw. Only the streaming path consumes blocks
-    // (the non-streaming builder ignores them), so gate on `stream` to leave the
-    // non-streaming path's behavior byte-identical.
+    // Validate authoritative blocks before recording success in either mode.
+    // Reuse their normalized payload for nonstream responses and usage estimates.
     const streaming = body.stream === true;
-    const streamingBlocks =
-      streaming && response.blocks && response.blocks.length > 0
-        ? resolveFixtureBlocks(response.blocks)
+    const blockOutcome =
+      response.blocks && response.blocks.length > 0
+        ? resolveFixtureBlockOutcome(response.blocks)
         : undefined;
     const journalEntry = journal.add({
       method: req.method ?? "POST",
@@ -1711,33 +1854,34 @@ async function handleCompletions(
     });
     if (!streaming) {
       const completion = buildContentWithToolCallsCompletion(
-        response.content ?? "",
-        response.toolCalls ?? [],
+        blockOutcome?.content ?? response.content ?? "",
+        blockOutcome?.toolCalls ?? response.toolCalls ?? [],
         responseModel,
         effReasoning,
-        overrides,
+        blockOutcome
+          ? {
+              ...overrides,
+              finishReason:
+                overrides?.finishReason ?? (blockOutcome.hasToolCalls ? "tool_calls" : "stop"),
+            }
+          : overrides,
         body.messages,
       );
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify(shapeORCompletion(completion, overrides)));
     } else {
       const chunks = buildContentWithToolCallsChunks(
-        response.content ?? "",
-        response.toolCalls ?? [],
+        blockOutcome?.content ?? response.content ?? "",
+        blockOutcome?.toolCalls ?? response.toolCalls ?? [],
         responseModel,
         chunkSize,
         effReasoning,
         overrides,
-        streamingBlocks,
+        blockOutcome?.ordered,
       );
-      // Build usage chunk for stream_options.include_usage (always for OpenRouter).
-      // When the fixture is blocks-driven, the streamed text comes from the
-      // ordered blocks (content/toolCalls are ignored by the chunk builder), so
-      // the completion-token estimate must derive from the SAME block text —
-      // otherwise a blocks-only fixture reports ~1 completion token. Reuse the
-      // single pre-resolved `streamingBlocks` (no second resolveFixtureBlocks).
-      const completionText = streamingBlocks
-        ? streamingBlocks.map((b) => (b.type === "text" ? b.text : b.name + b.arguments)).join("")
+      // Estimate usage from the same authoritative payload sent to the client.
+      const completionText = blockOutcome
+        ? blockOutcome.content + blockOutcome.toolCalls.map((tc) => tc.name + tc.arguments).join("")
         : (response.content ?? "") +
           (response.toolCalls ?? []).map((tc) => tc.name + tc.arguments).join("");
       const usageChunk = emitStreamingUsage
@@ -2029,25 +2173,21 @@ export async function createServerWithResolvedAuth(
     },
   };
 
-  // Validate chaos config rates
+  // Validate chaos defaults through the ONE chaos table, so what startup warns
+  // about is exactly what the runtime rejects (same fields, same bounds, same
+  // words). The hand-rolled range check this replaces said nothing for
+  // `latencyMs: 250.5`, which the runtime then rejected on every request.
   if (options?.chaos) {
-    const chaosRates = [
-      { name: "dropRate", value: options.chaos.dropRate },
-      { name: "malformedRate", value: options.chaos.malformedRate },
-      { name: "disconnectRate", value: options.chaos.disconnectRate },
-      { name: "rateLimitRate", value: options.chaos.rateLimitRate },
-    ];
-    for (const { name, value } of chaosRates) {
-      if (value !== undefined && (value < 0 || value > 1)) {
-        logger.warn(`Chaos ${name} (${value}) is outside 0-1 range — will be clamped at runtime`);
-      }
-    }
-    if (
-      options.chaos.latencyMs !== undefined &&
-      (options.chaos.latencyMs < 0 || options.chaos.latencyMs > 30000)
-    ) {
+    const chaosDefaults = options.chaos as Record<string, unknown>;
+    for (const field of CHAOS_FIELD_NAMES) {
+      const value = chaosDefaults[field];
+      if (value === undefined) continue;
+      // Typed config, like the control API's JSON body: a numeric string is a
+      // type error, not a wire spelling to be parsed.
+      if (typeof value === "number" && parseChaosField(field, value) !== undefined) continue;
+      const shape = CHAOS_FIELDS[field].integer ? "a whole number of ms" : "a number";
       logger.warn(
-        `Chaos latencyMs (${options.chaos.latencyMs}) is outside 0-30000 range — will be clamped at runtime`,
+        `Chaos default ${field} value ${JSON.stringify(value)} — must be ${shape} in [0,${CHAOS_FIELDS[field].max}]; rejected at runtime, never clamped: this default is ignored`,
       );
     }
   }
@@ -2130,18 +2270,251 @@ export async function createServerWithResolvedAuth(
     }
   }
 
+  /**
+   * The in-flight request, scoped to the async execution that serves it.
+   * Entered once in the `http.createServer` callback, so every handler —
+   * including the ones in other modules that only ever see the shared
+   * `journal` — runs inside it.
+   */
+  const requestScope = new AsyncLocalStorage<http.IncomingMessage>();
+  /** The journal entry each request produced, keyed by the request object. */
+  const ownJournalEntry = new WeakMap<http.IncomingMessage, JournalEntry>();
+
   // Programmatic default: finite caps so long-running embedders don't inherit
   // an unbounded journal / fixture-count map. Callers that need unbounded
   // retention (e.g. short-lived test harnesses) can opt in by passing 0.
   const journal = new Journal({
     maxEntries: options?.journalMaxEntries ?? 1000,
     fixtureCountsMaxTestIds: options?.fixtureCountsMaxTestIds ?? 500,
+    onAdd: (entry) => {
+      const req = requestScope.getStore();
+      if (req) ownJournalEntry.set(req, entry);
+    },
   });
   const videoStates = new VideoStateMap();
   const openRouterVideoJobs = new OpenRouterVideoJobMap();
   const veoVideoJobs = new VeoVideoJobMap();
   const grokVideoJobs = new GrokVideoJobMap();
   const bytePlusVideoJobs = new BytePlusVideoJobMap();
+
+  /**
+   * The OpenAI error `type` that goes with a status: 4xx is the caller's
+   * fault, everything else is ours. Shared by `routeError` and the envelopes
+   * it calls so the body can never disagree with the status line.
+   */
+  function errorTypeForStatus(status: number): string {
+    return status >= 400 && status < 500 ? "invalid_request_error" : "server_error";
+  }
+
+  /**
+   * The newest journal entry this request already produced, or null.
+   *
+   * Attribution is by the identity of the `IncomingMessage` the entry was
+   * written under — never by `x-request-id`. That header is CALLER-supplied
+   * (`resolveRequestId` echoes a well-formed one) and nothing makes it
+   * unique: a retry, a harness that pins one id, or a load generator sends
+   * the same id on many requests, and keying off it made a crash rewrite an
+   * EARLIER request's entry while leaving the crashing request untraced. The
+   * request object cannot be collided by a caller, so one entry belongs to
+   * exactly one request. A handler writes at most one entry; if it writes
+   * more, the newest wins, which is the entry the old scan would have found.
+   */
+  function lastJournalEntryFor(req: http.IncomingMessage): JournalEntry | null {
+    return ownJournalEntry.get(req) ?? null;
+  }
+
+  /**
+   * Uniform terminal arm for a route handler that threw. Every route error
+   * path logs the route, journals the failure, sets CORS and answers the error
+   * envelope — so a handler crash is never invisible in the logs or in
+   * `/__aimock/journal`.
+   *
+   * ONE request produces ONE entry. `res.headersSent` is not the test for that:
+   * a handler that journaled its 200 and then threw before `writeHead` has
+   * sent no headers, and journaling again would leave two contradicting
+   * entries for one request. So the existing entry is looked up by request
+   * identity ({@link lastJournalEntryFor}) and AMENDED — status to what the
+   * client actually got when the response is still changeable, or interrupted
+   * when it isn't — and a fresh entry is
+   * added only when the handler journaled nothing. That holds after the
+   * response too: a handler that answered and then crashed before its own
+   * journal write gets an entry carrying the status already sent, so a
+   * post-response crash is never invisible.
+   *
+   * Once headers are on the wire the status can't change, so the socket is
+   * destroyed: a clean `end()` reads as EOF and the client treats a truncated
+   * stream as a complete response. The chat-style SSE routes whose clients
+   * surface an error frame pass `streamEvent`; that frame is written first,
+   * but the tear-down still follows it.
+   *
+   * A body that blew its size cap is the CALLER's fault, not a server fault:
+   * it logs at warn, but if the reader destroyed the socket it journals an
+   * interruption with status 0 because no 4xx reached the client. A client
+   * that hung up before its body arrived
+   * ({@link clientAbortedMidBody}) is not a fault at all: it logs at warn and
+   * journals a torn socket (`interrupted`, status 0), never a 500 the client
+   * could not have received.
+   */
+  function routeError(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+    err: unknown,
+    pathname: string,
+    opts?: {
+      service?: string;
+      /**
+       * Provider-shaped error body. Takes the STATUS routeError settled on —
+       * a client-fault body cap answers 400, and an envelope that hardcoded
+       * 500 would contradict the status line it is sent with.
+       */
+      envelope?: (msg: string, status: number) => string;
+      streamEvent?: (msg: string, status: number) => string;
+    },
+  ): void {
+    const route = `${req.method ?? "?"} ${pathname}`;
+    const msg = err instanceof Error ? err.message : "Internal error";
+    const clientFault = err instanceof RequestBodyTooLargeError;
+    const clientAbort = clientAbortedMidBody(req, res, err);
+    const status = clientFault ? 400 : 500;
+    if (clientAbort) logger.warn(`${route}: client aborted mid-body (${msg})`);
+    else if (clientFault) logger.warn(`${route}: ${msg}`);
+    else logger.error(`${route}: ${msg}`);
+    if (err instanceof Error && err.stack) logger.debug(err.stack);
+    const existing = lastJournalEntryFor(req);
+    const bodyLimitDisconnect = clientFault && (req.destroyed || res.destroyed);
+    if ((clientAbort || bodyLimitDisconnect) && !res.headersSent) {
+      const interruptReason = bodyLimitDisconnect
+        ? "request body exceeded size limit"
+        : "client aborted";
+      // Nothing reached the client and nothing crashed: the entry records a
+      // torn socket (status 0, same as chaos `disconnect` before headers), and
+      // there is no socket left to answer on.
+      if (existing) {
+        if (!existing.response.interrupted) {
+          existing.response.status = 0;
+          existing.response.interrupted = true;
+          existing.response.interruptReason = interruptReason;
+        }
+        return;
+      }
+      try {
+        journal.add({
+          method: req.method ?? "?",
+          path: req.url ?? "?",
+          headers: flattenHeaders(req.headers),
+          body: null,
+          ...(opts?.service ? { service: opts.service } : {}),
+          response: {
+            status: 0,
+            fixture: null,
+            source: "internal",
+            interrupted: true,
+            interruptReason,
+          },
+        });
+      } catch (jErr) {
+        logger.warn(
+          `${route}: journal write failed after body-read interruption: ${jErr instanceof Error ? jErr.message : String(jErr)}`,
+        );
+      }
+      return;
+    }
+    if (!res.headersSent) {
+      if (existing) {
+        // The handler's own entry, corrected to the status the client gets.
+        // `source`/`fixture` are left alone: they record what was going to
+        // serve this request, which the crash didn't change.
+        existing.response.status = status;
+      } else {
+        // Wrapped so journaling can never mask the error write below.
+        try {
+          journal.add({
+            method: req.method ?? "?",
+            path: req.url ?? "?",
+            headers: flattenHeaders(req.headers),
+            body: null,
+            ...(opts?.service ? { service: opts.service } : {}),
+            response: { status, fixture: null, source: "internal" },
+          });
+        } catch (jErr) {
+          logger.warn(
+            `${route}: journal write failed after handler error: ${jErr instanceof Error ? jErr.message : String(jErr)}`,
+          );
+        }
+      }
+      setCorsHeaders(res);
+      writeErrorResponse(
+        res,
+        status,
+        opts?.envelope
+          ? opts.envelope(msg, status)
+          : JSON.stringify({
+              error: {
+                message: msg,
+                type: errorTypeForStatus(status),
+              },
+            }),
+      );
+    } else {
+      // Headers are on the wire, so the status the client got is fixed. If the
+      // handler already journaled, mark its entry so the journal and the
+      // metrics finish hook agree with the torn socket instead of reporting a
+      // clean success. If it journaled nothing (it crashed on the way to
+      // journaling, after the response went out), ADD the entry now — a
+      // post-response crash must never leave a request without a trace.
+      //
+      // `interrupted` means the client did not get a complete body. Once
+      // `end()` has run it did, so a crash after that point is recorded in
+      // `error` with the status that was delivered, never as an interruption.
+      const midStreamReason = clientAbort ? "client aborted" : "handler crashed mid-stream";
+      if (existing) {
+        if (res.writableEnded) {
+          if (existing.response.error === undefined) existing.response.error = msg;
+        } else if (!existing.response.interrupted) {
+          existing.response.interrupted = true;
+          existing.response.interruptReason = midStreamReason;
+        }
+      } else {
+        try {
+          journal.add({
+            method: req.method ?? "?",
+            path: req.url ?? "?",
+            headers: flattenHeaders(req.headers),
+            body: null,
+            ...(opts?.service ? { service: opts.service } : {}),
+            response: {
+              status: res.statusCode,
+              fixture: null,
+              source: "internal",
+              ...(res.writableEnded
+                ? { error: msg }
+                : { interrupted: true, interruptReason: midStreamReason }),
+            },
+          });
+        } catch (jErr) {
+          logger.warn(
+            `${route}: journal write failed after handler error: ${jErr instanceof Error ? jErr.message : String(jErr)}`,
+          );
+        }
+      }
+      // A response that already completed has nothing left to tear down.
+      if (res.writableEnded) return;
+      if (opts?.streamEvent) {
+        try {
+          // Destroy once the frame is flushed — written, then torn down, never
+          // ended cleanly.
+          res.write(opts.streamEvent(msg, status), () => {
+            if (!res.destroyed) res.destroy();
+          });
+        } catch (writeErr) {
+          logger.debug("Failed to write error recovery response:", writeErr);
+          res.destroy();
+        }
+      } else {
+        res.destroy();
+      }
+    }
+  }
 
   // Share journal and metrics registry with mounted services
   if (mounts) {
@@ -2155,21 +2528,14 @@ export async function createServerWithResolvedAuth(
   if (registry) {
     registry.setGauge("aimock_fixtures_loaded", {}, fixtures.length);
   }
-
   const server = http.createServer((req: http.IncomingMessage, res: http.ServerResponse) => {
-    // Delegate to async handler — catch unhandled rejections to prevent Node.js crashes
-    handleHttpRequest(req, res).catch((err: unknown) => {
-      const msg = err instanceof Error ? err.message : "Internal error";
-      const stack = err instanceof Error ? (err.stack ?? msg) : msg;
-      const method = req.method ?? "?";
-      const url = req.url ?? "?";
-      defaults.logger.warn(`Unhandled request error on ${method} ${url}: ${msg}\n${stack}`);
-      if (!res.headersSent) {
-        res.writeHead(500, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: { message: msg, type: "server_error" } }));
-      } else if (!res.writableEnded) {
-        res.end();
-      }
+    // Delegate to async handler — catch unhandled rejections to prevent Node.js crashes.
+    // Run inside the request scope so every journal write made while serving
+    // this request (in any handler module) is attributed back to it.
+    requestScope.run(req, () => {
+      handleHttpRequest(req, res).catch((err: unknown) => {
+        routeError(req, res, err, req.url ?? "?");
+      });
     });
   });
 
@@ -2192,9 +2558,61 @@ export async function createServerWithResolvedAuth(
     markMintedRequestId(req, requestIdMinted);
     res.setHeader("X-Request-Id", requestId);
 
+    let pathname = "";
+
+    // Instrument response completion for metrics. The callbacks read pathname
+    // via closure after normalizeCompatPath has rewritten it, so metrics
+    // record the canonical /v1/... path. Registered BEFORE the URL is parsed:
+    // a request whose `Host` header will not parse is answered 500 by the
+    // top-level catch, and hooking after the parse left that response
+    // uncounted. It reaches `normalizePathLabel` with the empty pre-parse
+    // pathname and lands in `{unknown}`, like every other pre-routing reject.
+    //
+    // Two terminal events, one count. `finish` fires only when the body was
+    // ended; a response torn down by `res.destroy()` — the `disconnect` chaos
+    // action, a body-cap reset, a catch-arm teardown — never finishes and only
+    // ever emits `close`. Those were invisible to `/metrics`, so the request
+    // total under-counted by exactly the failures worth watching. `close`
+    // also follows every `finish`, hence the guard: a normal response counts
+    // once, under its status; a destroyed one counts once, as `destroyed`.
+    if (registry) {
+      let recorded = false;
+      const recordOutcome = (status: string): void => {
+        if (recorded) return;
+        recorded = true;
+        try {
+          // Read the mount table at record time, not at start: `LLMock.mount()`
+          // after `start()` pushes onto this same array, and a snapshot taken
+          // here at startup labelled that (correctly routed) traffic `{unknown}`.
+          const normalizedPath = normalizePathLabel(
+            pathname,
+            mounts ? mounts.map((m) => m.path) : [],
+          );
+          const method = req.method ?? "UNKNOWN";
+          registry.incrementCounter("aimock_requests_total", {
+            method,
+            path: normalizedPath,
+            status,
+          });
+          const elapsed = Number(process.hrtime.bigint() - startTime) / 1e9;
+          registry.observeHistogram(
+            "aimock_request_duration_seconds",
+            { method, path: normalizedPath },
+            elapsed,
+          );
+        } catch (err) {
+          defaults.logger.warn("metrics instrumentation error", err);
+        }
+      };
+      res.on("finish", () => recordOutcome(String(res.statusCode)));
+      res.on("close", () => {
+        if (!res.writableFinished) recordOutcome(DESTROYED_STATUS_LABEL);
+      });
+    }
+
     // Parse the URL pathname (strip query string)
     const parsedUrl = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
-    let pathname = parsedUrl.pathname;
+    pathname = parsedUrl.pathname;
     // Capture the ORIGINAL path before normalizeCompatPath rewrites it — the
     // OpenRouter `/api/v1/` base is the detection signal and would otherwise be
     // erased (`/api/v1/chat/completions` → `/v1/chat/completions`).
@@ -2210,32 +2628,6 @@ export async function createServerWithResolvedAuth(
     // the user who asked for it.
     const isBytePlusArk =
       defaults.record?.providers.byteplus !== undefined && originalPathname.startsWith("/api/v3/");
-
-    // Instrument response completion for metrics. The finish callback reads
-    // pathname via closure after normalizeCompatPath has rewritten it, so
-    // metrics record the canonical /v1/... path.
-    if (registry) {
-      res.on("finish", () => {
-        try {
-          const normalizedPath = normalizePathLabel(pathname);
-          const method = req.method ?? "UNKNOWN";
-          const status = String(res.statusCode);
-          registry.incrementCounter("aimock_requests_total", {
-            method,
-            path: normalizedPath,
-            status,
-          });
-          const elapsed = Number(process.hrtime.bigint() - startTime) / 1e9;
-          registry.observeHistogram(
-            "aimock_request_duration_seconds",
-            { method, path: normalizedPath },
-            elapsed,
-          );
-        } catch (err) {
-          defaults.logger.warn("metrics instrumentation error", err);
-        }
-      });
-    }
 
     // Browser CORS preflights do not carry application credentials. A bare
     // OPTIONS is still a route request and must pass the normal auth boundary.
@@ -2303,16 +2695,7 @@ export async function createServerWithResolvedAuth(
         const raw = await readBody(req);
         await handleOllama(req, res, raw, fixtures, journal, defaults, setCorsHeaders);
       } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : "Internal error";
-        if (!res.headersSent) {
-          writeErrorResponse(
-            res,
-            500,
-            JSON.stringify({ error: { message: msg, type: "server_error" } }),
-          );
-        } else if (!res.writableEnded) {
-          res.destroy();
-        }
+        routeError(req, res, err, pathname);
       }
       return;
     }
@@ -2322,16 +2705,7 @@ export async function createServerWithResolvedAuth(
         const raw = await readBody(req);
         await handleOllamaGenerate(req, res, raw, fixtures, journal, defaults, setCorsHeaders);
       } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : "Internal error";
-        if (!res.headersSent) {
-          writeErrorResponse(
-            res,
-            500,
-            JSON.stringify({ error: { message: msg, type: "server_error" } }),
-          );
-        } else if (!res.writableEnded) {
-          res.destroy();
-        }
+        routeError(req, res, err, pathname);
       }
       return;
     }
@@ -2344,16 +2718,7 @@ export async function createServerWithResolvedAuth(
         const raw = await readBody(req);
         await handleOllamaEmbeddings(req, res, raw, fixtures, journal, defaults, setCorsHeaders);
       } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : "Internal error";
-        if (!res.headersSent) {
-          writeErrorResponse(
-            res,
-            500,
-            JSON.stringify({ error: { message: msg, type: "server_error" } }),
-          );
-        } else if (!res.writableEnded) {
-          res.destroy();
-        }
+        routeError(req, res, err, pathname);
       }
       return;
     }
@@ -2400,34 +2765,7 @@ export async function createServerWithResolvedAuth(
           openRouterVideoJobs,
         );
       } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : "Internal error";
-        defaults.logger.error(`openrouter-video content: ${msg}`);
-        if (!res.headersSent) {
-          // Journal the failed request so it isn't invisible to consumers —
-          // guarded on headersSent so a throw after a successful journal +
-          // response does not double-journal. Wrapped so journaling can
-          // never mask the 500 write below.
-          try {
-            journal.add({
-              method: req.method ?? "GET",
-              path: req.url ?? pathname,
-              headers: flattenHeaders(req.headers),
-              body: null,
-              response: { status: 500, fixture: null },
-            });
-          } catch (jErr) {
-            defaults.logger.warn(
-              `openrouter-video content: journal write failed after handler error: ${jErr instanceof Error ? jErr.message : String(jErr)}`,
-            );
-          }
-          writeErrorResponse(
-            res,
-            500,
-            JSON.stringify({ error: { message: msg, type: "server_error" } }),
-          );
-        } else if (!res.writableEnded) {
-          res.destroy();
-        }
+        routeError(req, res, err, pathname);
       }
       return;
     }
@@ -2438,34 +2776,7 @@ export async function createServerWithResolvedAuth(
       try {
         await handleOpenRouterVideoModels(req, res, fixtures, journal, defaults, setCorsHeaders);
       } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : "Internal error";
-        defaults.logger.error(`openrouter-video models: ${msg}`);
-        if (!res.headersSent) {
-          // Journal the failed request so it isn't invisible to consumers —
-          // guarded on headersSent so a throw after a successful journal +
-          // response does not double-journal. Wrapped so journaling can
-          // never mask the 500 write below.
-          try {
-            journal.add({
-              method: req.method ?? "GET",
-              path: req.url ?? pathname,
-              headers: flattenHeaders(req.headers),
-              body: null,
-              response: { status: 500, fixture: null },
-            });
-          } catch (jErr) {
-            defaults.logger.warn(
-              `openrouter-video models: journal write failed after handler error: ${jErr instanceof Error ? jErr.message : String(jErr)}`,
-            );
-          }
-          writeErrorResponse(
-            res,
-            500,
-            JSON.stringify({ error: { message: msg, type: "server_error" } }),
-          );
-        } else if (!res.writableEnded) {
-          res.destroy();
-        }
+        routeError(req, res, err, pathname);
       }
       return;
     }
@@ -2485,34 +2796,7 @@ export async function createServerWithResolvedAuth(
           openRouterVideoJobs,
         );
       } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : "Internal error";
-        defaults.logger.error(`openrouter-video status: ${msg}`);
-        if (!res.headersSent) {
-          // Journal the failed request so it isn't invisible to consumers —
-          // guarded on headersSent so a throw after a successful journal +
-          // response does not double-journal. Wrapped so journaling can
-          // never mask the 500 write below.
-          try {
-            journal.add({
-              method: req.method ?? "GET",
-              path: req.url ?? pathname,
-              headers: flattenHeaders(req.headers),
-              body: null,
-              response: { status: 500, fixture: null },
-            });
-          } catch (jErr) {
-            defaults.logger.warn(
-              `openrouter-video status: journal write failed after handler error: ${jErr instanceof Error ? jErr.message : String(jErr)}`,
-            );
-          }
-          writeErrorResponse(
-            res,
-            500,
-            JSON.stringify({ error: { message: msg, type: "server_error" } }),
-          );
-        } else if (!res.writableEnded) {
-          res.destroy();
-        }
+        routeError(req, res, err, pathname);
       }
       return;
     }
@@ -2537,39 +2821,7 @@ export async function createServerWithResolvedAuth(
           openRouterVideoJobs,
         );
       } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : "Internal error";
-        defaults.logger.error(`openrouter-video submit: ${msg}`);
-        if (!res.headersSent) {
-          // Journal the failed request so it isn't invisible to consumers —
-          // on submit a throw may have already consumed a fixture-sequence
-          // slot, which would otherwise leave no trace. Guarded on
-          // headersSent so a throw after a successful journal + response
-          // does not double-journal (the guard only covers post-write
-          // throws — a throw between the handler's journal.add and its
-          // writeHead would still double-journal, though that window is
-          // effectively throw-free today). Wrapped so journaling can never
-          // mask the 500 write below.
-          try {
-            journal.add({
-              method: req.method ?? "POST",
-              path: req.url ?? pathname,
-              headers: flattenHeaders(req.headers),
-              body: null,
-              response: { status: 500, fixture: null },
-            });
-          } catch (jErr) {
-            defaults.logger.warn(
-              `openrouter-video submit: journal write failed after handler error: ${jErr instanceof Error ? jErr.message : String(jErr)}`,
-            );
-          }
-          writeErrorResponse(
-            res,
-            500,
-            JSON.stringify({ error: { message: msg, type: "server_error" } }),
-          );
-        } else if (!res.writableEnded) {
-          res.destroy();
-        }
+        routeError(req, res, err, pathname);
       }
       return;
     }
@@ -2601,30 +2853,7 @@ export async function createServerWithResolvedAuth(
           bytePlusVideoJobs,
         );
       } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : "Internal error";
-        defaults.logger.error(`byteplus-video status: ${msg}`);
-        if (!res.headersSent) {
-          try {
-            journal.add({
-              method: req.method ?? "GET",
-              path: req.url ?? pathname,
-              headers: flattenHeaders(req.headers),
-              body: null,
-              response: { status: 500, fixture: null },
-            });
-          } catch (jErr) {
-            defaults.logger.warn(
-              `byteplus-video status: journal write failed after handler error: ${jErr instanceof Error ? jErr.message : String(jErr)}`,
-            );
-          }
-          writeErrorResponse(
-            res,
-            500,
-            JSON.stringify({ error: { message: msg, type: "server_error" } }),
-          );
-        } else if (!res.writableEnded) {
-          res.destroy();
-        }
+        routeError(req, res, err, pathname);
       }
       return;
     }
@@ -2644,30 +2873,7 @@ export async function createServerWithResolvedAuth(
           bytePlusVideoJobs,
         );
       } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : "Internal error";
-        defaults.logger.error(`byteplus-video submit: ${msg}`);
-        if (!res.headersSent) {
-          try {
-            journal.add({
-              method: req.method ?? "POST",
-              path: req.url ?? pathname,
-              headers: flattenHeaders(req.headers),
-              body: null,
-              response: { status: 500, fixture: null },
-            });
-          } catch (jErr) {
-            defaults.logger.warn(
-              `byteplus-video submit: journal write failed after handler error: ${jErr instanceof Error ? jErr.message : String(jErr)}`,
-            );
-          }
-          writeErrorResponse(
-            res,
-            500,
-            JSON.stringify({ error: { message: msg, type: "server_error" } }),
-          );
-        } else if (!res.writableEnded) {
-          res.destroy();
-        }
+        routeError(req, res, err, pathname);
       }
       return;
     }
@@ -2766,6 +2972,60 @@ export async function createServerWithResolvedAuth(
       return;
     }
 
+    // Batches API — cancel RE before id RE (the id RE would swallow /cancel).
+    // Cancel takes no payload — the `openai` SDK posts an empty body — but the
+    // body is still read, and discarded, before the handler runs. Reading it is
+    // what applies `readBody`'s 10 MB ceiling: a POST route that never touches
+    // the stream lets node quietly dump whatever the client sends, so this one
+    // route would accept an unbounded upload while the create route beside it
+    // (the sibling pattern followed here, down to the error arm) rejects the
+    // same bytes.
+    const batchesCancelMatch = pathname.match(BATCHES_CANCEL_RE);
+    if (batchesCancelMatch && req.method === "POST") {
+      try {
+        await readBody(req);
+        await handleBatchesCancel(
+          req,
+          res,
+          batchesCancelMatch[1],
+          journal,
+          defaults,
+          setCorsHeaders,
+        );
+      } catch (err: unknown) {
+        routeError(req, res, err, pathname, { service: "batches" });
+      }
+      return;
+    }
+    const batchesIdMatch = pathname.match(BATCHES_ID_RE);
+    if (batchesIdMatch && req.method === "GET") {
+      try {
+        await handleBatchesRetrieve(req, res, batchesIdMatch[1], journal, defaults, setCorsHeaders);
+      } catch (err: unknown) {
+        routeError(req, res, err, pathname, { service: "batches" });
+      }
+      return;
+    }
+    if (pathname === BATCHES_PATH && req.method === "GET") {
+      try {
+        await handleBatchesList(req, res, journal, defaults, setCorsHeaders);
+      } catch (err: unknown) {
+        routeError(req, res, err, pathname, { service: "batches" });
+      }
+      return;
+    }
+    if (pathname === BATCHES_PATH && req.method === "POST") {
+      try {
+        const raw = await readBody(req);
+        await handleBatchesCreate(req, res, raw, journal, defaults, setCorsHeaders);
+      } catch (err: unknown) {
+        routeError(req, res, err, pathname, {
+          service: "batches",
+        });
+      }
+      return;
+    }
+
     // Files API mock — dispatch order matters: content RE → id RE → collection.
     // The id RE's `[^/]+` would otherwise swallow `/content`, and the
     // collection exact match must not claim an id path.
@@ -2782,16 +3042,28 @@ export async function createServerWithResolvedAuth(
     // is a server-wide change and belongs in its own pass.
     const filesContentMatch = pathname.match(FILES_CONTENT_RE);
     if (filesContentMatch && req.method === "GET") {
-      await handleFilesContent(req, res, filesContentMatch[1], journal, defaults, setCorsHeaders);
+      try {
+        await handleFilesContent(req, res, filesContentMatch[1], journal, defaults, setCorsHeaders);
+      } catch (err: unknown) {
+        routeError(req, res, err, pathname, { service: "files" });
+      }
       return;
     }
     const filesIdMatch = pathname.match(FILES_ID_RE);
     if (filesIdMatch && req.method === "GET") {
-      await handleFilesRetrieve(req, res, filesIdMatch[1], journal, defaults, setCorsHeaders);
+      try {
+        await handleFilesRetrieve(req, res, filesIdMatch[1], journal, defaults, setCorsHeaders);
+      } catch (err: unknown) {
+        routeError(req, res, err, pathname, { service: "files" });
+      }
       return;
     }
     if (filesIdMatch && req.method === "DELETE") {
-      await handleFilesDelete(req, res, filesIdMatch[1], journal, defaults, setCorsHeaders);
+      try {
+        await handleFilesDelete(req, res, filesIdMatch[1], journal, defaults, setCorsHeaders);
+      } catch (err: unknown) {
+        routeError(req, res, err, pathname, { service: "files" });
+      }
       return;
     }
     if (pathname === FILES_PATH && req.method === "GET") {
@@ -2799,7 +3071,11 @@ export async function createServerWithResolvedAuth(
       // which silently first-wins a repeat and hands `""` through for
       // `?purpose=`; the files module reads all four list parameters itself so
       // one rule covers them all.
-      await handleFilesList(req, res, journal, defaults, setCorsHeaders);
+      try {
+        await handleFilesList(req, res, journal, defaults, setCorsHeaders);
+      } catch (err: unknown) {
+        routeError(req, res, err, pathname, { service: "files" });
+      }
       return;
     }
     if (pathname === FILES_PATH && req.method === "POST") {
@@ -2828,17 +3104,9 @@ export async function createServerWithResolvedAuth(
           setCorsHeaders,
         );
       } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : "Internal error";
-        defaults.logger.error(`POST /v1/files: failed to read body: ${msg}`);
-        if (!res.headersSent) {
-          writeErrorResponse(
-            res,
-            500,
-            JSON.stringify({ error: { message: msg, type: "server_error" } }),
-          );
-        } else if (!res.writableEnded) {
-          res.destroy();
-        }
+        routeError(req, res, err, pathname, {
+          service: "files",
+        });
       }
       return;
     }
@@ -2857,31 +3125,36 @@ export async function createServerWithResolvedAuth(
         await readBody(req);
         await handleFineTuningCancel(req, res, ftCancelMatch[1], journal, defaults, setCorsHeaders);
       } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : "Internal error";
-        if (!res.headersSent) {
-          writeErrorResponse(
-            res,
-            500,
-            JSON.stringify({ error: { message: msg, type: "server_error" } }),
-          );
-        } else if (!res.writableEnded) {
-          res.destroy();
-        }
+        routeError(req, res, err, pathname, {
+          service: "fine-tuning",
+        });
       }
       return;
     }
     const ftEventsMatch = pathname.match(FINE_TUNING_EVENTS_RE);
     if (ftEventsMatch && req.method === "GET") {
-      await handleFineTuningEvents(req, res, ftEventsMatch[1], journal, defaults, setCorsHeaders);
+      try {
+        await handleFineTuningEvents(req, res, ftEventsMatch[1], journal, defaults, setCorsHeaders);
+      } catch (err: unknown) {
+        routeError(req, res, err, pathname, { service: "fine-tuning" });
+      }
       return;
     }
     const ftIdMatch = pathname.match(FINE_TUNING_ID_RE);
     if (ftIdMatch && req.method === "GET") {
-      await handleFineTuningRetrieve(req, res, ftIdMatch[1], journal, defaults, setCorsHeaders);
+      try {
+        await handleFineTuningRetrieve(req, res, ftIdMatch[1], journal, defaults, setCorsHeaders);
+      } catch (err: unknown) {
+        routeError(req, res, err, pathname, { service: "fine-tuning" });
+      }
       return;
     }
     if (pathname === FINE_TUNING_JOBS_PATH && req.method === "GET") {
-      await handleFineTuningList(req, res, journal, defaults, setCorsHeaders);
+      try {
+        await handleFineTuningList(req, res, journal, defaults, setCorsHeaders);
+      } catch (err: unknown) {
+        routeError(req, res, err, pathname, { service: "fine-tuning" });
+      }
       return;
     }
     if (pathname === FINE_TUNING_JOBS_PATH && req.method === "POST") {
@@ -2889,16 +3162,9 @@ export async function createServerWithResolvedAuth(
         const raw = await readBody(req);
         await handleFineTuningCreate(req, res, raw, journal, defaults, setCorsHeaders);
       } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : "Internal error";
-        if (!res.headersSent) {
-          writeErrorResponse(
-            res,
-            500,
-            JSON.stringify({ error: { message: msg, type: "server_error" } }),
-          );
-        } else if (!res.writableEnded) {
-          res.destroy();
-        }
+        routeError(req, res, err, pathname, {
+          service: "fine-tuning",
+        });
       }
       return;
     }
@@ -2951,21 +3217,10 @@ export async function createServerWithResolvedAuth(
         const raw = await readBody(req);
         await handleResponses(req, res, raw, fixtures, journal, defaults, setCorsHeaders);
       } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : "Internal error";
-        if (!res.headersSent) {
-          writeErrorResponse(
-            res,
-            500,
-            JSON.stringify({ error: { message: msg, type: "server_error" } }),
-          );
-        } else if (!res.writableEnded) {
-          try {
-            res.write(`event: error\ndata: ${JSON.stringify({ error: { message: msg } })}\n\n`);
-            res.end();
-          } catch (writeErr) {
-            logger.debug("Failed to write error recovery response:", writeErr);
-          }
-        }
+        routeError(req, res, err, pathname, {
+          streamEvent: (m) =>
+            `event: error\ndata: ${JSON.stringify({ error: { message: m } })}\n\n`,
+        });
       }
       return;
     }
@@ -2976,21 +3231,10 @@ export async function createServerWithResolvedAuth(
         const raw = await readBody(req);
         await handleMessages(req, res, raw, fixtures, journal, defaults, setCorsHeaders);
       } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : "Internal error";
-        if (!res.headersSent) {
-          writeErrorResponse(
-            res,
-            500,
-            JSON.stringify({ error: { message: msg, type: "server_error" } }),
-          );
-        } else if (!res.writableEnded) {
-          try {
-            res.write(`event: error\ndata: ${JSON.stringify({ error: { message: msg } })}\n\n`);
-            res.end();
-          } catch (writeErr) {
-            logger.debug("Failed to write error recovery response:", writeErr);
-          }
-        }
+        routeError(req, res, err, pathname, {
+          streamEvent: (m) =>
+            `event: error\ndata: ${JSON.stringify({ error: { message: m } })}\n\n`,
+        });
       }
       return;
     }
@@ -3001,21 +3245,10 @@ export async function createServerWithResolvedAuth(
         const raw = await readBody(req);
         await handleCohere(req, res, raw, fixtures, journal, defaults, setCorsHeaders);
       } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : "Internal error";
-        if (!res.headersSent) {
-          writeErrorResponse(
-            res,
-            500,
-            JSON.stringify({ error: { message: msg, type: "server_error" } }),
-          );
-        } else if (!res.writableEnded) {
-          try {
-            res.write(`event: error\ndata: ${JSON.stringify({ error: { message: msg } })}\n\n`);
-            res.end();
-          } catch (writeErr) {
-            logger.debug("Failed to write error recovery response:", writeErr);
-          }
-        }
+        routeError(req, res, err, pathname, {
+          streamEvent: (m) =>
+            `event: error\ndata: ${JSON.stringify({ error: { message: m } })}\n\n`,
+        });
       }
       return;
     }
@@ -3026,16 +3259,7 @@ export async function createServerWithResolvedAuth(
         const raw = await readBody(req);
         await handleCohereEmbed(req, res, raw, fixtures, journal, defaults, setCorsHeaders);
       } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : "Internal error";
-        if (!res.headersSent) {
-          writeErrorResponse(
-            res,
-            500,
-            JSON.stringify({ error: { message: msg, type: "server_error" } }),
-          );
-        } else if (!res.writableEnded) {
-          res.destroy();
-        }
+        routeError(req, res, err, pathname);
       }
       return;
     }
@@ -3074,16 +3298,7 @@ export async function createServerWithResolvedAuth(
           embeddingsProvider,
         );
       } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : "Internal error";
-        if (!res.headersSent) {
-          writeErrorResponse(
-            res,
-            500,
-            JSON.stringify({ error: { message: msg, type: "server_error" } }),
-          );
-        } else if (!res.writableEnded) {
-          res.destroy();
-        }
+        routeError(req, res, err, pathname);
       }
       return;
     }
@@ -3105,16 +3320,7 @@ export async function createServerWithResolvedAuth(
           isBytePlusArk ? "byteplus" : undefined,
         );
       } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : "Internal error";
-        if (!res.headersSent) {
-          writeErrorResponse(
-            res,
-            500,
-            JSON.stringify({ error: { message: msg, type: "server_error" } }),
-          );
-        } else if (!res.writableEnded) {
-          res.destroy();
-        }
+        routeError(req, res, err, pathname);
       }
       return;
     }
@@ -3125,16 +3331,7 @@ export async function createServerWithResolvedAuth(
         const raw = await readBody(req);
         await handleImageEdit(req, res, raw, fixtures, journal, defaults, setCorsHeaders);
       } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : "Internal error";
-        if (!res.headersSent) {
-          writeErrorResponse(
-            res,
-            500,
-            JSON.stringify({ error: { message: msg, type: "server_error" } }),
-          );
-        } else if (!res.writableEnded) {
-          res.destroy();
-        }
+        routeError(req, res, err, pathname);
       }
       return;
     }
@@ -3145,16 +3342,7 @@ export async function createServerWithResolvedAuth(
         const raw = await readBody(req);
         await handleImageVariations(req, res, raw, fixtures, journal, defaults, setCorsHeaders);
       } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : "Internal error";
-        if (!res.headersSent) {
-          writeErrorResponse(
-            res,
-            500,
-            JSON.stringify({ error: { message: msg, type: "server_error" } }),
-          );
-        } else if (!res.writableEnded) {
-          res.destroy();
-        }
+        routeError(req, res, err, pathname);
       }
       return;
     }
@@ -3165,16 +3353,7 @@ export async function createServerWithResolvedAuth(
         const raw = await readBody(req);
         await handleSpeech(req, res, raw, fixtures, journal, defaults, setCorsHeaders);
       } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : "Internal error";
-        if (!res.headersSent) {
-          writeErrorResponse(
-            res,
-            500,
-            JSON.stringify({ error: { message: msg, type: "server_error" } }),
-          );
-        } else if (!res.writableEnded) {
-          res.destroy();
-        }
+        routeError(req, res, err, pathname);
       }
       return;
     }
@@ -3185,16 +3364,7 @@ export async function createServerWithResolvedAuth(
         const raw = await readBody(req);
         await handleTranscription(req, res, raw, fixtures, journal, defaults, setCorsHeaders);
       } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : "Internal error";
-        if (!res.headersSent) {
-          writeErrorResponse(
-            res,
-            500,
-            JSON.stringify({ error: { message: msg, type: "server_error" } }),
-          );
-        } else if (!res.writableEnded) {
-          res.destroy();
-        }
+        routeError(req, res, err, pathname);
       }
       return;
     }
@@ -3214,16 +3384,7 @@ export async function createServerWithResolvedAuth(
           "translation",
         );
       } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : "Internal error";
-        if (!res.headersSent) {
-          writeErrorResponse(
-            res,
-            500,
-            JSON.stringify({ error: { message: msg, type: "server_error" } }),
-          );
-        } else if (!res.writableEnded) {
-          res.destroy();
-        }
+        routeError(req, res, err, pathname);
       }
       return;
     }
@@ -3248,30 +3409,7 @@ export async function createServerWithResolvedAuth(
           grokVideoJobs,
         );
       } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : "Internal error";
-        defaults.logger.error(`grok-video submit: ${msg}`);
-        if (!res.headersSent) {
-          try {
-            journal.add({
-              method: req.method ?? "POST",
-              path: req.url ?? pathname,
-              headers: flattenHeaders(req.headers),
-              body: null,
-              response: { status: 500, fixture: null },
-            });
-          } catch (jErr) {
-            defaults.logger.warn(
-              `grok-video submit: journal write failed after handler error: ${jErr instanceof Error ? jErr.message : String(jErr)}`,
-            );
-          }
-          writeErrorResponse(
-            res,
-            500,
-            JSON.stringify({ error: { message: msg, type: "server_error" } }),
-          );
-        } else if (!res.writableEnded) {
-          res.destroy();
-        }
+        routeError(req, res, err, pathname);
       }
       return;
     }
@@ -3291,16 +3429,7 @@ export async function createServerWithResolvedAuth(
           videoStates,
         );
       } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : "Internal error";
-        if (!res.headersSent) {
-          writeErrorResponse(
-            res,
-            500,
-            JSON.stringify({ error: { message: msg, type: "server_error" } }),
-          );
-        } else if (!res.writableEnded) {
-          res.destroy();
-        }
+        routeError(req, res, err, pathname);
       }
       return;
     }
@@ -3326,30 +3455,7 @@ export async function createServerWithResolvedAuth(
           videoStates,
         );
       } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : "Internal error";
-        defaults.logger.error(`grok-video status: ${msg}`);
-        if (!res.headersSent) {
-          try {
-            journal.add({
-              method: req.method ?? "GET",
-              path: req.url ?? pathname,
-              headers: flattenHeaders(req.headers),
-              body: null,
-              response: { status: 500, fixture: null },
-            });
-          } catch (jErr) {
-            defaults.logger.warn(
-              `grok-video status: journal write failed after handler error: ${jErr instanceof Error ? jErr.message : String(jErr)}`,
-            );
-          }
-          writeErrorResponse(
-            res,
-            500,
-            JSON.stringify({ error: { message: msg, type: "server_error" } }),
-          );
-        } else if (!res.writableEnded) {
-          res.destroy();
-        }
+        routeError(req, res, err, pathname);
       }
       return;
     }
@@ -3374,30 +3480,7 @@ export async function createServerWithResolvedAuth(
           veoVideoJobs,
         );
       } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : "Internal error";
-        defaults.logger.error(`veo-video submit: ${msg}`);
-        if (!res.headersSent) {
-          try {
-            journal.add({
-              method: req.method ?? "POST",
-              path: req.url ?? pathname,
-              headers: flattenHeaders(req.headers),
-              body: null,
-              response: { status: 500, fixture: null },
-            });
-          } catch (jErr) {
-            defaults.logger.warn(
-              `veo-video submit: journal write failed after handler error: ${jErr instanceof Error ? jErr.message : String(jErr)}`,
-            );
-          }
-          writeErrorResponse(
-            res,
-            500,
-            JSON.stringify({ error: { message: msg, type: "server_error" } }),
-          );
-        } else if (!res.writableEnded) {
-          res.destroy();
-        }
+        routeError(req, res, err, pathname);
       }
       return;
     }
@@ -3418,30 +3501,7 @@ export async function createServerWithResolvedAuth(
           veoVideoJobs,
         );
       } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : "Internal error";
-        defaults.logger.error(`veo-video status: ${msg}`);
-        if (!res.headersSent) {
-          try {
-            journal.add({
-              method: req.method ?? "GET",
-              path: req.url ?? pathname,
-              headers: flattenHeaders(req.headers),
-              body: null,
-              response: { status: 500, fixture: null },
-            });
-          } catch (jErr) {
-            defaults.logger.warn(
-              `veo-video status: journal write failed after handler error: ${jErr instanceof Error ? jErr.message : String(jErr)}`,
-            );
-          }
-          writeErrorResponse(
-            res,
-            500,
-            JSON.stringify({ error: { message: msg, type: "server_error" } }),
-          );
-        } else if (!res.writableEnded) {
-          res.destroy();
-        }
+        routeError(req, res, err, pathname);
       }
       return;
     }
@@ -3464,16 +3524,7 @@ export async function createServerWithResolvedAuth(
           predictModel,
         );
       } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : "Internal error";
-        if (!res.headersSent) {
-          writeErrorResponse(
-            res,
-            500,
-            JSON.stringify({ error: { message: msg, type: "server_error" } }),
-          );
-        } else if (!res.writableEnded) {
-          res.destroy();
-        }
+        routeError(req, res, err, pathname);
       }
       return;
     }
@@ -3484,21 +3535,9 @@ export async function createServerWithResolvedAuth(
         const raw = await readBody(req);
         await handleGeminiInteractions(req, res, raw, fixtures, journal, defaults, setCorsHeaders);
       } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : "Internal error";
-        if (!res.headersSent) {
-          writeErrorResponse(
-            res,
-            500,
-            JSON.stringify({ error: { message: msg, type: "server_error" } }),
-          );
-        } else if (!res.writableEnded) {
-          try {
-            res.write(`data: ${JSON.stringify({ error: { message: msg } })}\n\n`);
-            res.end();
-          } catch (writeErr) {
-            logger.debug("Failed to write error recovery response:", writeErr);
-          }
-        }
+        routeError(req, res, err, pathname, {
+          streamEvent: (m) => `data: ${JSON.stringify({ error: { message: m } })}\n\n`,
+        });
       }
       return;
     }
@@ -3520,16 +3559,7 @@ export async function createServerWithResolvedAuth(
           setCorsHeaders,
         );
       } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : "Internal error";
-        if (!res.headersSent) {
-          writeErrorResponse(
-            res,
-            500,
-            JSON.stringify({ error: { message: msg, type: "server_error" } }),
-          );
-        } else if (!res.writableEnded) {
-          res.destroy();
-        }
+        routeError(req, res, err, pathname);
       }
       return;
     }
@@ -3553,21 +3583,9 @@ export async function createServerWithResolvedAuth(
           setCorsHeaders,
         );
       } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : "Internal error";
-        if (!res.headersSent) {
-          writeErrorResponse(
-            res,
-            500,
-            JSON.stringify({ error: { message: msg, type: "server_error" } }),
-          );
-        } else if (!res.writableEnded) {
-          try {
-            res.write(`data: ${JSON.stringify({ error: { message: msg } })}\n\n`);
-            res.end();
-          } catch (writeErr) {
-            logger.debug("Failed to write error recovery response:", writeErr);
-          }
-        }
+        routeError(req, res, err, pathname, {
+          streamEvent: (m) => `data: ${JSON.stringify({ error: { message: m } })}\n\n`,
+        });
       }
       return;
     }
@@ -3592,21 +3610,9 @@ export async function createServerWithResolvedAuth(
           "vertexai",
         );
       } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : "Internal error";
-        if (!res.headersSent) {
-          writeErrorResponse(
-            res,
-            500,
-            JSON.stringify({ error: { message: msg, type: "server_error" } }),
-          );
-        } else if (!res.writableEnded) {
-          try {
-            res.write(`data: ${JSON.stringify({ error: { message: msg } })}\n\n`);
-            res.end();
-          } catch (writeErr) {
-            logger.debug("Failed to write error recovery response:", writeErr);
-          }
-        }
+        routeError(req, res, err, pathname, {
+          streamEvent: (m) => `data: ${JSON.stringify({ error: { message: m } })}\n\n`,
+        });
       }
       return;
     }
@@ -3628,16 +3634,7 @@ export async function createServerWithResolvedAuth(
           setCorsHeaders,
         );
       } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : "Internal error";
-        if (!res.headersSent) {
-          writeErrorResponse(
-            res,
-            500,
-            JSON.stringify({ error: { message: msg, type: "server_error" } }),
-          );
-        } else if (!res.writableEnded) {
-          res.destroy();
-        }
+        routeError(req, res, err, pathname);
       }
       return;
     }
@@ -3659,16 +3656,7 @@ export async function createServerWithResolvedAuth(
           setCorsHeaders,
         );
       } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : "Internal error";
-        if (!res.headersSent) {
-          writeErrorResponse(
-            res,
-            500,
-            JSON.stringify({ error: { message: msg, type: "server_error" } }),
-          );
-        } else if (!res.writableEnded) {
-          res.destroy();
-        }
+        routeError(req, res, err, pathname);
       }
       return;
     }
@@ -3690,16 +3678,7 @@ export async function createServerWithResolvedAuth(
           setCorsHeaders,
         );
       } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : "Internal error";
-        if (!res.headersSent) {
-          writeErrorResponse(
-            res,
-            500,
-            JSON.stringify({ error: { message: msg, type: "server_error" } }),
-          );
-        } else if (!res.writableEnded) {
-          res.destroy();
-        }
+        routeError(req, res, err, pathname);
       }
       return;
     }
@@ -3721,16 +3700,7 @@ export async function createServerWithResolvedAuth(
           setCorsHeaders,
         );
       } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : "Internal error";
-        if (!res.headersSent) {
-          writeErrorResponse(
-            res,
-            500,
-            JSON.stringify({ error: { message: msg, type: "server_error" } }),
-          );
-        } else if (!res.writableEnded) {
-          res.destroy();
-        }
+        routeError(req, res, err, pathname);
       }
       return;
     }
@@ -3749,16 +3719,9 @@ export async function createServerWithResolvedAuth(
           setCorsHeaders,
         );
       } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : "Internal error";
-        if (!res.headersSent) {
-          writeErrorResponse(
-            res,
-            500,
-            JSON.stringify({ error: { message: msg, type: "server_error" } }),
-          );
-        } else if (!res.writableEnded) {
-          res.destroy();
-        }
+        routeError(req, res, err, pathname, {
+          service: "search",
+        });
       }
       return;
     }
@@ -3777,16 +3740,9 @@ export async function createServerWithResolvedAuth(
           setCorsHeaders,
         );
       } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : "Internal error";
-        if (!res.headersSent) {
-          writeErrorResponse(
-            res,
-            500,
-            JSON.stringify({ error: { message: msg, type: "server_error" } }),
-          );
-        } else if (!res.writableEnded) {
-          res.destroy();
-        }
+        routeError(req, res, err, pathname, {
+          service: "rerank",
+        });
       }
       return;
     }
@@ -3805,16 +3761,9 @@ export async function createServerWithResolvedAuth(
           setCorsHeaders,
         );
       } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : "Internal error";
-        if (!res.headersSent) {
-          writeErrorResponse(
-            res,
-            500,
-            JSON.stringify({ error: { message: msg, type: "server_error" } }),
-          );
-        } else if (!res.writableEnded) {
-          res.destroy();
-        }
+        routeError(req, res, err, pathname, {
+          service: "moderation",
+        });
       }
       return;
     }
@@ -3826,16 +3775,7 @@ export async function createServerWithResolvedAuth(
         const raw = await readBody(req);
         await handleElevenLabsAudio(req, res, raw, fixtures, defaults, journal, "sound-generation");
       } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : "Internal error";
-        if (!res.headersSent) {
-          writeErrorResponse(
-            res,
-            500,
-            JSON.stringify({ error: { message: msg, type: "server_error" } }),
-          );
-        } else if (!res.writableEnded) {
-          res.destroy();
-        }
+        routeError(req, res, err, pathname);
       }
       return;
     }
@@ -3847,16 +3787,7 @@ export async function createServerWithResolvedAuth(
         const raw = await readBody(req);
         await handleElevenLabsVoiceDesign(req, res, raw, fixtures, defaults, journal);
       } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : "Internal error";
-        if (!res.headersSent) {
-          writeErrorResponse(
-            res,
-            500,
-            JSON.stringify({ error: { message: msg, type: "server_error" } }),
-          );
-        } else if (!res.writableEnded) {
-          res.destroy();
-        }
+        routeError(req, res, err, pathname, { service: "elevenlabs-voice" });
       }
       return;
     }
@@ -3868,16 +3799,7 @@ export async function createServerWithResolvedAuth(
         const raw = await readBody(req);
         await handleElevenLabsVoiceCreate(req, res, raw, fixtures, defaults, journal);
       } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : "Internal error";
-        if (!res.headersSent) {
-          writeErrorResponse(
-            res,
-            500,
-            JSON.stringify({ error: { message: msg, type: "server_error" } }),
-          );
-        } else if (!res.writableEnded) {
-          res.destroy();
-        }
+        routeError(req, res, err, pathname, { service: "elevenlabs-voice" });
       }
       return;
     }
@@ -3906,6 +3828,19 @@ export async function createServerWithResolvedAuth(
             },
           }),
         );
+        // Journaled AFTER the write, like every other terminal arm in this
+        // batch: the caller's answer never waits on bookkeeping. Tagged with
+        // the service so this rejection is selectable under
+        // `?service=elevenlabs-voice` with the rest of the route's branches —
+        // it was the one voice branch that left no journal entry at all.
+        journal.add({
+          method: req.method ?? "GET",
+          path: req.url ?? pathname,
+          headers: flattenHeaders(req.headers),
+          service: "elevenlabs-voice",
+          body: null,
+          response: { status: 400, fixture: null },
+        });
         return;
       }
       try {
@@ -3915,16 +3850,7 @@ export async function createServerWithResolvedAuth(
           await handleElevenLabsVoiceDelete(req, res, voiceId, fixtures, defaults, journal);
         }
       } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : "Internal error";
-        if (!res.headersSent) {
-          writeErrorResponse(
-            res,
-            500,
-            JSON.stringify({ error: { message: msg, type: "server_error" } }),
-          );
-        } else if (!res.writableEnded) {
-          res.destroy();
-        }
+        routeError(req, res, err, pathname, { service: "elevenlabs-voice" });
       }
       return;
     }
@@ -3938,16 +3864,7 @@ export async function createServerWithResolvedAuth(
         const raw = await readBody(req);
         await handleElevenLabsTTS(req, res, raw, fixtures, defaults, journal, voiceId);
       } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : "Internal error";
-        if (!res.headersSent) {
-          writeErrorResponse(
-            res,
-            500,
-            JSON.stringify({ error: { message: msg, type: "server_error" } }),
-          );
-        } else if (!res.writableEnded) {
-          res.destroy();
-        }
+        routeError(req, res, err, pathname);
       }
       return;
     }
@@ -3961,16 +3878,7 @@ export async function createServerWithResolvedAuth(
         const raw = await readBody(req);
         await handleElevenLabsAudio(req, res, raw, fixtures, defaults, journal, musicSubType);
       } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : "Internal error";
-        if (!res.headersSent) {
-          writeErrorResponse(
-            res,
-            500,
-            JSON.stringify({ error: { message: msg, type: "server_error" } }),
-          );
-        } else if (!res.writableEnded) {
-          res.destroy();
-        }
+        routeError(req, res, err, pathname);
       }
       return;
     }
@@ -3983,7 +3891,7 @@ export async function createServerWithResolvedAuth(
     // (queue.fal.run, fal.run, rest.fal.ai, rest.alpha.fal.ai).
     // Matches the requestMiddleware path-mirror convention used by
     // @fal-ai/client when proxyUrl can't be honoured server-side.
-    if (FAL_PREFIX_RE.test(pathname) && req.headers["x-fal-target-host"]) {
+    if (FAL_ROUTE_RE.test(pathname) && req.headers["x-fal-target-host"]) {
       setCorsHeaders(res);
       try {
         falBody = req.method === "POST" || req.method === "PUT" ? await readBody(req) : "";
@@ -4059,7 +3967,7 @@ export async function createServerWithResolvedAuth(
                 method: req.method ?? "GET",
                 path: pathname,
                 headers: flattenHeaders(req.headers),
-                body: { model: "", messages: [] },
+                body: null,
               },
               "internal",
               defaults.registry,
@@ -4072,16 +3980,7 @@ export async function createServerWithResolvedAuth(
         if (outcome === "handled") return;
         // passthrough: fall through to legacy fal-audio routes below
       } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : "Internal error";
-        if (!res.headersSent) {
-          writeErrorResponse(
-            res,
-            500,
-            JSON.stringify({ error: { message: msg, type: "server_error" } }),
-          );
-        } else if (!res.writableEnded) {
-          res.destroy();
-        }
+        routeError(req, res, err, pathname);
         return;
       }
     }
@@ -4094,16 +3993,7 @@ export async function createServerWithResolvedAuth(
         const raw = falBody ?? (await readBody(req));
         await handleFalQueue(req, res, raw, pathname, fixtures, defaults, journal);
       } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : "Internal error";
-        if (!res.headersSent) {
-          writeErrorResponse(
-            res,
-            500,
-            JSON.stringify({ error: { message: msg, type: "server_error" } }),
-          );
-        } else if (!res.writableEnded) {
-          res.destroy();
-        }
+        routeError(req, res, err, pathname);
       }
       return;
     }
@@ -4175,7 +4065,7 @@ export async function createServerWithResolvedAuth(
               method: req.method ?? "GET",
               path: pathname,
               headers: flattenHeaders(req.headers),
-              body: { model: "", messages: [] },
+              body: null,
             },
             "internal",
             defaults.registry,
@@ -4185,16 +4075,7 @@ export async function createServerWithResolvedAuth(
         }
         await handleFalQueue(req, res, raw, pathname, fixtures, defaults, journal);
       } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : "Internal error";
-        if (!res.headersSent) {
-          writeErrorResponse(
-            res,
-            500,
-            JSON.stringify({ error: { message: msg, type: "server_error" } }),
-          );
-        } else if (!res.writableEnded) {
-          res.destroy();
-        }
+        routeError(req, res, err, pathname);
       }
       return;
     }
@@ -4207,16 +4088,7 @@ export async function createServerWithResolvedAuth(
         const raw = falBody ?? (await readBody(req));
         await handleFalQueue(req, res, raw, pathname, fixtures, defaults, journal);
       } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : "Internal error";
-        if (!res.headersSent) {
-          writeErrorResponse(
-            res,
-            500,
-            JSON.stringify({ error: { message: msg, type: "server_error" } }),
-          );
-        } else if (!res.writableEnded) {
-          res.destroy();
-        }
+        routeError(req, res, err, pathname);
       }
       return;
     }
@@ -4266,41 +4138,34 @@ export async function createServerWithResolvedAuth(
         isOpenRouter,
       );
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : "Internal error";
-      if (!res.headersSent) {
-        writeErrorResponse(
-          res,
-          500,
+      routeError(req, res, err, pathname, {
+        envelope: (m, status) =>
           isOpenRouter
-            ? serializeOpenRouterError(500, msg)
+            ? serializeOpenRouterError(status, m)
             : JSON.stringify({
-                error: {
-                  message: msg,
-                  type: "server_error",
-                },
+                error: { message: m, type: errorTypeForStatus(status) },
               }),
-        );
-      } else if (!res.writableEnded) {
-        // Headers already sent (SSE stream in progress) — write error event then close
-        try {
-          res.write(
-            `data: ${
-              isOpenRouter
-                ? serializeOpenRouterError(500, msg)
-                : JSON.stringify({ error: { message: msg, type: "server_error" } })
-            }\n\n`,
-          );
-          res.end();
-        } catch (writeErr) {
-          logger.debug("Failed to write error recovery response:", writeErr);
-        }
-      }
+        streamEvent: (m, status) =>
+          `data: ${
+            isOpenRouter
+              ? serializeOpenRouterError(status, m)
+              : JSON.stringify({ error: { message: m, type: errorTypeForStatus(status) } })
+          }\n\n`,
+      });
     }
   }
 
   // ─── WebSocket upgrade handling ──────────────────────────────────────────
 
   const activeConnections = new Set<WebSocketConnection>();
+  const liveLimits = normalizeLiveOptions(options?.live);
+  const liveSessions = new Map<symbol, { testId: string; dispose: () => void }>();
+  const closeLiveSessions = (testId?: string) => {
+    for (const session of [...liveSessions.values()]) {
+      if (testId === undefined || session.testId === testId) session.dispose();
+    }
+  };
+  liveClosers.set(defaults, closeLiveSessions);
 
   server.on(
     "upgrade",
@@ -4412,11 +4277,33 @@ export async function createServerWithResolvedAuth(
     if (
       pathname !== RESPONSES_PATH &&
       pathname !== REALTIME_PATH &&
-      pathname !== GEMINI_LIVE_PATH
+      pathname !== GEMINI_LIVE_PATH &&
+      pathname !== LIVE_PATH
     ) {
       socket.write("HTTP/1.1 404 Not Found\r\n\r\n");
       socket.destroy();
       return;
+    }
+
+    let liveId: symbol | undefined;
+    if (pathname === LIVE_PATH) {
+      if (req.method !== "GET" || parsedUrl.searchParams.has("model")) {
+        socket.end("HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n");
+        return;
+      }
+      if (liveSessions.size >= liveLimits.maxSessions) {
+        socket.end("HTTP/1.1 429 Too Many Requests\r\nConnection: close\r\n\r\n");
+        return;
+      }
+      liveId = Symbol("live-session");
+      const reservedId = liveId;
+      liveSessions.set(reservedId, {
+        testId: getTestId(req),
+        dispose: () => {
+          socket.destroy();
+          liveSessions.delete(reservedId);
+        },
+      });
     }
 
     // Push any buffered data back before upgrading
@@ -4426,9 +4313,10 @@ export async function createServerWithResolvedAuth(
 
     let ws: WebSocketConnection;
     try {
-      ws = upgradeToWebSocket(req, socket);
+      ws = upgradeToWebSocket(req, socket, pathname === LIVE_PATH ? liveLimits : undefined);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : "WebSocket upgrade failed";
+      if (liveId !== undefined) liveSessions.delete(liveId);
       logger.error(`WebSocket upgrade error: ${msg}`);
       if (!socket.destroyed) socket.destroy();
       return;
@@ -4447,7 +4335,21 @@ export async function createServerWithResolvedAuth(
 
     // Route to handler
     const wsTestId = getTestId(req);
-    if (pathname === RESPONSES_PATH) {
+    if (pathname === LIVE_PATH && liveId !== undefined) {
+      const sessionId = liveId;
+      const dispose = handleLiveSession(ws, fixtures, journal, {
+        defaults,
+        limits: liveLimits,
+        localApiKeys: resolvedAuth.publicConfig?.apiKeys,
+        testId: wsTestId,
+        headers: req.headers,
+        onDispose: () => {
+          liveSessions.delete(sessionId);
+          activeConnections.delete(ws);
+        },
+      });
+      liveSessions.set(sessionId, { testId: wsTestId, dispose });
+    } else if (pathname === RESPONSES_PATH) {
       handleWebSocketResponses(ws, fixtures, journal, {
         ...defaults,
         model: "gpt-4",
@@ -4479,6 +4381,7 @@ export async function createServerWithResolvedAuth(
   // Close active WS connections when server shuts down
   const originalClose = server.close.bind(server);
   server.close = function (this: http.Server, callback?: (err?: Error) => void) {
+    closeLiveSessions();
     for (const ws of activeConnections) {
       ws.close(1001, "Server shutting down");
     }
@@ -4510,6 +4413,7 @@ export async function createServerWithResolvedAuth(
       }
 
       resolve({
+        closeLiveSessions,
         server,
         journal,
         url,

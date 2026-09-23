@@ -1,3 +1,8 @@
+import { isTextResponse } from "../helpers.js";
+import { LLMock } from "../llmock.js";
+import { matchFixture } from "../router.js";
+import type { LiveFixtureResponse } from "../live-types.js";
+import type { ChatCompletionRequest } from "../types.js";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -647,9 +652,14 @@ describe("loadFixturesFromDir", () => {
 /* ------------------------------------------------------------------ *
  * fs error paths (uses the vi.mock overrides declared at top level)  *
  * ------------------------------------------------------------------ */
+const realFs = await vi.importActual<typeof import("node:fs")>("node:fs");
+
 describe("fixture-loader fs error paths", () => {
   afterEach(() => {
     vi.restoreAllMocks();
+    fsMocks.readFileSync.mockImplementation(realFs.readFileSync);
+    fsMocks.readdirSync.mockImplementation(realFs.readdirSync);
+    fsMocks.statSync.mockImplementation(realFs.statSync);
   });
 
   it("loadFixtureFile warns and returns empty when readFileSync throws EACCES", () => {
@@ -1369,7 +1379,8 @@ describe("validateFixtures", () => {
 
   it("validateFixtures reports error for non-string context", () => {
     const fixtures = [
-      makeFixture({ match: { userMessage: "test", context: 42 as unknown as string } }),
+      // @ts-expect-error Deliberately malformed runtime input exercises validation.
+      makeFixture({ match: { userMessage: "test", context: 42 } }),
     ];
     const results = validateFixtures(fixtures);
     expect(
@@ -1618,7 +1629,8 @@ describe("validateFixtures", () => {
     const fixtures = [
       makeFixture({
         match: { inputText: "hello" },
-        response: { embedding: [0.1, "bad" as unknown as number, 0.3] },
+        // @ts-expect-error Deliberately malformed runtime input exercises validation.
+        response: { embedding: [0.1, "bad", 0.3] },
       }),
     ];
     const results = validateFixtures(fixtures);
@@ -2098,7 +2110,7 @@ describe("auto-stringify JSON objects in fixture entries", () => {
   });
 
   it("preserves ResponseOverrides fields through normalization", () => {
-    const entry = {
+    const entry: FixtureFileEntry = {
       match: { userMessage: "test" },
       response: {
         content: { key: "value" },
@@ -2111,8 +2123,9 @@ describe("auto-stringify JSON objects in fixture entries", () => {
         usage: { prompt_tokens: 10 },
       },
     };
-    const fixture = entryToFixture(entry as unknown as FixtureFileEntry);
-    const r = fixture.response as Record<string, unknown>;
+    const fixture = entryToFixture(entry);
+    const r = fixture.response;
+    if (typeof r === "function" || !isTextResponse(r)) throw new Error("expected text response");
     expect(r.content).toBe('{"key":"value"}'); // stringified
     expect(r.id).toBe("custom-id");
     expect(r.model).toBe("custom-model");
@@ -2226,5 +2239,288 @@ describe("auto-stringify JSON objects in fixture entries", () => {
     expect((fixtures[1].response as TextResponse).content).toBe(
       '{"answer":42,"nested":{"key":"val"}}',
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Fixture chaos bounds go through the ONE chaos table (F5). Before, a
+// hand-rolled range check let `latencyMs: 1.5` validate while the CLI flag and
+// the request header rejected it, and the runtime then rejected the fixture
+// value on every request.
+// ---------------------------------------------------------------------------
+
+describe("validateFixtures chaos bounds match parseChaosField", () => {
+  it("error: chaos.latencyMs is fractional", () => {
+    const fixtures = [makeFixture({ chaos: { latencyMs: 1.5 } })];
+    const results = validateFixtures(fixtures);
+    expect(results.some((r) => r.severity === "error" && r.message.includes("latencyMs"))).toBe(
+      true,
+    );
+  });
+
+  it("error: chaos.latencyMs is out of range", () => {
+    const fixtures = [makeFixture({ chaos: { latencyMs: 30001 } })];
+    const results = validateFixtures(fixtures);
+    expect(results.some((r) => r.severity === "error" && r.message.includes("latencyMs"))).toBe(
+      true,
+    );
+  });
+
+  it("error: chaos.rateLimitRate is > 1", () => {
+    const fixtures = [makeFixture({ chaos: { rateLimitRate: 1.5 } })];
+    const results = validateFixtures(fixtures);
+    expect(results.some((r) => r.severity === "error" && r.message.includes("rateLimitRate"))).toBe(
+      true,
+    );
+  });
+
+  it("no error: integer latencyMs and in-range rateLimitRate", () => {
+    const fixtures = [makeFixture({ chaos: { latencyMs: 30000, rateLimitRate: 1 } })];
+    expect(validateFixtures(fixtures)).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ALL five chaos fields go through the ONE chaos table (G6). Before, only
+// `rateLimitRate` and `latencyMs` did; `dropRate`, `malformedRate` and
+// `disconnectRate` kept a hand-rolled `< 0 || > 1` check, so `NaN`, `-0` and a
+// numeric STRING all validated clean and were then rejected on every request.
+// ---------------------------------------------------------------------------
+
+describe("validateFixtures: every chaos field uses parseChaosField", () => {
+  const chaos = (c: { [K in keyof NonNullable<Fixture["chaos"]>]?: unknown }) =>
+    // @ts-expect-error Deliberately malformed runtime input exercises validation.
+    makeFixture({ chaos: c });
+
+  it("error: chaos.dropRate is a numeric string", () => {
+    const results = validateFixtures([chaos({ dropRate: "0.5" })]);
+    expect(results.some((r) => r.severity === "error" && r.message.includes("dropRate"))).toBe(
+      true,
+    );
+  });
+
+  it("error: chaos.dropRate is NaN", () => {
+    const results = validateFixtures([chaos({ dropRate: NaN })]);
+    expect(results.some((r) => r.severity === "error" && r.message.includes("dropRate"))).toBe(
+      true,
+    );
+  });
+
+  it("error: chaos.malformedRate is negative zero", () => {
+    const results = validateFixtures([chaos({ malformedRate: -0 })]);
+    expect(results.some((r) => r.severity === "error" && r.message.includes("malformedRate"))).toBe(
+      true,
+    );
+  });
+
+  it("error: chaos.disconnectRate is a numeric string", () => {
+    const results = validateFixtures([chaos({ disconnectRate: "1" })]);
+    expect(
+      results.some((r) => r.severity === "error" && r.message.includes("disconnectRate")),
+    ).toBe(true);
+  });
+
+  it("no error: in-range numeric rates on all five fields", () => {
+    const fixtures = [
+      chaos({
+        dropRate: 0,
+        malformedRate: 0.5,
+        disconnectRate: 1,
+        rateLimitRate: 0.25,
+        latencyMs: 10,
+      }),
+    ];
+    expect(validateFixtures(fixtures)).toHaveLength(0);
+  });
+});
+
+// Authored minimal startup/close flow; full provider projections are exercised by
+// the external public registration proof and the Live replay integration suite.
+function liveRegistrationFixture(): Fixture & { response: LiveFixtureResponse } {
+  const configuration = {
+    model: "gpt-live-1",
+    audio: { format: { type: "audio/pcm", rate: 24000 } },
+    delegation: { type: "client" },
+  };
+  const session = { ...configuration, id: "session-1", expires_at: 123, status: "active" };
+  return {
+    match: { endpoint: "openai-live" },
+    response: {
+      live: {
+        version: 1,
+        model: "gpt-live-1",
+        mode: "client",
+        audio: { encoding: "pcm16le", sampleRateHz: 24000, channels: 1 },
+        configuration,
+        entries: [
+          {
+            direction: "client",
+            atMs: 0,
+            event: { type: "session.start", session: configuration },
+          },
+          {
+            direction: "server",
+            atMs: 1,
+            barrier: { command: 1, audioBytes: 0 },
+            event: { type: "session.started", event_id: "event-1", session },
+          },
+          { direction: "client", atMs: 2, event: { type: "session.close" } },
+          {
+            direction: "server",
+            atMs: 3,
+            barrier: { command: 2, audioBytes: 0 },
+            event: {
+              type: "session.closed",
+              event_id: "event-2",
+              session,
+              usage: { seconds: 0 },
+              reason: "close_requested",
+            },
+          },
+        ],
+        bindings: [
+          { entry: 1, pointer: "/event_id", name: "event-1", owner: "server", action: "define" },
+          {
+            entry: 1,
+            pointer: "/session/id",
+            name: "session-1",
+            owner: "server",
+            action: "define",
+          },
+          { entry: 3, pointer: "/event_id", name: "event-2", owner: "server", action: "define" },
+          {
+            entry: 3,
+            pointer: "/session/id",
+            name: "session-1",
+            owner: "server",
+            action: "reference",
+          },
+        ],
+        capture: { source: "authored", complete: true, terminalEntry: 3 },
+      },
+    },
+  };
+}
+
+const registerLive = {
+  addFixture: (mock: LLMock, fixture: Fixture) => mock.addFixture(fixture),
+  addFixtures: (mock: LLMock, fixture: Fixture) => mock.addFixtures([fixture]),
+  prependFixture: (mock: LLMock, fixture: Fixture) => mock.prependFixture(fixture),
+  on: (mock: LLMock, fixture: Fixture) => mock.on(fixture.match, fixture.response),
+  json: (mock: LLMock, fixture: Fixture) => mock.addFixturesFromJSON(JSON.stringify([fixture])),
+};
+
+describe("Live public registration", () => {
+  it.each([false, true])("defers Live factory response validation (async=%s)", (asyncFactory) => {
+    const { match, response } = liveRegistrationFixture();
+    let calls = 0;
+    const factory = () => {
+      calls++;
+      return asyncFactory ? Promise.resolve(response) : response;
+    };
+    expect(validateFixtures([{ match, response: factory }])).toEqual([]);
+    expect(calls).toBe(0);
+    expect(
+      validateFixtures([
+        { match: { ...match, sequenceIndex: -1 }, response: factory, latency: -1 },
+      ]),
+    ).toEqual([
+      { severity: "error", fixtureIndex: 0, message: "latency must be >= 0" },
+      {
+        severity: "error",
+        fixtureIndex: 0,
+        message: "match.sequenceIndex must be a non-negative integer",
+      },
+    ]);
+    expect(calls).toBe(0);
+  });
+
+  it.each(Object.entries(registerLive))(
+    "%s validates and clones Live transcripts",
+    (_name, register) => {
+      const fixture = liveRegistrationFixture();
+      const mock = register(new LLMock(), fixture);
+      expect(mock.getFixtures()[0].response).toEqual(fixture.response);
+      fixture.response.live.entries[0].event.type = "mutated";
+      expect(mock.getFixtures()[0].response).not.toEqual(fixture.response);
+    },
+  );
+
+  it.each(Object.entries(registerLive))(
+    "%s rejects a future barrier before insertion",
+    (_name, register) => {
+      const fixture = liveRegistrationFixture();
+      fixture.response.live.entries[1].barrier = { command: 999999, audioBytes: 0 };
+      const mock = new LLMock();
+      expect(() => register(mock, fixture)).toThrow(/entries\[1\].*barrier/);
+      expect(mock.getFixtures()).toHaveLength(0);
+    },
+  );
+
+  it("onLive retains match/options and selects the Live endpoint", () => {
+    const fixture = liveRegistrationFixture();
+    const mock = new LLMock().onLive({ model: /gpt-live/ }, fixture.response.live, {
+      replaySpeed: 2,
+    });
+    expect(mock.getFixtures()[0]).toMatchObject({
+      match: { endpoint: "openai-live", model: /gpt-live/ },
+      replaySpeed: 2,
+    });
+  });
+
+  it("validates files and rejects malformed Live transcripts", () => {
+    const dir = makeTmpDir();
+    try {
+      const fixture = liveRegistrationFixture();
+      const path = writeJson(dir, "live.json", { fixtures: [fixture] });
+      expect(new LLMock().loadFixtureFile(path).getFixtures()).toHaveLength(1);
+      fixture.response.live.entries[1].barrier = { command: 999999, audioBytes: 0 };
+      writeJson(dir, "live.json", { fixtures: [fixture] });
+      expect(() => new LLMock().loadFixtureFile(path)).toThrow(/entries\[1\].*barrier/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it.each(Object.entries(registerLive))("%s applies server Live limits", (_name, register) => {
+    expect(() =>
+      register(new LLMock({ live: { maxDurationMs: 1 } }), liveRegistrationFixture()),
+    ).toThrow(/atMs/);
+  });
+
+  it("rejects cycles through the runtime builder", () => {
+    const fixture = liveRegistrationFixture();
+    fixture.response.live.configuration.cycle = fixture.response.live.configuration;
+    expect(() => new LLMock().addFixture(fixture)).toThrow(/cycl/i);
+  });
+
+  it("reports malformed Live through the public validator", () => {
+    const fixture = liveRegistrationFixture();
+    fixture.response.live.entries[1].barrier = { command: 999999, audioBytes: 0 };
+    expect(validateFixtures([fixture])).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          severity: "error",
+          message: expect.stringMatching(/entries\[1\].*barrier/),
+        }),
+      ]),
+    );
+  });
+
+  it("isolates Live from other endpoints, factories and model mismatches", () => {
+    const fixture = liveRegistrationFixture();
+    const req: ChatCompletionRequest = {
+      model: "gpt-live-1",
+      messages: [],
+      _endpointType: "openai-live",
+    };
+    expect(matchFixture([fixture], req)).toBe(fixture);
+    expect(matchFixture([{ ...fixture, match: {} }], req)).toBeNull();
+    expect(matchFixture([{ match: {}, response: () => ({ content: "chat" }) }], req)).toBeNull();
+    expect(
+      matchFixture([{ match: { endpoint: "openai-live" }, response: { content: "chat" } }], req),
+    ).toBeNull();
+    expect(matchFixture([fixture], { ...req, model: "wrong" })).toBeNull();
+    expect(matchFixture([{ ...fixture, match: {} }], { ...req, _endpointType: "chat" })).toBeNull();
   });
 });

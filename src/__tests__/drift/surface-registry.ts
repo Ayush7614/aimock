@@ -139,6 +139,16 @@ export const SURFACE_REGISTRY: Record<string, SurfaceMapping> = {
     ],
     typesFile: null,
   },
+  "openai-live": {
+    provider: "OpenAI Live",
+    liveCoverage: "live",
+    coverageNote:
+      "Both delegation modes exercise the primary provider WebSocket and actual aimock replay. Shapes use reviewed raw-wire descriptors; the installed OpenAI SDK has no Live types. Missing OPENAI_API_KEY skips the live legs.",
+    builderFile: "src/ws-live.ts",
+    builderFunctions: ["handleLiveSession"],
+    typesFile: "src/live-types.ts",
+    sdkShapesFile: "src/__tests__/drift/live-scenarios.ts",
+  },
   "openai-realtime": {
     provider: "OpenAI Realtime",
     liveCoverage: "live",
@@ -270,6 +280,13 @@ export const SURFACE_REGISTRY: Record<string, SurfaceMapping> = {
   elevenlabs: {
     provider: "ElevenLabs",
     liveCoverage: "live",
+    coverageNote:
+      "Live credit rests on ONE block: the `/v1/sound-generation` case fetches `api.elevenlabs.io` and grades " +
+      "aimock's response envelope (status, Content-Type, body presence) against the vendor's. The body is " +
+      "opaque audio, so no vendor-observed JSON shape exists for any route here. `/v1/music`, " +
+      "`/v1/music/stream` and the 400 cases are offline conformance; `/v1/music/plan` is passthrough " +
+      "conformance against a test-authored fixture graded against the SDK's `MusicPrompt.Raw`, with no " +
+      "vendor observation.",
     builderFile: "src/elevenlabs-audio.ts",
     builderFunctions: ["handleElevenLabsTTS", "handleElevenLabsAudio"],
     typesFile: null,
@@ -278,9 +295,10 @@ export const SURFACE_REGISTRY: Record<string, SurfaceMapping> = {
     provider: "ElevenLabs Voice Design",
     liveCoverage: "none",
     coverageNote:
-      "No live ElevenLabs Voice Design leg: `elevenlabs-voice.drift.ts` only drives the local mock. No " +
-      "ElevenLabs API key is reachable from this repo (1Password holds an elevenlabs.io web login, not a " +
-      "key), so no SUCCESSFUL response from any of these routes has ever been observed here — the shapes " +
+      "No live ElevenLabs Voice Design leg: `elevenlabs-voice.drift.ts` only drives the local mock. A key " +
+      "is provided in CI (test-drift.yml and fix-drift.yml pass `secrets.ELEVENLABS_API_KEY`), but no case in that " +
+      "file fetches the vendor with it — these routes have no vendor leg and are offline-only — so no " +
+      "SUCCESSFUL response from any of these routes has ever been observed here — the shapes " +
       "come from `@elevenlabs/elevenlabs-js@2.68.0` serialization types, a secondary source. Offline " +
       "conformance only: it reds when aimock's own serializer changes shape, never when the vendor does. " +
       "Retiring this needs a funded key and one recorded design + create round-trip; the `elevenlabs` " +

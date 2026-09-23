@@ -1,3 +1,6 @@
+import type { LiveTranscript } from "./live-types.js";
+import { normalizeLiveFixture, normalizeLiveOptions } from "./live-fixture.js";
+import { isLiveResponse } from "./helpers.js";
 import type {
   AudioResponse,
   ChaosConfig,
@@ -8,7 +11,6 @@ import type {
   FixtureFileResponse,
   FixtureMatch,
   FixtureOpts,
-  FixtureResponse,
   ImageResponse,
   MockServerOptions,
   Mountable,
@@ -28,6 +30,8 @@ import type { ResolvedInboundAuth } from "./api-key-auth.js";
 import {
   isInjectableStatus,
   INJECTED_STATUS_RANGE,
+  queueOneShotError,
+  clearFixtureQueue,
   loadFixtureFile,
   loadFixturesFromDir,
   entryToFixture,
@@ -53,23 +57,38 @@ export class LLMock {
 
   constructor(options?: MockServerOptions, resolvedInboundAuth?: ResolvedInboundAuth) {
     this.options = options ?? {};
+    if (this.options.live !== undefined) normalizeLiveOptions(this.options.live);
     this.resolvedInboundAuth = resolvedInboundAuth;
   }
 
   // ---- Fixture management ----
 
+  private normalizeFixture(fixture: Fixture): Fixture {
+    if (
+      isLiveResponse(fixture.response) ||
+      (fixture.match.endpoint === "openai-live" && typeof fixture.response !== "function")
+    ) {
+      return {
+        ...fixture,
+        match: { ...fixture.match },
+        response: normalizeLiveFixture(fixture.response, this.options.live),
+      };
+    }
+    return fixture;
+  }
+
   addFixture(fixture: Fixture): this {
-    this.fixtures.push(fixture);
+    this.fixtures.push(this.normalizeFixture(fixture));
     return this;
   }
 
   addFixtures(fixtures: Fixture[]): this {
-    this.fixtures.push(...fixtures);
+    this.fixtures.push(...fixtures.map((fixture) => this.normalizeFixture(fixture)));
     return this;
   }
 
   prependFixture(fixture: Fixture): this {
-    this.fixtures.unshift(fixture);
+    this.fixtures.unshift(this.normalizeFixture(fixture));
     return this;
   }
 
@@ -78,12 +97,12 @@ export class LLMock {
   }
 
   loadFixtureFile(filePath: string): this {
-    this.fixtures.push(...loadFixtureFile(filePath));
+    this.fixtures.push(...loadFixtureFile(filePath, undefined, this.options.live));
     return this;
   }
 
   loadFixtureDir(dirPath: string): this {
-    this.fixtures.push(...loadFixturesFromDir(dirPath));
+    this.fixtures.push(...loadFixturesFromDir(dirPath, undefined, this.options.live));
     return this;
   }
 
@@ -104,8 +123,8 @@ export class LLMock {
     } else {
       entries = input;
     }
-    const converted = entries.map((e) => entryToFixture(e));
-    const issues = validateFixtures(converted);
+    const converted = entries.map((e) => entryToFixture(e, undefined, this.options.live));
+    const issues = validateFixtures(converted, this.options.live);
     const errors = issues.filter((i) => i.severity === "error");
     if (errors.length > 0) {
       throw new Error(`Fixture validation failed: ${JSON.stringify(errors)}`);
@@ -114,10 +133,11 @@ export class LLMock {
     return this;
   }
 
-  // Uses length = 0 to preserve array reference identity — the running
-  // server reads this same array on every request.
+  // Clears in place to preserve array reference identity — the running
+  // server reads this same array on every request — and invalidates any
+  // one-shot claim parked in flight so it cannot re-arm into the cleared queue.
   clearFixtures(): this {
-    this.fixtures.length = 0;
+    clearFixtureQueue(this.fixtures);
     return this;
   }
 
@@ -130,9 +150,18 @@ export class LLMock {
   ): this {
     return this.addFixture({
       match,
-      response: typeof response === "function" ? response : normalizeResponse(response),
+      response:
+        typeof response === "function" ? response : normalizeResponse(response, this.options.live),
       ...opts,
     });
+  }
+
+  onLive(
+    match: Omit<FixtureMatch, "endpoint">,
+    transcript: LiveTranscript,
+    opts?: FixtureOpts,
+  ): this {
+    return this.on({ ...match, endpoint: "openai-live" }, { live: transcript }, opts);
   }
 
   onMessage(
@@ -313,8 +342,8 @@ export class LLMock {
   /**
    * Queue a one-shot error that will be returned for the next matching
    * request, then automatically removed. Implemented as an internal fixture
-   * with a `predicate` that always matches (so it fires first) and spliced
-   * at the front of the fixture list.
+   * inserted at the front of the fixture list; see `queueOneShotError` for
+   * the endpoint gate and the served-not-evaluated consumption rule.
    */
   nextRequestError(
     status: number,
@@ -330,60 +359,7 @@ export class LLMock {
         `nextRequestError: invalid status ${String(status)} — must be ${INJECTED_STATUS_RANGE}`,
       );
     }
-    const errorResponse: FixtureResponse = {
-      error: {
-        message: errorBody?.message ?? "Injected error",
-        type: errorBody?.type ?? "server_error",
-        code: errorBody?.code,
-      },
-      status,
-    };
-    // An injected error is only a valid response for endpoints that can carry
-    // an error envelope. Mirror the router's endpoint-compat table
-    // (matchFixtureDiagnostic in router.ts): error responses are compatible
-    // with chat / embedding / realtime* / fal / the four elevenlabs-voice*
-    // slots and with requests that carry no endpoint type, but NOT with
-    // multimedia endpoints (image, speech, video, transcription, …). Gating consumption on this prevents an incompatible
-    // request from matching the predicate and splicing — and thereby
-    // destroying — a one-shot error intended for a different endpoint before
-    // the router's own compat check would have skipped it.
-    const errorEndpointCompatible = (req: import("./types.js").ChatCompletionRequest) => {
-      const reqEndpoint = req._endpointType as string | undefined;
-      if (
-        reqEndpoint === undefined ||
-        reqEndpoint === "chat" ||
-        reqEndpoint === "embedding" ||
-        reqEndpoint.startsWith("realtime") ||
-        reqEndpoint === "fal" ||
-        reqEndpoint === "elevenlabs-voice-design" ||
-        reqEndpoint === "elevenlabs-voice" ||
-        reqEndpoint === "elevenlabs-voice-get" ||
-        reqEndpoint === "elevenlabs-voice-delete"
-      ) {
-        return true;
-      }
-      return false;
-    };
-    const fixture: Fixture = {
-      match: { predicate: errorEndpointCompatible },
-      response: errorResponse,
-    };
-    // Insert at front so it matches before everything else
-    this.fixtures.unshift(fixture);
-    // Remove after first match — the journal records it so tests can assert.
-    // Only consume (and splice) when the request endpoint is compatible; an
-    // incompatible request returns false here, falls through to other
-    // fixtures, and leaves this error pending for its intended endpoint.
-    const original = fixture.match.predicate!;
-    fixture.match.predicate = (req) => {
-      const result = original(req);
-      if (result) {
-        // Remove synchronously on first match to prevent race conditions
-        const idx = this.fixtures.indexOf(fixture);
-        if (idx !== -1) this.fixtures.splice(idx, 1);
-      }
-      return result;
-    };
+    queueOneShotError(this.fixtures, status, errorBody);
     return this;
   }
 
@@ -414,8 +390,12 @@ export class LLMock {
     return this.journal.getLast();
   }
 
+  /**
+   * Clear the request journal. Fixture match-counts (sequencing state) are
+   * left intact — use `resetMatchCounts()` for those.
+   */
   clearRequests(): void {
-    this.journal.clear();
+    this.journal.clearEntries();
   }
 
   resetMatchCounts(testId?: string): this {
@@ -521,6 +501,11 @@ export class LLMock {
           moderation: this.moderationFixtures,
         }));
     return this.serverInstance.url;
+  }
+
+  closeLiveSessions(testId?: string): this {
+    this.serverInstance?.closeLiveSessions(testId);
+    return this;
   }
 
   async stop(): Promise<void> {

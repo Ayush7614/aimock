@@ -353,6 +353,7 @@ export const ADOPTER_DISPLAY: Record<string, AdopterDisplay> = {
     name: "Agent Skill Exchange",
     url: "https://agentskillexchange.com",
   },
+  "affromero/flight-finder": { name: "Flight Finder", url: "https://flight-finder.org" },
 };
 
 /**

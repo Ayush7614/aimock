@@ -45,11 +45,13 @@
  * file teaches the suite under test that a broken upload succeeded.
  *
  * Every branch journals with `service: "files"` so
- * `GET /__aimock/journal?service=files` selects exactly this traffic. A
- * successful upload journals a SYNTHETIC body describing it
- * (`{ purpose, filename, bytes, content_type, sha256 }`) — never the uploaded
- * octets — exactly as the transcription route journals its multipart audio;
- * see {@link journalFiles}. Files also
+ * `GET /__aimock/journal?service=files` selects exactly this traffic, and with
+ * `source: "internal"` because — as with fine-tuning — no fixture or proxy
+ * ever serves this store. A successful upload journals a SYNTHETIC body
+ * describing it (`{ purpose, filename, bytes, content_type, sha256 }`) — never
+ * the uploaded octets — exactly as the transcription route journals its
+ * multipart audio; a `400` journals the error envelope it answered with, so
+ * the reason is readable from the journal; see {@link journalFiles}. Files also
  * honors the inbound API-key boundary via the server dispatch (no bypass),
  * and runs through the chaos gate so retry/backoff suites can inject
  * 500s at the files surface too.
@@ -59,7 +61,7 @@ import { createHash } from "node:crypto";
 import type * as http from "node:http";
 import { flattenHeaders, generateId, isJsonObject } from "./helpers.js";
 import { applyChaosAsync } from "./chaos.js";
-import type { ChaosDefaults, ChatCompletionRequest } from "./types.js";
+import type { ChaosDefaults, ChatCompletionRequest, JournalBody } from "./types.js";
 import type { Journal } from "./journal.js";
 import type { Logger } from "./logger.js";
 import type { MetricsRegistry } from "./metrics.js";
@@ -348,6 +350,42 @@ export function getStoredFileBytes(id: string): Buffer | undefined {
 }
 
 /**
+ * Register one file in the store and return its wire object. This is the one
+ * insert path: `POST /v1/files` uses it, and so do server-side producers of
+ * files (the Batches mock minting `output_file_id` / `error_file_id`), so a
+ * file minted internally is retrievable through `GET /v1/files/{id}` and
+ * `/content` exactly like an upload. `content` must be an OWNED buffer (see
+ * {@link ParsedUpload.content}) — it is stored as-is, and it must already be
+ * within {@link FILES_MAX_BYTES}: the cap the upload route enforces holds for
+ * every file in the store, so a producer that cannot fit under it fails its
+ * own operation instead of storing the file.
+ */
+export function storeFile(file: {
+  purpose: string;
+  filename: string;
+  content: Buffer;
+}): FileObject {
+  if (file.content.length > FILES_MAX_BYTES) {
+    throw new RangeError(`File content exceeds ${FILES_MAX_BYTES} byte cap`);
+  }
+  const id = generateId("file");
+  const obj: FileObject = {
+    id,
+    object: "file",
+    bytes: file.content.length,
+    created_at: Math.floor(Date.now() / 1000),
+    filename: file.filename,
+    purpose: file.purpose,
+    status: "processed",
+  };
+  fileStore.set(id, obj);
+  // Stored as-is: an owned buffer of exactly the file's bytes, so residency
+  // here is the file's size and nothing more.
+  fileContents.set(id, { bytes: file.content });
+  return obj;
+}
+
+/**
  * Synthetic journal body for an upload — the SAME convention
  * {@link handleTranscription} uses for `multipart/form-data` audio: the entry
  * carries a small object describing the upload that was parsed out of the
@@ -384,13 +422,20 @@ function filesUploadBody(upload: ParsedUpload): ChatCompletionRequest {
  *
  * The rule for `body`: an entry carries the {@link filesUploadBody} descriptor
  * exactly when a request had an upload payload that parsed — i.e. a successful
- * `POST /v1/files`. Every other files entry (GET one, GET content, list,
- * DELETE, a chaos-faulted request, and an upload rejected with a 400 before it
- * parsed) has no payload to describe and stays `null`, matching the bodyless
- * routes in {@link handleTranscription}. Raw uploaded bytes never appear.
+ * `POST /v1/files` — and the {@link invalidRequest} envelope exactly when the
+ * request was rejected with a `400` (see {@link rejectFiles}), so the reason
+ * is readable from the journal without the wire response. Every other files
+ * entry (GET one, GET content, list, DELETE, a chaos-faulted request, a 404)
+ * has no payload to describe and stays `null`, matching the bodyless routes in
+ * {@link handleTranscription}. Raw uploaded bytes never appear.
  *
  * `service: "files"` is set on every branch so
- * `GET /__aimock/journal?service=files` selects exactly this traffic.
+ * `GET /__aimock/journal?service=files` selects exactly this traffic, and
+ * `source: "internal"` because this store is aimock's own — the same tag every
+ * fine-tuning entry carries, success and error alike.
+ *
+ * Call it AFTER the response has been written: a `writeHead` that throws must
+ * not leave behind an entry for a response the client never received.
  */
 function journalFiles(
   journal: Journal,
@@ -398,7 +443,7 @@ function journalFiles(
   path: string,
   headers: Record<string, string>,
   status: number,
-  body: ChatCompletionRequest | null = null,
+  body: JournalBody | null = null,
 ): void {
   journal.add({
     method,
@@ -406,8 +451,47 @@ function journalFiles(
     headers,
     body,
     service: "files",
-    response: { status, fixture: null },
+    response: { status, fixture: null, source: "internal" },
   });
+}
+
+/** Keep the entire warning bounded and on one physical line, including the URL. */
+function filesRejectionWarning(message: string): string {
+  const maxLength = 1_024;
+  let safe = "";
+  for (const character of message) {
+    const code = character.charCodeAt(0);
+    const escaped =
+      code < 32 || (code >= 127 && code <= 159) || code === 0x2028 || code === 0x2029
+        ? `\\u${code.toString(16).padStart(4, "0")}`
+        : character;
+    // Reserve the truncation marker and never cut through an escape sequence.
+    if (safe.length + escaped.length > maxLength - 3) return `${safe}...`;
+    safe += escaped;
+  }
+  return safe;
+}
+
+/**
+ * Answer a files-route `400`: log it at `warn` (the level the server uses for
+ * a request it refused), journal the {@link invalidRequest} envelope as the
+ * entry's body so the reason survives in the journal, and write that same
+ * envelope to the wire. One helper so the three can never disagree.
+ */
+function rejectFiles(
+  res: http.ServerResponse,
+  journal: Journal,
+  logger: Logger,
+  method: string,
+  path: string,
+  headers: Record<string, string>,
+  message: string,
+  setCorsHeaders: (res: http.ServerResponse) => void,
+): void {
+  const envelope = invalidRequest(message);
+  logger.warn(filesRejectionWarning(`Files mock: rejected ${method} ${path} with 400: ${message}`));
+  writeJson(res, 400, envelope, setCorsHeaders);
+  journalFiles(journal, method, path, headers, 400, envelope);
 }
 
 function writeJson(
@@ -1148,8 +1232,16 @@ export async function handleFilesCreate(
   // After the chaos gate on purpose: an over-size body is still a request the
   // fault injector is entitled to answer for.
   if (raw === FILES_BODY_OVERSIZED) {
-    journalFiles(journal, method, path, flattenHeaders(req.headers), 400);
-    writeJson(res, 400, invalidRequest(oversizedBody()), setCorsHeaders);
+    rejectFiles(
+      res,
+      journal,
+      defaults.logger,
+      method,
+      path,
+      flattenHeaders(req.headers),
+      oversizedBody(),
+      setCorsHeaders,
+    );
     return;
   }
 
@@ -1162,30 +1254,25 @@ export async function handleFilesCreate(
       parseJsonUpload(raw);
 
   if ("error" in parsed) {
-    journalFiles(journal, method, path, flattenHeaders(req.headers), 400);
-    writeJson(res, 400, invalidRequest(parsed.error), setCorsHeaders);
+    rejectFiles(
+      res,
+      journal,
+      defaults.logger,
+      method,
+      path,
+      flattenHeaders(req.headers),
+      parsed.error,
+      setCorsHeaders,
+    );
     return;
   }
 
-  const id = generateId("file");
-  const bytes = parsed.content.length;
-  const obj: FileObject = {
-    id,
-    object: "file",
-    bytes,
-    created_at: Math.floor(Date.now() / 1000),
-    filename: parsed.filename,
-    purpose: parsed.purpose,
-    status: "processed",
-  };
-  fileStore.set(id, obj);
-  // Stored as-is: `ParsedUpload.content` is an owned buffer of exactly the
-  // file's bytes, so residency here is the file's size and nothing more.
-  fileContents.set(id, { bytes: parsed.content });
+  const obj = storeFile(parsed);
+  const { id, bytes } = obj;
 
   defaults.logger.debug(`Files mock: stored ${id} (${parsed.filename}, ${bytes} bytes)`);
-  journalFiles(journal, method, path, flattenHeaders(req.headers), 200, filesUploadBody(parsed));
   writeJson(res, 200, obj, setCorsHeaders);
+  journalFiles(journal, method, path, flattenHeaders(req.headers), 200, filesUploadBody(parsed));
 }
 
 /**
@@ -1366,8 +1453,16 @@ export async function handleFilesList(
 
   const query = parseListQuery(path);
   if ("error" in query) {
-    journalFiles(journal, method, path, flattenHeaders(req.headers), 400);
-    writeJson(res, 400, invalidRequest(query.error), setCorsHeaders);
+    rejectFiles(
+      res,
+      journal,
+      defaults.logger,
+      method,
+      path,
+      flattenHeaders(req.headers),
+      query.error,
+      setCorsHeaders,
+    );
     return;
   }
 
@@ -1408,13 +1503,14 @@ export async function handleFilesList(
       // silently restarting at page 1 turns a caller's paging bug into an
       // infinite loop instead of a test failure. Note a cursor is resolved
       // against *this* listing, so a file excluded by `purpose` is unknown here.
-      journalFiles(journal, method, path, flattenHeaders(req.headers), 400);
-      writeJson(
+      rejectFiles(
         res,
-        400,
-        invalidRequest(
-          `Invalid parameter: 'after' cursor '${query.after}' does not match any file in this listing`,
-        ),
+        journal,
+        defaults.logger,
+        method,
+        path,
+        flattenHeaders(req.headers),
+        `Invalid parameter: 'after' cursor '${query.after}' does not match any file in this listing`,
         setCorsHeaders,
       );
       return;
@@ -1423,7 +1519,6 @@ export async function handleFilesList(
   }
 
   const page = data.slice(start, start + query.limit);
-  journalFiles(journal, method, path, flattenHeaders(req.headers), 200);
   writeJson(
     res,
     200,
@@ -1436,6 +1531,7 @@ export async function handleFilesList(
     },
     setCorsHeaders,
   );
+  journalFiles(journal, method, path, flattenHeaders(req.headers), 200);
 }
 
 export async function handleFilesRetrieve(
@@ -1473,12 +1569,12 @@ export async function handleFilesRetrieve(
 
   const found = fileStore.get(fileId);
   if (!found) {
-    journalFiles(journal, method, path, flattenHeaders(req.headers), 404);
     writeJson(res, 404, invalidRequest(`No such file: ${fileId}`), setCorsHeaders);
+    journalFiles(journal, method, path, flattenHeaders(req.headers), 404);
     return;
   }
-  journalFiles(journal, method, path, flattenHeaders(req.headers), 200);
   writeJson(res, 200, found, setCorsHeaders);
+  journalFiles(journal, method, path, flattenHeaders(req.headers), 200);
 }
 
 export async function handleFilesContent(
@@ -1514,11 +1610,10 @@ export async function handleFilesContent(
   const found = fileStore.get(fileId);
   const content = fileContents.get(fileId);
   if (!found || content === undefined) {
-    journalFiles(journal, method, path, flattenHeaders(req.headers), 404);
     writeJson(res, 404, invalidRequest(`No such file: ${fileId}`), setCorsHeaders);
+    journalFiles(journal, method, path, flattenHeaders(req.headers), 404);
     return;
   }
-  journalFiles(journal, method, path, flattenHeaders(req.headers), 200);
   res.writeHead(200, {
     // Derived from the STORED filename, never from the client-declared part
     // header — see CONTENT_TYPE_BY_EXT. nosniff stops a browser second-
@@ -1530,6 +1625,7 @@ export async function handleFilesContent(
     "Content-Disposition": contentDispositionFor(found.filename),
   });
   res.end(content.bytes);
+  journalFiles(journal, method, path, flattenHeaders(req.headers), 200);
 }
 
 export async function handleFilesDelete(
@@ -1564,12 +1660,12 @@ export async function handleFilesDelete(
 
   const found = fileStore.get(fileId);
   if (!found) {
-    journalFiles(journal, method, path, flattenHeaders(req.headers), 404);
     writeJson(res, 404, invalidRequest(`No such file: ${fileId}`), setCorsHeaders);
+    journalFiles(journal, method, path, flattenHeaders(req.headers), 404);
     return;
   }
   fileStore.delete(fileId);
   fileContents.delete(fileId);
-  journalFiles(journal, method, path, flattenHeaders(req.headers), 200);
   writeJson(res, 200, { id: fileId, object: "file", deleted: true }, setCorsHeaders);
+  journalFiles(journal, method, path, flattenHeaders(req.headers), 200);
 }

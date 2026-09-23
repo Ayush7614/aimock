@@ -23,16 +23,18 @@
  *
  * Plugin mounts (`Mountable`: A2A/MCP/AG-UI/vector) are dynamic per-server and
  * intentionally excluded — this registry covers the built-in first-class
- * surfaces only. Likewise excluded: the WebSocket upgrades (`/v1/realtime`,
- * the Gemini Live path — same URL as an HTTP route or no HTTP method at all,
- * so they cannot appear in an HTTP catalog) and the header-gated fal.ai proxy
- * branch (`FAL_PREFIX_RE` + `x-fal-target-host`, a dynamic upstream mirror
- * rather than a fixed route).
+ * surfaces only. Likewise excluded from `ROUTE_DEFINITIONS` (their bindings
+ * above are still shared so dispatch cannot typo them): the WebSocket upgrades
+ * (`REALTIME_PATH`, `GEMINI_LIVE_PATH`, `LIVE_PATH` — same URL as an HTTP
+ * route or no HTTP method at all, so they cannot appear in an HTTP catalog)
+ * and the header-gated fal.ai proxy branch (`FAL_ROUTE_RE` +
+ * `x-fal-target-host`, a dynamic upstream mirror rather than a fixed route).
  */
 
 export const COMPLETIONS_PATH = "/v1/chat/completions";
 export const RESPONSES_PATH = "/v1/responses";
 export const REALTIME_PATH = "/v1/realtime";
+export const LIVE_PATH = "/v1/live/sessions";
 export const GEMINI_LIVE_PATH =
   "/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent";
 export const MESSAGES_PATH = "/v1/messages";
@@ -77,8 +79,10 @@ export const ELEVENLABS_VOICE_RE = /^\/v1\/voices\/([^/]+)$/;
 export const FAL_QUEUE_SUBMIT_RE = /^\/fal\/queue\/submit\/(.+)$/;
 export const FAL_QUEUE_REQUESTS_RE = /^\/fal\/queue\/requests\/(.+)$/;
 export const FAL_RUN_RE = /^\/fal\/run\/(.+)$/;
-export const FAL_PREFIX_RE = /^\/fal(?:\/.*)?$/;
-
+// The fal.ai route shape, shared with server.ts dispatch and metrics.ts path
+// labels: a bare `/fal` is routed (header-gated upstream mirror), so one
+// binding keeps the route rule and the label rule from drifting.
+export const FAL_ROUTE_RE = /^\/fal(?:\/.*)?$/;
 export const GEMINI_INTERACTIONS_PATH = "/v1beta/interactions";
 export const GEMINI_PATH_RE = /^\/v1beta\/models\/([^:]+):(generateContent|streamGenerateContent)$/;
 export const GEMINI_EMBED_RE = /^\/v1beta\/models\/([^:]+):embedContent$/;
@@ -120,6 +124,12 @@ export const FILES_PATH = "/v1/files";
 // id RE would otherwise swallow the content suffix.
 export const FILES_CONTENT_RE = /^\/v1\/files\/([^/]+)\/content$/;
 export const FILES_ID_RE = /^\/v1\/files\/([^/]+)$/;
+
+// OpenAI Batches API. Cancel reads before id (the id RE would swallow
+// `/cancel`). Shared with server.ts dispatch and metrics.ts normalization.
+export const BATCHES_PATH = "/v1/batches";
+export const BATCHES_CANCEL_RE = /^\/v1\/batches\/([^/]+)\/cancel$/;
+export const BATCHES_ID_RE = /^\/v1\/batches\/([^/]+)$/;
 export const FINE_TUNING_JOBS_PATH = "/v1/fine_tuning/jobs";
 export const FINE_TUNING_ID_RE = /^\/v1\/fine_tuning\/jobs\/([^/]+)$/;
 export const FINE_TUNING_CANCEL_RE = /^\/v1\/fine_tuning\/jobs\/([^/]+)\/cancel$/;
@@ -511,6 +521,28 @@ export const ROUTE_DEFINITIONS: RouteDefinition[] = [
     examplePath: "/fal/run/fal-ai-test",
     service: "fal",
     description: "fal.ai synchronous run",
+  },
+  // OpenAI Batches API (cancel before id: the id RE would swallow /cancel)
+  {
+    method: "POST",
+    path: "/v1/batches/{batch_id}/cancel",
+    examplePath: "/v1/batches/batch-test123/cancel",
+    service: "batches",
+    description: "Batch cancel",
+  },
+  {
+    method: "GET",
+    path: "/v1/batches/{batch_id}",
+    examplePath: "/v1/batches/batch-test123",
+    service: "batches",
+    description: "Batch retrieve",
+  },
+  { method: "GET", path: BATCHES_PATH, service: "batches", description: "Batch list" },
+  {
+    method: "POST",
+    path: BATCHES_PATH,
+    service: "batches",
+    description: "Batch create",
   },
   // OpenAI Files API
   {
