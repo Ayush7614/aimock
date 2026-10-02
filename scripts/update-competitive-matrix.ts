@@ -28,10 +28,14 @@ interface Competitor {
 }
 
 interface FeatureRule {
-  /** Row label as it appears in the first <td> of each <tr> */
+  /**
+   * Row label of the homepage matrix (the <th scope="row"> of each body <tr>),
+   * written as plain text: "Search & rerank", not "Search &amp; rerank".
+   * Rules with no homepage row must be listed in MATRIX_ROWLESS_RULES.
+   */
   rowLabel: string;
   /** Patterns to search for (case-insensitive) */
-  keywords: string[];
+  keywords: readonly string[];
 }
 
 export interface DetectedChange {
@@ -50,7 +54,9 @@ const COMPETITORS: Competitor[] = [
   { name: "mokksy/ai-mocks", repo: "mokksy/ai-mocks" },
 ];
 
-export const FEATURE_RULES: FeatureRule[] = [
+// `as const` keeps each rowLabel as a string literal, so RuleLabel below is the
+// exact set of rule labels and MATRIX_ROWLESS_RULES cannot name a missing rule.
+export const FEATURE_RULES = [
   {
     rowLabel: "Chat Completions SSE",
     keywords: ["chat/completions", "streaming", "SSE", "server-sent", "stream.*true"],
@@ -197,7 +203,7 @@ export const FEATURE_RULES: FeatureRule[] = [
     keywords: ["helm chart", "helm install", "kubernetes.*deploy", "k8s.*deploy"],
   },
   {
-    rowLabel: "Fixture files (JSON)",
+    rowLabel: "Fixture files",
     keywords: ["fixture", "yaml config", "template", "json fixture"],
   },
   {
@@ -223,7 +229,7 @@ export const FEATURE_RULES: FeatureRule[] = [
     keywords: ["journal", "request log", "audit log", "request history"],
   },
   {
-    rowLabel: "Error injection (one-shot)",
+    rowLabel: "Error injection",
     keywords: ["error injection", "fault injection", "error simulation", "inject.*error"],
   },
   {
@@ -258,7 +264,45 @@ export const FEATURE_RULES: FeatureRule[] = [
     rowLabel: "Rate limiting headers",
     keywords: ["x-ratelimit", "rate.limit.*header", "retry-after", "429.*retry", "rate.limiting"],
   },
-];
+] as const satisfies readonly FeatureRule[];
+
+/** The label of a FEATURE_RULES rule. */
+export type RuleLabel = (typeof FEATURE_RULES)[number]["rowLabel"];
+
+/**
+ * Rules that intentionally have no row in the docs/index.html matrix, with the
+ * reason. A detection of one of these rules never causes a page update by
+ * itself: runMatrixUpdate() lists every row-less detection in the summary and
+ * the log for manual follow-up. A migration page is updated only for a
+ * competitor that also has an applied homepage change; that update applies
+ * all of the competitor's detections (runMatrixUpdate passes the competitor's
+ * full feature map to updateMigrationPage). Every
+ * other rule must name a real homepage row; the run fails if one does not, so
+ * a renamed row cannot silently stop the scan.
+ */
+export const MATRIX_ROWLESS_RULES: Partial<Record<RuleLabel, string>> = {
+  "Realtime GA protocol": "The homepage folds Realtime into the WebSocket APIs row.",
+  "Realtime Beta compatibility": "The homepage folds Realtime into the WebSocket APIs row.",
+  "Realtime transcription/translation": "The homepage folds Realtime into the WebSocket APIs row.",
+  "Realtime image input": "The homepage folds Realtime into the WebSocket APIs row.",
+  "Realtime commentary phase": "The homepage folds Realtime into the WebSocket APIs row.",
+  "Azure OpenAI": "The homepage counts providers in the free-text Multi-provider support row.",
+  "AWS Bedrock": "The homepage counts providers in the free-text Multi-provider support row.",
+  "Docker image":
+    'The homepage row is the combined "Docker + Helm"; one signal must not mark both as supported.',
+  "Helm chart":
+    'The homepage row is the combined "Docker + Helm"; one signal must not mark both as supported.',
+  "CLI server": "The homepage matrix has no CLI row.",
+  "GET /v1/models": "The homepage matrix has no models-endpoint row.",
+};
+
+/**
+ * True when `label` is an own key of MATRIX_ROWLESS_RULES. An `in` check would
+ * also match names inherited from Object.prototype, such as "constructor".
+ */
+export function isRowlessRule(label: string): boolean {
+  return Object.hasOwn(MATRIX_ROWLESS_RULES, label);
+}
 
 /** Maps competitor display names to their migration page paths (relative to docs/) */
 export const COMPETITOR_MIGRATION_PAGES: Record<string, string> = {
@@ -499,9 +543,7 @@ export function buildMigrationRowPatterns(rowLabel: string): string[] {
     "Structured output / JSON mode": ["Structured output / JSON mode", "Structured output"],
     "Sequential / stateful responses": ["Sequential responses"],
     "Docker image": ["Docker"],
-    "Fixture files (JSON)": ["Fixture files"],
     "CLI server": ["CLI"],
-    "Error injection (one-shot)": ["Error injection"],
     "Request journal": ["Request journal"],
     "Drift detection": ["Drift detection"],
     "AG-UI event mocking": ["AG-UI event mocking", "AG-UI mocking", "AG-UI"],
@@ -647,6 +689,9 @@ function splitRowCells(trInner: string): RowCell[] {
   return cells;
 }
 
+/** Matches a colspan attribute on a cell's opening tag. */
+const COLSPAN_RE = /\scolspan\s*=/i;
+
 interface HeaderLink {
   /**
    * The link text with character references decoded, like a row label. Markup
@@ -677,11 +722,17 @@ function headerCellLink(cell: RowCell): HeaderLink | null {
 /**
  * Returns the <thead> header cells' links in page order (null for a cell with
  * no link, such as the "Capability" column). The array index is the cell index
- * within every body row.
+ * within every body row. Throws on a colspan header cell.
  */
 function parseHeaderLinks(tableHtml: string): (HeaderLink | null)[] {
   const thead = tableHtml.match(/<thead>([\s\S]*?)<\/thead>/)?.[1] ?? "";
   const cells = splitRowCells(thead);
+  if (cells.some((cell) => COLSPAN_RE.test(cell.open))) {
+    throw new Error(
+      "The homepage matrix header has a colspan cell. colspan is not supported: " +
+        "give each column its own header cell.",
+    );
+  }
   return cells.map(headerCellLink);
 }
 
@@ -692,6 +743,55 @@ function parseHeaderLinks(tableHtml: string): (HeaderLink | null)[] {
  */
 function parseHeaderColumns(tableHtml: string): (string | null)[] {
   return parseHeaderLinks(tableHtml).map((link) => link?.name ?? null);
+}
+
+/**
+ * Throws, naming the row, unless the body row has exactly one cell per header
+ * column. A row with fewer cells leaves the competitors in the columns it does
+ * not reach with no cell, so their detections would be dropped without a
+ * report; a row with more cells has cells that belong to no column.
+ *
+ * colspan is rejected, not expanded: each homepage cell must belong to exactly
+ * one column, so a flip changes the mark of one competitor only. parse and
+ * apply both call this, so they agree on which rows they accept.
+ */
+function assertRowMatchesHeader(rowLabel: string, cells: RowCell[], columnCount: number): void {
+  if (cells.some((cell) => COLSPAN_RE.test(cell.open))) {
+    throw new Error(
+      `Homepage matrix row "${rowLabel}" has a colspan cell. colspan is not supported: ` +
+        "give each column its own cell.",
+    );
+  }
+  if (cells.length !== columnCount) {
+    throw new Error(
+      `Homepage matrix row "${rowLabel}" has ${cells.length} cells but the header has ` +
+        `${columnCount} columns. Give the row one cell per column.`,
+    );
+  }
+}
+
+/**
+ * Throws when two <thead> columns share a link text or a link target. The
+ * parsed row map would keep only the last such column while applyChanges flips
+ * only the first, so a detection would land in one column and be read back
+ * from the other.
+ */
+function assertUniqueHeaderColumns(tableHtml: string): void {
+  const nameByHref = new Map<string, string>();
+  const names = new Set<string>();
+  for (const link of parseHeaderLinks(tableHtml)) {
+    if (!link) continue;
+    const { name, href } = link;
+    const duplicateOf = names.has(name) ? name : href ? nameByHref.get(href) : undefined;
+    if (duplicateOf !== undefined) {
+      throw new Error(
+        `Duplicate competitor column in the homepage matrix: "${duplicateOf}". ` +
+          "Give each comparison-table column a unique name and link.",
+      );
+    }
+    names.add(name);
+    if (href) nameByHref.set(href, name);
+  }
 }
 
 /**
@@ -720,6 +820,7 @@ export function parseCurrentMatrix(html: string): {
   const columns = parseHeaderColumns(tableHtml);
   // headers = ["aimock", "MSW", ...competitors]
   const headers = columns.filter((c): c is string => c !== null);
+  assertUniqueHeaderColumns(tableHtml);
 
   const rows = new Map<string, Map<string, string>>();
   const tbody = tableHtml.match(/<tbody>([\s\S]*?)<\/tbody>/)?.[1] ?? "";
@@ -732,6 +833,15 @@ export function parseCurrentMatrix(html: string): {
 
     // The first cell (<th scope="row"> on the homepage) is the row label.
     const rowLabel = rowLabelText(cells[0]);
+    // A repeated label would silently overwrite the earlier row here, and
+    // applyChanges would then flip the cell in every row with that label.
+    if (rows.has(rowLabel)) {
+      throw new Error(
+        `Duplicate row label in the homepage matrix: "${rowLabel}". ` +
+          "Give each comparison-table row a unique label.",
+      );
+    }
+    assertRowMatchesHeader(rowLabel, cells, columns.length);
     const rowMap = new Map<string, string>();
     for (let i = 1; i < cells.length; i++) {
       const name = columns[i];
@@ -741,6 +851,41 @@ export function parseCurrentMatrix(html: string): {
   }
 
   return { headers, rows };
+}
+
+/**
+ * Returns the labels of rules that name no row in the parsed matrix and are
+ * not listed in MATRIX_ROWLESS_RULES. A non-empty result means the homepage
+ * and FEATURE_RULES have drifted apart.
+ */
+export function findUnmatchedRules(matrix: { rows: Map<string, Map<string, string>> }): string[] {
+  return FEATURE_RULES.map((r) => r.rowLabel).filter(
+    (label) => !matrix.rows.has(label) && !isRowlessRule(label),
+  );
+}
+
+/**
+ * Throws when findUnmatchedRules reports any rule. main() calls this before it
+ * computes changes, so homepage/rule drift stops the scan.
+ */
+export function assertRulesMatchMatrix(matrix: { rows: Map<string, Map<string, string>> }): void {
+  const unmatched = findUnmatchedRules(matrix);
+  if (unmatched.length > 0) {
+    throw new Error(
+      `FEATURE_RULES name rows missing from the homepage matrix: ${unmatched.join(", ")}. ` +
+        "Rename the rule to the real row label or list it in MATRIX_ROWLESS_RULES.",
+    );
+  }
+}
+
+/**
+ * Returns the names of tracked competitors that have no column in the parsed
+ * matrix. A header that was renamed, or that lost its link, leaves its
+ * competitor here. A non-empty result means the homepage and COMPETITORS have
+ * drifted apart, and that competitor's detected changes would be dropped.
+ */
+export function findUnmatchedCompetitors(matrix: { headers: string[] }): string[] {
+  return COMPETITORS.map((c) => c.name).filter((name) => !matrix.headers.includes(name));
 }
 
 /**
@@ -981,6 +1126,20 @@ async function main(): Promise<void> {
   console.log(
     `Parsed ${matrix.rows.size} capability rows, ${matrix.headers.length} competitor columns.`,
   );
+
+  // Fail loudly if a rule names a row the homepage does not have: otherwise
+  // the scan reports "no changes" forever without anyone noticing.
+  assertRulesMatchMatrix(matrix);
+
+  // Fail loudly if a competitor has no column (header renamed or unlinked):
+  // otherwise its detected changes are dropped and the scan reports "no changes".
+  const unmatchedCompetitors = findUnmatchedCompetitors(matrix);
+  if (unmatchedCompetitors.length > 0) {
+    throw new Error(
+      `COMPETITORS name columns missing from the homepage matrix: ${unmatchedCompetitors.join(", ")}. ` +
+        "Rename the competitor to the real <thead> link text, or restore the header's link.",
+    );
+  }
 
   // 4. Compute changes
   const changes = computeChanges(html, matrix, competitorFeatures);
