@@ -309,6 +309,8 @@ describe("full live /models wave is fully classified (2026-07-16 drift)", () => 
       // gpt-6 named variants (2026-09-23 wave)
       "gpt-6-luna",
       "gpt-6-sol",
+      // gpt-6.1 point release (2026-09-30 wave; its own normalized family)
+      "gpt-6.1-sol",
       // o-series reasoning
       "o1",
       "o1-pro",
@@ -377,6 +379,8 @@ describe("full live /models wave is fully classified (2026-07-16 drift)", () => 
       "claude-fable-5",
       // 2026-09-23 wave: Opus 5.5 point release
       "claude-opus-5-5",
+      // 2026-09-29 wave: Sonnet 5.5 point release
+      "claude-sonnet-5-5",
     ];
     expect(unclassifiedFamilies(anthropicLive, "anthropic")).toEqual([]);
   });
@@ -430,6 +434,8 @@ describe("full live /models wave is fully classified (2026-07-16 drift)", () => 
       "gemini-3.1-flash-image-preview", // pattern
       "gemini-3.1-flash-lite-image",
       "gemini-3.1-flash-tts-preview", // pattern
+      "gemini-3.8-flash-tts", // explicit exclude (GA -tts, 2026-09-24 wave)
+      "gemini-3.8-flash-lite-tts", // explicit exclude (GA -tts, 2026-09-24 wave)
       "gemini-embedding",
       "gemini-embedding-2",
       "gemini-embedding-2-preview", // pattern

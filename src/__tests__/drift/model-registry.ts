@@ -121,6 +121,21 @@ export const includeFamilies: Record<Provider, Set<string>> = {
     // drift-proposals/openai-gpt-6-sol-new-family.md.
     "gpt-6-luna",
     "gpt-6-sol",
+    // gpt-6.1 point release of the included `gpt-6-sol`, first listed
+    // 2026-09-30 (drift run 36677279980; `created: 1790552874`). The normalizer
+    // keeps the `.1` version token, so it is its own family, separate from
+    // `gpt-6-sol`, and must be enumerated.
+    //
+    // Classified on a LIVE PROBE, not on lineage alone. /v1/models exposes no
+    // capability field (`id` / `object` / `created` / `owned_by` /
+    // `shutdown_date` only), so the probe is the evidence: a minimal
+    // /v1/chat/completions call with `model: "gpt-6.1-sol"` returned 200,
+    // `object: "chat.completion"`, `finish_reason: "stop"` and a real assistant
+    // text turn (2026-10-02). No name token places it in an excluded cluster.
+    //
+    // Decision: INCLUDE, recorded in
+    // drift-proposals/openai-gpt-6.1-sol-new-family.md.
+    "gpt-6.1-sol",
     // Codex line (coding chat; text output)
     "gpt-5-codex",
     "gpt-5.1-codex",
@@ -195,6 +210,20 @@ export const includeFamilies: Record<Provider, Set<string>> = {
     // Decision: INCLUDE, recorded in
     // drift-proposals/anthropic-claude-opus-5-5-new-family.md.
     "claude-opus-5-5",
+    // Claude Sonnet 5.5, first listed 2026-09-29 (drift run 36530084241). Point
+    // release of the already-included `claude-sonnet-5`, exactly as
+    // `claude-sonnet-4-5` is of `claude-sonnet-4`.
+    //
+    // Classified on DECLARED CAPABILITY plus a live probe (2026-10-02). Its
+    // /v1/models entry now carries a `capabilities` object: `display_name:
+    // "Claude Sonnet 5.5"`, `line: "sonnet"`, `created_at: 2026-09-28`, with
+    // image_input / pdf_input / structured_outputs / thinking / batch all
+    // `supported: true`. A minimal /v1/messages call returned 200,
+    // `stop_reason: "end_turn"` and a real text content block.
+    //
+    // Decision: INCLUDE, recorded in
+    // drift-proposals/anthropic-claude-sonnet-5-5-new-family.md.
+    "claude-sonnet-5-5",
   ]),
   gemini: familySet("gemini", [
     // Gemini 2.0 / 2.5 text families
@@ -484,6 +513,34 @@ export const excludeFamilies: Record<Provider, Set<string>> = {
     // Decision: EXCLUDE, recorded in
     // drift-proposals/gemini-antigravity-preview-latest-new-family.md.
     "antigravity-preview-latest",
+    // Gemini 3.8 Flash TTS and Flash Lite TTS, first listed 2026-09-24 (drift
+    // run 35963561763). Text-to-speech, the same category as the enumerated
+    // `gemini-2.5-*-preview-tts` entries above and the pattern-excluded
+    // `gemini-3.1-flash-tts-preview`. These ids end in `-tts`, not `-preview`,
+    // so no rule reaches them and they must be enumerated.
+    //
+    // Classified on the live model, not on the "tts" substring alone, and NOT
+    // on `supportedGenerationMethods` alone: both declare `[generateContent,
+    // countTokens, batchGenerateContent]` — the same shape as a text model, so
+    // a methods-only rule would have argued INCLUDE (the `lyria-3.5` trap
+    // above). Their live entries settle it: `displayName: "Gemini 3.8 Flash
+    // TTS"` / `"Gemini 3.8 Flash Lite TTS"`, and `inputTokenLimit: 8192`
+    // (vs 1048576 for the text tier `gemini-3.8-flash`) — identical to
+    // `gemini-2.5-flash-preview-tts`. A plain text generateContent call to
+    // `gemini-3.8-flash-tts` returned 200 with a single `inlineData` part,
+    // `mimeType: "audio/wav"`, and no text part (2026-10-02). They emit audio,
+    // not a text turn, so they can never be text-generation drift.
+    //
+    // No knownVoiceModelFamilies pairing: that seed set is watched only by the
+    // OpenAI realtime canary (ws-realtime.drift.ts reads listOpenAIModels), and
+    // neither id declares `bidiGenerateContent`, so the Gemini Live leg does
+    // not select them.
+    //
+    // Decision: EXCLUDE, recorded in
+    // drift-proposals/gemini-gemini-3.8-flash-tts-new-family.md and
+    // drift-proposals/gemini-gemini-3.8-flash-lite-tts-new-family.md.
+    "gemini-3.8-flash-tts",
+    "gemini-3.8-flash-lite-tts",
     // NOTE: every `-preview` family (gemini-3.x preview tiers, deep-research
     // previews, antigravity-preview-05, computer-use-preview-10, image/tts/robotics
     // previews, lyria/veo/nano-banana previews, gemini-embedding-2-preview, …) is
