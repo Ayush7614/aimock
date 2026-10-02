@@ -38,14 +38,9 @@
  *    directory symlink that points back at a directory already being walked
  *    is reported once as a cycle, where the server recurses through it until
  *    the kernel returns ELOOP (~32 levels deep) and loads those levels'
- *    fixtures over and over. One diagnostic here has no counterpart there at
- *    all: an entry whose `match` is a string, a number, a boolean or an array
- *    converts, on both sides, into an EMPTY match — a catch-all answering
- *    every request — and the server loads it without a word. That is a server
- *    bug, not a rule this lint may quietly invent an error for, so it is a
- *    `[warning]` (which `--strict` promotes to a failure) rather than an
- *    error, and the fixture still goes on to the rules exactly as the server
- *    would build it.
+ *    fixtures over and over. Malformed scalar or array matches are rejected
+ *    before conversion, as they are by the server's fixture loader. The lint
+ *    reports an entry error and continues validating valid siblings.
  *  - Equal: the `validateFixtures` rules themselves, because of the union
  *    pass above, and the zero-fixture rule — a run whose inputs yield no
  *    fixtures at all is an error here, matching the server's "No fixtures
@@ -500,15 +495,8 @@ function gotText(value: unknown): string {
 /**
  * A shape defect in a raw fixture entry, classified BEFORE conversion.
  *
- * `convertible` is what the SERVER does with the same entry, and it is the
- * whole reason this is a classifier and not a catch handler. `entryToFixture`
- * only reads `entry.match.userMessage` and friends, so it throws for exactly
- * two shapes: a non-object `entry`, and an `entry.match` that is null or
- * absent. A `match` that is a STRING, a NUMBER, a BOOLEAN or an ARRAY has no
- * such properties either, but reading them is perfectly legal — every field
- * comes back `undefined`, the entry converts into an EMPTY match, and an empty
- * match is a catch-all that answers every request. Classifying after the throw
- * therefore never saw that case at all, and `validate` printed `OK`.
+ * Classifying before conversion gives known malformed shapes an actionable
+ * explanation while leaving unexpected conversion failures to the backstop.
  */
 type EntryDefect =
   /** `entryToFixture` would throw: report it and skip the entry. */
@@ -553,13 +541,9 @@ function classifyEntry(entry: unknown): EntryDefect | undefined {
   }
   if (typeof match !== "object" || Array.isArray(match)) {
     return {
-      severity: "warning",
-      convertible: true,
-      why:
-        `"match" is ${gotText(match)}, not an object — every match field reads as ` +
-        `undefined, so this entry is an empty match: a CATCH-ALL answering every ` +
-        `request. The server loads it the same way, so this warns rather than ` +
-        `errors; --strict fails on it. ${ENTRY_SHAPE}`,
+      severity: "error",
+      convertible: false,
+      why: `"match" is ${gotText(match)}, expected an object — ${ENTRY_SHAPE}`,
     };
   }
   return undefined;
@@ -654,13 +638,9 @@ function validateOneFile(
     (message) => report.errors.push({ index: entryIndex, message }),
   );
 
-  // Classify each entry's shape FIRST, then convert. A `{}`, `null` or
-  // match-less entry makes `entryToFixture` throw, so it is reported and
-  // skipped; a convertible-but-wrong entry (a non-object `match`) is reported
-  // and still converted, so the rules go on seeing exactly the fixture array
-  // the server would build. The `try` stays as a backstop for a throw the
-  // classifier did not predict. Which entry each converted fixture came from
-  // is remembered so `validateFixtures` indices stay entry indices.
+  // Classify known malformed shapes before conversion and skip those entries.
+  // Keep the catch as a backstop for unexpected conversion failures. Remember
+  // each converted fixture's source index so findings retain entry indices.
   const entries = (parsed as FixtureFile).fixtures;
   for (let index = 0; index < entries.length; index++) {
     entryIndex = index;

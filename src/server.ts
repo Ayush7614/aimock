@@ -898,6 +898,22 @@ async function handleControlAPI(
       return true;
     }
 
+    const invalidMatchIndex = parsed.fixtures.findIndex(
+      (entry) =>
+        entry !== null &&
+        typeof entry === "object" &&
+        !Array.isArray(entry) &&
+        entry.match != null &&
+        (typeof entry.match !== "object" || Array.isArray(entry.match)),
+    );
+    if (invalidMatchIndex !== -1) {
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(
+        JSON.stringify({ error: `Fixture at index ${invalidMatchIndex}: match must be an object` }),
+      );
+      return true;
+    }
+
     const converted = parsed.fixtures.map((e) => entryToFixture(e));
     const issues = validateFixtures(converted);
     const errors = issues.filter((i) => i.severity === "error");

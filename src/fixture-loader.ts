@@ -79,11 +79,22 @@ export function normalizeResponse(
   return response as unknown as FixtureResponse;
 }
 
+class InvalidFixtureMatchError extends TypeError {}
+
 export function entryToFixture(
   entry: FixtureFileEntry,
   logger?: Logger,
   liveOptions?: LiveOptions,
 ): Fixture {
+  if (entry === null || typeof entry !== "object" || Array.isArray(entry)) {
+    throw new TypeError("Fixture entry must be an object");
+  }
+  if (entry.match == null) {
+    throw new TypeError("Fixture match must be an object");
+  }
+  if (typeof entry.match !== "object" || Array.isArray(entry.match)) {
+    throw new InvalidFixtureMatchError("Fixture match must be an object");
+  }
   const fixture: Fixture = {
     match: {
       userMessage: entry.match.userMessage,
@@ -197,7 +208,16 @@ export function loadFixtureFile(
     return [];
   }
 
-  return (parsed as FixtureFile).fixtures.map((e) => entryToFixture(e, logger, liveOptions));
+  const fixtures: Fixture[] = [];
+  for (const [index, entry] of (parsed as FixtureFile).fixtures.entries()) {
+    try {
+      fixtures.push(entryToFixture(entry, logger, liveOptions));
+    } catch (error) {
+      if (!(error instanceof InvalidFixtureMatchError)) throw error;
+      warn(logger, `Skipping fixture at index ${index} in ${filePath}: ${error.message}`);
+    }
+  }
+  return fixtures;
 }
 
 export function loadFixturesFromDir(
