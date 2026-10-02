@@ -72,6 +72,14 @@
           </tbody>
         </table>
 
+        <p>
+          Speech requests accept a nonempty string or a nonempty array of content parts for
+          <code>input</code>. Each part must be an object with a string <code>type</code>. If a part
+          includes <code>text</code>, that value must be a string. Mixed parts, nontext parts, and
+          empty text within content parts remain accepted. Unsupported values return HTTP 400 before
+          fixture matching and do not consume a fixture sequence position.
+        </p>
+
         <h2>Unit Test: Basic Speech</h2>
         <p>
           Using the programmatic API with vitest, register a fixture and assert on the response.

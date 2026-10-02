@@ -931,6 +931,39 @@ builderMock.onLive({ model: "gpt-live-1" }, transcript);</code></pre>
 
         <h2>Loading Fixtures</h2>
 
+        <p>
+          <code>addFixturesFromJSON()</code> accepts an array of fixture entries, either as a JSON
+          string or as a parsed array. Fixture files use the
+          <code>{ "fixtures": [...] }</code> envelope shown above; load those files with
+          <code>loadFixtureFile()</code>.
+        </p>
+
+        <p>
+          Each JSON fixture needs an object-valued <code>match</code>. An explicit empty object
+          (<code>{}</code>) remains a catch-all. Scalar and array values are invalid.
+        </p>
+        <ul>
+          <li>
+            File loading skips entries with scalar or array <code>match</code> values. It warns with
+            the file path and original zero-based entry index, and retains valid siblings in order.
+            This recovery does not apply to missing or <code>null</code> matches or other conversion
+            errors.
+          </li>
+          <li>
+            <code>addFixturesFromJSON()</code> throws a <code>TypeError</code> for an invalid
+            <code>match</code> value. It adds none of the entries in that batch.
+          </li>
+          <li>
+            <code>POST /__aimock/fixtures</code> returns HTTP 400 for an invalid
+            <code>match</code> value. It adds none of the entries in that batch.
+          </li>
+          <li>
+            <code>aimock validate</code> reports scalar or array <code>match</code> values as errors
+            and exits with status 1. Its fixture count excludes those entries, while diagnostics
+            retain their original source indices.
+          </li>
+        </ul>
+
         <h3>From a file</h3>
         <div class="code-block">
           <div class="code-block-header">load-file.ts <span class="lang-tag">ts</span></div>

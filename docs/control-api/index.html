@@ -347,6 +347,15 @@
 ]</code></pre>
         </div>
 
+        <h3>Legacy GET /v1/_requests</h3>
+        <p>
+          The legacy journal route accepts a positive safe integer for <code>limit</code>. Leading
+          zeros, surrounding whitespace, and an encoded plus sign remain accepted. Suffixes,
+          fractional values, exponent notation, and unsafe integers return HTTP 400. An absent or
+          empty parameter leaves the result unlimited. This rule does not change
+          <code>/__aimock/journal</code>, where <code>limit=0</code> remains valid.
+        </p>
+
         <h2>Fixtures</h2>
 
         <h3>GET /__aimock/fixtures</h3>

@@ -1275,6 +1275,33 @@ export async function handleMessages(
     return;
   }
 
+  const messagesError = !Array.isArray(claudeReq.messages)
+    ? "messages must be an array"
+    : claudeReq.messages.some((message) => !isJsonObject(message))
+      ? "messages entries must be JSON objects"
+      : claudeReq.messages.some(
+            (message) =>
+              (message.role === "user" || message.role === "assistant") &&
+              typeof message.content === "number",
+          )
+        ? "messages content must be a string or an array of content blocks"
+        : null;
+  if (messagesError) {
+    journal.add({
+      method: req.method ?? "POST",
+      path: req.url ?? "/v1/messages",
+      headers: flattenHeaders(req.headers),
+      body: null,
+      response: { status: 400, fixture: null },
+    });
+    writeErrorResponse(
+      res,
+      400,
+      JSON.stringify({ error: { message: messagesError, type: "invalid_request_error" } }),
+    );
+    return;
+  }
+
   // Extended-thinking invariant validation. The validator runs whenever
   // thinking is enabled (it self-short-circuits to null otherwise). On a
   // detected violation: strict ON → 400, strict OFF → warn + replay. Mirrors
@@ -1311,6 +1338,31 @@ export async function handleMessages(
     }
     logger.warn(`THINKING: ${violationMessage} (strict off — replaying anyway)`);
     // Fall through to existing match/replay behavior.
+  }
+
+  // Mirror the converter's consumption gate: inert tools values remain tolerated.
+  // Reject only shapes that would throw while mapping native tool definitions.
+  if (claudeReq.tools && claudeReq.tools.length > 0) {
+    const toolsError = !Array.isArray(claudeReq.tools)
+      ? "tools must be an array"
+      : claudeReq.tools.some((tool) => tool === null)
+        ? "tools entries must not be null"
+        : null;
+    if (toolsError) {
+      journal.add({
+        method: req.method ?? "POST",
+        path: req.url ?? "/v1/messages",
+        headers: flattenHeaders(req.headers),
+        body: null,
+        response: { status: 400, fixture: null },
+      });
+      writeErrorResponse(
+        res,
+        400,
+        JSON.stringify({ error: { message: toolsError, type: "invalid_request_error" } }),
+      );
+      return;
+    }
   }
 
   // Convert to ChatCompletionRequest for fixture matching

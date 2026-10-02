@@ -281,23 +281,29 @@ async function processMessage(
       response: { status: 200, fixture },
     });
 
-    const events = buildContentWithToolCallsStreamEvents(
-      response.content ?? "",
-      response.toolCalls ?? [],
-      completionReq.model,
-      chunkSize,
-      resolveReasoningForModel(
-        response.reasoning,
+    let events: ResponsesSSEEvent[];
+    try {
+      events = buildContentWithToolCallsStreamEvents(
+        response.content ?? "",
+        response.toolCalls ?? [],
         completionReq.model,
-        effectiveStrict,
-        defaults.logger,
-      ),
-      response.webSearches,
-      extractOverrides(response),
-      response.blocks,
-      emitEncryptedReasoning,
-      synthesizeSummarylessReasoning,
-    );
+        chunkSize,
+        resolveReasoningForModel(
+          response.reasoning,
+          completionReq.model,
+          effectiveStrict,
+          defaults.logger,
+        ),
+        response.webSearches,
+        extractOverrides(response),
+        response.blocks,
+        emitEncryptedReasoning,
+        synthesizeSummarylessReasoning,
+      );
+    } catch (error) {
+      journalEntry.response.status = 500;
+      throw error;
+    }
 
     const interruption = createInterruptionSignal(fixture);
     const completed = await sendEvents(
@@ -371,24 +377,30 @@ async function processMessage(
       body: completionReq,
       response: { status: 200, fixture },
     });
-    const events = buildToolCallStreamEvents(
-      response.toolCalls,
-      completionReq.model,
-      chunkSize,
-      // Gate the synthesized reasoning channel on the requested model's
-      // capability, matching the WS text / content+tool branches and the HTTP
-      // tool-only path so reasoning emission is transport-independent.
-      resolveReasoningForModel(
-        response.reasoning,
+    let events: ResponsesSSEEvent[];
+    try {
+      events = buildToolCallStreamEvents(
+        response.toolCalls,
         completionReq.model,
-        effectiveStrict,
-        defaults.logger,
-      ),
-      response.webSearches,
-      extractOverrides(response),
-      emitEncryptedReasoning,
-      synthesizeSummarylessReasoning,
-    );
+        chunkSize,
+        // Gate the synthesized reasoning channel on the requested model's
+        // capability, matching the WS text / content+tool branches and the HTTP
+        // tool-only path so reasoning emission is transport-independent.
+        resolveReasoningForModel(
+          response.reasoning,
+          completionReq.model,
+          effectiveStrict,
+          defaults.logger,
+        ),
+        response.webSearches,
+        extractOverrides(response),
+        emitEncryptedReasoning,
+        synthesizeSummarylessReasoning,
+      );
+    } catch (error) {
+      journalEntry.response.status = 500;
+      throw error;
+    }
     const interruption = createInterruptionSignal(fixture);
     const completed = await sendEvents(
       ws,

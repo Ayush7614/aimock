@@ -93,7 +93,18 @@ export async function handleSpeech(
     return;
   }
 
-  if (!speechReq.input) {
+  const input: unknown = speechReq.input;
+  const validInput =
+    typeof input === "string" ||
+    (Array.isArray(input) &&
+      input.length > 0 &&
+      input.every(
+        (part: unknown) =>
+          isJsonObject(part) &&
+          typeof part.type === "string" &&
+          (!("text" in part) || typeof part.text === "string"),
+      ));
+  if (!input || !validInput) {
     journal.add({
       method,
       path,
@@ -105,7 +116,12 @@ export async function handleSpeech(
       res,
       400,
       JSON.stringify({
-        error: { message: "Missing required parameter: 'input'", type: "invalid_request_error" },
+        error: {
+          message: !input
+            ? "Missing required parameter: 'input'"
+            : "Invalid parameter: 'input' must be a string or a nonempty array of content parts",
+          type: "invalid_request_error",
+        },
       }),
     );
     return;

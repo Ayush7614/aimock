@@ -1,5 +1,18 @@
 # @copilotkit/aimock
 
+## [Unreleased]
+
+### Fixed
+
+- Fix internal errors for specific malformed provider fields and control fixture inputs, while preserving supported input forms and defaults. `toolName` matching safely skips malformed tools, and `addFixturesFromJSON` explains its array requirement. Multipart parsing distinguishes `name` from `filename`. Invalid HTTP and WebSocket request targets return 400 while retaining existing diagnostics and HTTP journal/CORS behavior (#474)
+- Reject missing Ollama tool functions and malformed Anthropic message collections before fixture matching. Reject numeric user/assistant content in Anthropic requests and numeric Gemini Interactions input (#474)
+- Validate malformed tool shapes on native `/v1/chat/completions` before fixture matching or proxy forwarding, while preserving supported shorthand. Compatible routes skip `toolName` matches for non-array tools without changing the request or proxy payload (#474)
+- Report invalid legacy Responses fixture tool arguments as descriptive configuration errors before response headers. This prevents malformed output and replaces incidental exceptions (#474)
+- Prevent scalar and array JSON fixture matches from acting as catch-alls. File loading warns and skips those entries. JSON API and control API batches reject atomically. `aimock validate` reports accurate errors and counts (#474)
+- Validate Cohere embedding type containers and members when building embedding output. Enforce the 100000-dimension serialization budget only for Gemini deterministic fallback. Require a model on native OpenAI embedding requests while preserving compatible-route defaults and supported empty inputs (#474)
+- Reject malformed image prompts, speech input, and JSON video prompts before fixture matching. Preserve supported content-part arrays (#474)
+- Require a complete positive safe integer for legacy `/v1/_requests?limit=...`, preserving supported numeric formatting. The separate control journal still accepts `limit=0` (#474)
+
 ## [1.43.0] - 2026-09-22
 
 > **BREAKING** — `aimock -h` is `--help`, not `--host`: `aimock -h 0.0.0.0` exits 1 with `Error: Unexpected argument '0.0.0.0'. This command does not take positional arguments`. Migration: `--host <string>` (long form only). The `llmock` bin (the Docker ENTRYPOINT) keeps `-h, --host` (#453).
