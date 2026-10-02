@@ -325,31 +325,84 @@ const HEADERS: Record<string, string> = {
   ...(GITHUB_TOKEN ? { Authorization: `Bearer ${GITHUB_TOKEN}` } : {}),
 };
 
-async function fetchReadme(repo: string): Promise<string> {
-  const url = `https://api.github.com/repos/${repo}/readme`;
-  console.log(`  Fetching README from ${repo}...`);
-  const res = await fetch(url, { headers: HEADERS });
-  if (!res.ok) {
-    console.warn(`  ⚠ Failed to fetch README for ${repo}: ${res.status} ${res.statusText}`);
-    return "";
-  }
-  const json = (await res.json()) as { content?: string; encoding?: string };
-  if (json.content && json.encoding === "base64") {
-    return Buffer.from(json.content, "base64").toString("utf-8");
-  }
-  return "";
+/**
+ * Result of fetching one file from a competitor repo. "missing" (HTTP 404) is
+ * a real answer: the file is not in the repo. "failed" means we could not see
+ * the file at all (network error, auth, rate limit, 5xx, malformed response),
+ * so the scan must not treat it as "nothing changed".
+ */
+export type FetchResult =
+  | { status: "ok"; text: string }
+  | { status: "missing" }
+  | { status: "failed"; reason: string };
+
+/** A source that could not be fetched, recorded per competitor and file. */
+export interface FetchFailure {
+  competitor: string;
+  repo: string;
+  source: string;
+  reason: string;
 }
 
-async function fetchPackageJson(repo: string): Promise<string> {
-  const url = `https://api.github.com/repos/${repo}/contents/package.json`;
-  console.log(`  Fetching package.json from ${repo}...`);
-  const res = await fetch(url, { headers: HEADERS });
-  if (!res.ok) return "";
-  const json = (await res.json()) as { content?: string; encoding?: string };
-  if (json.content && json.encoding === "base64") {
-    return Buffer.from(json.content, "base64").toString("utf-8");
+async function fetchRepoFile(repo: string, source: string, path: string): Promise<FetchResult> {
+  const url = `https://api.github.com/repos/${repo}/${path}`;
+  console.log(`  Fetching ${source} from ${repo}...`);
+  try {
+    const res = await fetch(url, { headers: HEADERS });
+    if (res.status === 404) return { status: "missing" };
+    if (!res.ok) {
+      return { status: "failed", reason: `HTTP ${res.status} ${res.statusText}`.trim() };
+    }
+    const json = (await res.json()) as { content?: string; encoding?: string; size?: number };
+    if (typeof json.content === "string" && json.encoding === "base64") {
+      return { status: "ok", text: Buffer.from(json.content, "base64").toString("utf-8") };
+    }
+    // Files over 1 MB come back with empty content and encoding "none"; GitHub
+    // serves their contents only with the raw media type.
+    if (json.encoding === "none") {
+      const raw = await fetch(url, {
+        headers: { ...HEADERS, Accept: "application/vnd.github.raw" },
+      });
+      if (raw.ok) return { status: "ok", text: await raw.text() };
+      return {
+        status: "failed",
+        reason:
+          `file too large for the JSON response (${json.size ?? "unknown"} bytes); ` +
+          `raw fetch failed: ${`HTTP ${raw.status} ${raw.statusText}`.trim()}`,
+      };
+    }
+    return { status: "failed", reason: "response had no base64 content" };
+  } catch (err) {
+    return { status: "failed", reason: err instanceof Error ? err.message : String(err) };
   }
-  return "";
+}
+
+/** The README is the primary source: every competitor repo is expected to have one. */
+function fetchReadme(repo: string): Promise<FetchResult> {
+  return fetchRepoFile(repo, "README", "readme");
+}
+
+/** package.json is optional: non-JS competitors (Rust, Kotlin) do not have one. */
+function fetchPackageJson(repo: string): Promise<FetchResult> {
+  return fetchRepoFile(repo, "package.json", "contents/package.json");
+}
+
+/**
+ * Why a competitor's README cannot be scanned, or null when it can. The README
+ * must be found and non-empty. A 404 also states the package.json outcome when
+ * that leaves the competitor with no source to scan at all.
+ */
+function describeReadmeFailure(readme: FetchResult, pkg: FetchResult): string | null {
+  switch (readme.status) {
+    case "failed":
+      return readme.reason;
+    case "missing":
+      return pkg.status === "missing"
+        ? "not found (HTTP 404), and package.json not found (HTTP 404): no source to scan"
+        : "not found (HTTP 404)";
+    case "ok":
+      return readme.text.trim() === "" ? "README is empty" : null;
+  }
 }
 
 /**
@@ -1295,16 +1348,56 @@ async function main(): Promise<void> {
   const competitorFeatures = new Map<string, Record<string, boolean>>();
   const competitorProviderCounts = new Map<string, number>();
   const competitorReadmes = new Map<string, string>();
+  // README failures fail the run. A package.json failure is listed with them
+  // when the README also failed. When the README was scanned, it does not fail
+  // the run: it is a fetch warning, logged and listed in the summary.
+  const fatalFailures: FetchFailure[] = [];
+  const fetchWarnings: FetchFailure[] = [];
 
   for (const comp of COMPETITORS) {
     console.log(`\n--- ${comp.name} (${comp.repo}) ---`);
-    const [readme, pkg] = await Promise.all([fetchReadme(comp.repo), fetchPackageJson(comp.repo)]);
+    const [readmeRes, pkgRes] = await Promise.all([
+      fetchReadme(comp.repo),
+      fetchPackageJson(comp.repo),
+    ]);
 
-    if (!readme && !pkg) {
-      console.log(`  No data fetched, skipping.`);
-      continue;
+    // README x package.json outcomes (pinned by competitive-matrix-fetch-failure.test.ts):
+    //   README found (non-empty): proceed; a failed package.json fetch only
+    //     warns (logged, and listed under the summary's "Fetch Warnings"),
+    //     because the primary source was scanned.
+    //   README not found, empty, or failed: fail the run. Every competitor repo
+    //     is expected to have a README, so a scan without one is incomplete.
+    //     README 404 + package.json 404 is a competitor with no source at all,
+    //     which can contribute no detection; it fails like any other scan that
+    //     came back with nothing. A failed package.json fetch is reported too.
+    const readmeFailure = describeReadmeFailure(readmeRes, pkgRes);
+    if (readmeFailure !== null) {
+      console.warn(`  ⚠ README unusable for ${comp.repo}: ${readmeFailure}`);
+      fatalFailures.push({
+        competitor: comp.name,
+        repo: comp.repo,
+        source: "README",
+        reason: readmeFailure,
+      });
     }
+    if (pkgRes.status === "failed") {
+      console.warn(`  ⚠ Failed to fetch package.json for ${comp.repo}: ${pkgRes.reason}`);
+      const failure: FetchFailure = {
+        competitor: comp.name,
+        repo: comp.repo,
+        source: "package.json",
+        reason: pkgRes.reason,
+      };
+      if (readmeFailure !== null) {
+        fatalFailures.push(failure);
+      } else {
+        fetchWarnings.push(failure);
+      }
+    }
+    if (readmeFailure !== null || readmeRes.status !== "ok") continue;
 
+    const readme = readmeRes.text;
+    const pkg = pkgRes.status === "ok" ? pkgRes.text : "";
     const combined = `${readme}\n${pkg}`;
     competitorReadmes.set(comp.name, combined);
     const features = extractFeatures(combined);
@@ -1326,6 +1419,16 @@ async function main(): Promise<void> {
     if (provCount > 0) {
       console.log(`  Detected ${provCount} LLM provider(s).`);
     }
+  }
+
+  // A competitor we could not see must not be reported as "no changes".
+  if (fatalFailures.length > 0) {
+    const lines = fatalFailures.map((f) => `  - ${f.repo} ${f.source}: ${f.reason}`);
+    const failedCompetitors = new Set(fatalFailures.map((f) => f.competitor)).size;
+    throw new Error(
+      `Competitor scan incomplete: ${failedCompetitors} of ${COMPETITORS.length} ` +
+        `competitor(s) could not be scanned from GitHub:\n${lines.join("\n")}`,
+    );
   }
 
   // 2. Read current HTML
