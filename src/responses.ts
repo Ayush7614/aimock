@@ -336,6 +336,13 @@ export function buildTextStreamEvents(
   return events;
 }
 
+function requireFixtureToolArguments(value: unknown): string {
+  if (typeof value !== "string") {
+    throw new Error('Invalid fixture tool call: "arguments" must be a string after normalization');
+  }
+  return value;
+}
+
 export function buildToolCallStreamEvents(
   toolCalls: ToolCall[],
   model: string,
@@ -379,7 +386,7 @@ export function buildToolCallStreamEvents(
     });
 
     // function_call_arguments.delta
-    const args = tc.arguments;
+    const args = requireFixtureToolArguments(tc.arguments);
     for (let i = 0; i < args.length; i += chunkSize) {
       const slice = args.slice(i, i + chunkSize);
       events.push({
@@ -836,7 +843,7 @@ function buildFunctionCallOutputEvents(
 ): FunctionCallBlockResult {
   const callId = toolCall.id || generateToolCallId();
   const fcId = generateId("fc");
-  const args = toolCall.arguments;
+  const args = requireFixtureToolArguments(toolCall.arguments);
   const events: ResponsesSSEEvent[] = [];
 
   events.push({
@@ -1003,7 +1010,7 @@ function buildToolCallResponse(
       id: generateId("fc"),
       call_id: tc.id || generateToolCallId(),
       name: tc.name,
-      arguments: tc.arguments,
+      arguments: requireFixtureToolArguments(tc.arguments),
       status: "completed",
     });
   }
@@ -1109,7 +1116,7 @@ function buildFunctionCallOutputItem(tc: { name: string; arguments: string; id?:
     id: generateId("fc"),
     call_id: tc.id || generateToolCallId(),
     name: tc.name,
-    arguments: tc.arguments,
+    arguments: requireFixtureToolArguments(tc.arguments),
     status: "completed",
   };
 }
