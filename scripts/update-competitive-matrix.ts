@@ -412,8 +412,11 @@ function describeReadmeFailure(readme: FetchResult, pkg: FetchResult): string | 
  * prevents short tokens from matching as substrings of larger words — e.g.
  * "cli" must not match "client"/"click", "sse" must not match "assess". The
  * boundary lookarounds constrain the surrounding text only, so keywords that
- * are themselves regexes (`stream.*true`, `output_text\.delta`) or that begin
- * or end with non-word characters (`/v1/models`, `ws://`) keep working.
+ * are themselves regexes (`stream.*true`, `output_text\.delta`) keep working.
+ * The lookarounds apply to every keyword, including ones that begin or end
+ * with non-word characters: `/v1/models` matches only when the character
+ * before the `/` is not a letter or digit, so it does not match inside a URL
+ * such as `localhost:4010/v1/models`.
  */
 function keywordRegex(kw: string): RegExp {
   return new RegExp(`(?<![a-z0-9])(?:${kw.toLowerCase()})(?![a-z0-9])`, "i");

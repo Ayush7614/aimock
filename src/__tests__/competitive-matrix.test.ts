@@ -3,7 +3,7 @@ import { existsSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
-// These tests exercise the REAL functions from the drift-automation script
+// These tests exercise the REAL functions from the competitive-matrix script
 // (not a reimplemented mirror), so behavioral bugs surface here directly.
 import {
   countProviders,
@@ -460,8 +460,9 @@ describe("parseCurrentMatrix header extraction", () => {
 });
 
 describe("computeChanges with actual HTML cell structure", () => {
-  // This matrix uses the actual HTML structure from docs/index.html:
-  // cells contain <span class="no">&#10007;</span> not bare "No"
+  // This matrix uses the span.no/span.yes cell markup of docs/index.html:
+  // cells contain <span class="no">&#10007;</span>, not bare "No". Row labels
+  // are simplified to <td>; the real page uses <th scope="row">.
   const ACTUAL_HTML_MATRIX = `
 <table class="comparison-table">
   <thead>
@@ -776,11 +777,11 @@ describe("extractFeatures keyword precision", () => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Regression coverage for the 6 pre-existing drift-automation bugs. Each block
-// is a red→green repro: it fails against the pre-fix script and passes after.
+// Behavior pins for the competitive-matrix script. Each block below names the
+// behavior it checks.
 // ═══════════════════════════════════════════════════════════════════════════
 
-// ── Bug 1: migration-page paths must resolve; missing competitor mapping ─────
+// ── Mapped migration-page paths exist; mokksy/ai-mocks has a mapping ─────────
 describe("Bug 1: COMPETITOR_MIGRATION_PAGES", () => {
   it("maps every mapped competitor to a file that actually exists on disk", () => {
     for (const [competitor, relPath] of Object.entries(COMPETITOR_MIGRATION_PAGES)) {
@@ -794,7 +795,7 @@ describe("Bug 1: COMPETITOR_MIGRATION_PAGES", () => {
   });
 });
 
-// ── Bug 2: unanchored keyword regexes → false substring flips ────────────────
+// ── Keywords match only at word boundaries, not inside other words ───────────
 describe("Bug 2: extractFeatures keyword anchoring", () => {
   it('does not flip "CLI server" from the words "client"/"click"', () => {
     const feats = extractFeatures("This mock has a Python client library and you click buttons.");
@@ -817,7 +818,7 @@ describe("Bug 2: extractFeatures keyword anchoring", () => {
   });
 });
 
-// ── Bug 3: countProviders substring inflation + redundant group ──────────────
+// ── countProviders ignores substrings and counts Gemini once ─────────────────
 describe("Bug 3: countProviders substring safety", () => {
   it('does not count "cohere" inside "coherent" or "aws" inside "flaws"', () => {
     expect(countProviders("The system is coherent and has flaws.")).toBe(0);
@@ -828,7 +829,7 @@ describe("Bug 3: countProviders substring safety", () => {
   });
 });
 
-// ── Bug 4: String.replace $-sequence corruption ──────────────────────────────
+// ── Literal $-sequences in replacement HTML stay literal ─────────────────────
 describe("Bug 4: literal $-sequences in HTML replacements stay literal", () => {
   const matrixWithDollar = `
 <table class="comparison-table">
@@ -882,7 +883,7 @@ describe("Bug 4: literal $-sequences in HTML replacements stay literal", () => {
   });
 });
 
-// ── Bug 5: migration cell column located by header name, not adjacency ───────
+// ── Migration cell column is found by header name, not adjacency ─────────────
 describe("Bug 5: migration cell column resolution by header name", () => {
   it("flips the competitor cell even when aimock is the first data column", () => {
     const migration = `
@@ -924,7 +925,7 @@ describe("Bug 5: migration cell column resolution by header name", () => {
   });
 });
 
-// ── Bug 6: orphaned variant key renamed to the real FEATURE_RULE label ───────
+// ── Realtime variant key uses the real FEATURE_RULE label ────────────────────
 describe("Bug 6: buildMigrationRowPatterns realtime variant key", () => {
   it("returns variants for the real rule label 'Realtime transcription/translation'", () => {
     const patterns = buildMigrationRowPatterns("Realtime transcription/translation");
