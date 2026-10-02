@@ -14,6 +14,7 @@ import {
   parseCurrentMatrix,
   computeChanges,
   applyChanges,
+  findUnmatchedCompetitors,
   COMPETITOR_MIGRATION_PAGES,
   type DetectedChange,
 } from "../../scripts/update-competitive-matrix.js";
@@ -445,10 +446,16 @@ describe("parseCurrentMatrix header extraction", () => {
     expect(chatRow!.get("mokksy/ai-mocks")).toContain("&#10003;");
   });
 
-  it("fails to parse headers when <th> lacks <a> anchor tags", () => {
+  it("reports every competitor as unmatched when <th> lacks <a> anchor tags", () => {
     const noLinks = MATRIX_WITH_LINKS.replace(/<a[^>]*>(.*?)<\/a>/g, "$1");
-    const { headers } = parseCurrentMatrix(noLinks);
-    expect(headers).toHaveLength(0);
+    const matrix = parseCurrentMatrix(noLinks);
+    expect(matrix.headers).toHaveLength(0);
+    expect(findUnmatchedCompetitors(matrix)).toEqual([
+      "VidaiMock",
+      "mock-llm",
+      "piyook/llm-mock",
+      "mokksy/ai-mocks",
+    ]);
   });
 });
 
@@ -640,6 +647,69 @@ describe("applyChanges with actual HTML cell structure", () => {
   it("returns html unchanged when changes array is empty", () => {
     const result = applyChanges(ACTUAL_HTML_MATRIX, []);
     expect(result).toEqual({ html: ACTUAL_HTML_MATRIX, applied: [], unapplied: [] });
+  });
+});
+
+describe("applyChanges keeps the other text in every no-cell shape", () => {
+  // Built from the real docs/index.html conventions: <th scope="row"> row
+  // labels, classes on the inner <span>, never on the <td> itself.
+  const YES = '<span class="yes" role="img" aria-label="Yes">&#10003;</span>';
+  const matrixWith = (cell: string) => `
+<table class="comparison-table">
+  <thead>
+    <tr>
+      <th scope="col">Capability</th>
+      <th scope="col" class="col-aimock"><a href="https://github.com/CopilotKit/aimock">aimock</a></th>
+      <th scope="col"><a href="https://github.com/mswjs/msw">MSW</a></th>
+      <th scope="col"><a href="https://github.com/vidaiUK/VidaiMock">VidaiMock</a></th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <th scope="row">WebSocket APIs</th>
+      <td class="col-aimock"><span class="yes">Built-in &#10003;</span></td>
+      <td><span class="no" role="img" aria-label="No">&#10007;</span></td>
+      ${cell}
+    </tr>
+  </tbody>
+</table>`;
+  const flip = (cell: string) => {
+    const result = applyChanges(matrixWith(cell), [
+      { competitor: "VidaiMock", capability: "WebSocket APIs", from: "No", to: "Yes" },
+    ]);
+    expect(result.unapplied).toEqual([]);
+    return parseCurrentMatrix(result.html).rows.get("WebSocket APIs")!.get("VidaiMock")!;
+  };
+
+  it("span form: replaces only the span and keeps the text", () => {
+    expect(
+      flip('<td><span class="no" role="img" aria-label="No">&#10007;</span> (planned v2)</td>'),
+    ).toBe(`${YES} (planned v2)`);
+  });
+
+  it("bare &#10007; form: replaces only the entity and keeps the text", () => {
+    expect(flip("<td>&#10007; (planned v2)</td>")).toBe(`${YES} (planned v2)`);
+  });
+
+  it("bare ✗ form: replaces only the glyph and keeps the text", () => {
+    expect(flip("<td>(planned v2) ✗</td>")).toBe(`(planned v2) ${YES}`);
+  });
+
+  it('bare cross in a <td class="no">: keeps the text and flips the cell class to yes', () => {
+    const matrix = applyChanges(matrixWith('<td class="no">&#10007; (planned v2)</td>'), [
+      { competitor: "VidaiMock", capability: "WebSocket APIs", from: "No", to: "Yes" },
+    ]).html;
+    expect(matrix).toContain(`<td class="yes">${YES} (planned v2)</td>`);
+    expect(matrix).not.toContain('<td class="no">');
+  });
+
+  it("leaves the other no-cells in the row unchanged", () => {
+    const matrix = applyChanges(matrixWith("<td>&#10007; (planned v2)</td>"), [
+      { competitor: "VidaiMock", capability: "WebSocket APIs", from: "No", to: "Yes" },
+    ]).html;
+    expect(parseCurrentMatrix(matrix).rows.get("WebSocket APIs")!.get("MSW")).toBe(
+      '<span class="no" role="img" aria-label="No">&#10007;</span>',
+    );
   });
 });
 
