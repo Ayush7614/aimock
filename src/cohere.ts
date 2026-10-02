@@ -1564,6 +1564,32 @@ export async function handleCohereEmbed(
       ? embedReq.embedding_types
       : ["float"];
 
+  function rejectInvalidEmbeddingTypes(): boolean {
+    if (embedReq.embedding_types == null) return false;
+    const isArray = Array.isArray(embedReq.embedding_types);
+    if (isArray && embedReq.embedding_types.every((type) => typeof type === "string")) return false;
+    journal.add({
+      method: req.method ?? "POST",
+      path: req.url ?? "/v2/embed",
+      headers: flattenHeaders(req.headers),
+      body: syntheticReq,
+      response: { status: 400, fixture: fixture ?? null },
+    });
+    writeErrorResponse(
+      res,
+      400,
+      JSON.stringify({
+        error: {
+          message: isArray
+            ? "Invalid request: embedding_types must be an array of strings"
+            : "Invalid request: embedding_types must be an array",
+          type: "invalid_request_error",
+        },
+      }),
+    );
+    return true;
+  }
+
   if (fixture) {
     const response = await resolveResponse(fixture, syntheticReq);
 
@@ -1585,6 +1611,7 @@ export async function handleCohereEmbed(
 
     // Embedding response — use the fixture's embedding for each input text
     if (isEmbeddingResponse(response)) {
+      if (rejectInvalidEmbeddingTypes()) return;
       journal.add({
         method: req.method ?? "POST",
         path: req.url ?? "/v2/embed",
@@ -1684,6 +1711,8 @@ export async function handleCohereEmbed(
       return;
     }
   }
+
+  if (rejectInvalidEmbeddingTypes()) return;
 
   // No fixture match — generate deterministic embeddings from input texts
   logger.warn(
