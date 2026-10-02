@@ -3230,8 +3230,8 @@ export async function createServerWithResolvedAuth(
         const limitParam = parsedUrl.searchParams.get("limit");
         let opts: { limit: number } | undefined;
         if (limitParam) {
-          const limit = parseInt(limitParam, 10);
-          if (Number.isNaN(limit) || limit <= 0) {
+          const limit = Number(limitParam);
+          if (!/^\+?\d+$/.test(limitParam.trim()) || !Number.isSafeInteger(limit) || limit <= 0) {
             writeErrorResponse(
               res,
               400,
