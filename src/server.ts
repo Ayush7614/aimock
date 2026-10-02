@@ -52,6 +52,7 @@ import {
   isJSONResponse,
   flattenHeaders,
   isJsonObject,
+  validateToolsField,
   getTestId,
   resolveTestId,
   readBody,
@@ -1272,6 +1273,33 @@ async function handleCompletions(
           }),
     );
     return;
+  }
+
+  // Only native OpenAI ingress applies this shape rule; compatible routes
+  // retain their own tool conventions. Missing-function shorthand stays valid.
+  if (new URL(req.url ?? COMPLETIONS_PATH, "http://localhost").pathname === COMPLETIONS_PATH) {
+    let toolsError = validateToolsField(body.tools);
+    if (!toolsError && Array.isArray(body.tools)) {
+      const nullFunctionIndex = body.tools.findIndex((tool) => tool?.function === null);
+      if (nullFunctionIndex !== -1) {
+        toolsError = `tools[${nullFunctionIndex}].function must not be null`;
+      }
+    }
+    if (toolsError) {
+      journal.add({
+        method: req.method ?? "POST",
+        path: req.url ?? COMPLETIONS_PATH,
+        headers: flattenHeaders(req.headers),
+        body: null,
+        response: { status: 400, fixture: null },
+      });
+      writeErrorResponse(
+        res,
+        400,
+        JSON.stringify({ error: { message: toolsError, type: "invalid_request_error" } }),
+      );
+      return;
+    }
   }
 
   const method = req.method ?? "POST";

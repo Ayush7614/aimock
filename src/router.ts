@@ -500,7 +500,7 @@ export function matchFixtureDiagnostic(
 
     // toolName — match against any tool definition by function.name
     if (match.toolName !== undefined) {
-      const tools = effective.tools ?? [];
+      const tools = Array.isArray(effective.tools) ? effective.tools : [];
       const found = tools.some((t) => t?.function?.name === match.toolName);
       if (!found) continue;
     }

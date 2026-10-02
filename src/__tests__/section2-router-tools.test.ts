@@ -28,9 +28,9 @@ async function start(withToolFixtures = true) {
   return mock;
 }
 
-async function post(server: LLMock, tools: unknown) {
+async function post(server: LLMock, tools: unknown, path = "/v1/chat/completions") {
   const body = { model: "gpt-4o", messages: [{ role: "user", content: "hello" }], tools };
-  const response = await fetch(`${server.url}/v1/chat/completions`, {
+  const response = await fetch(`${server.url}${path}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
@@ -47,17 +47,21 @@ function expectContent(result: Awaited<ReturnType<typeof post>>, content: string
   expect(JSON.parse(result.text)).toMatchObject({ choices: [{ message: { content } }] });
 }
 
-test.each(candidates)("$id real HTTP does not crash router", async ({ tools }) => {
+test.each(candidates)("$id real HTTP does not crash router", async ({ id, tools }) => {
   const server = await start();
-  const result = await post(server, tools);
+  const path =
+    id === "C22-missing-function" ? "/v1/chat/completions" : "/custom/v1/chat/completions";
+  const result = await post(server, tools, path);
   // Establish sequence state independently before asserting the observed failure.
   expectContent(await post(server, nested), "first");
   expectContent(await post(server, nested), "second");
   expectContent(result, "fallback");
 });
 
-test.each(candidates)("control $id inert model-only acceptance", async ({ tools }) => {
-  expectContent(await post(await start(false), tools), "fallback");
+test.each(candidates)("control $id inert model-only acceptance", async ({ id, tools }) => {
+  const path =
+    id === "C22-missing-function" ? "/v1/chat/completions" : "/custom/v1/chat/completions";
+  expectContent(await post(await start(false), tools, path), "fallback");
 });
 
 test.each([undefined, null, []])("control absent tools %j fall through", async (tools) => {
