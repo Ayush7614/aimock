@@ -8,60 +8,95 @@ afterEach(async () => {
   mock = undefined;
 });
 
-async function characterize(id: string, fields: object, normalized: unknown) {
-  mock = new LLMock({ port: 0 });
-  mock.addFixture({ match: {}, response: { content: "C05 replay" } });
-  await mock.start();
+async function post(server: LLMock, fields: object) {
   const request = { model: "claude-sonnet-4-20250514", max_tokens: 32, ...fields };
-  const response = await fetch(`${mock.url}/v1/messages`, {
+  const response = await fetch(`${server.url}/v1/messages`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(request),
+    signal: AbortSignal.timeout(5000),
   });
-  const text = await response.text();
-  const journal = mock.getLastRequest();
-  console.log(
-    JSON.stringify({
-      id,
-      request,
-      status: response.status,
-      body: text,
-      normalized: journal?.body?.messages,
-    }),
-  );
-  expect(response.status).toBe(200);
-  expect(JSON.parse(text)).toMatchObject({
-    type: "message",
-    content: [{ type: "text", text: "C05 replay" }],
-  });
-  expect(journal?.body?.messages).toEqual(normalized);
+  return {
+    request,
+    status: response.status,
+    contentType: response.headers.get("content-type"),
+    body: await response.text(),
+    journal: server.getLastRequest(),
+  };
 }
 
-// Phase A characterization: acceptance is not by itself a compatibility contract.
-// These assertions preserve the observed safe normalizations pending independent review.
-test.each([
-  { id: "C05-missing", fields: {}, normalized: [] },
-  { id: "C05-number", fields: { messages: 42 }, normalized: [] },
-  { id: "C05-string", fields: { messages: "hello" }, normalized: [] },
-  { id: "C05-object", fields: { messages: {} }, normalized: [] },
-  { id: "C05-null", fields: { messages: null }, normalized: [] },
-  { id: "C05-null-entry", fields: { messages: [null] }, normalized: [] },
-  {
-    id: "C05-number-user-content",
-    fields: { messages: [{ role: "user", content: 42 }] },
-    normalized: [{ role: "user", content: "" }],
-  },
-  {
-    id: "C05-number-assistant-content",
-    fields: { messages: [{ role: "assistant", content: 42 }] },
-    normalized: [{ role: "assistant", content: null }],
-  },
-])("candidate $id", async ({ id, fields, normalized }) => {
-  await characterize(id, fields, normalized);
-});
+function expectReplay(result: Awaited<ReturnType<typeof post>>, content: string, stream: boolean) {
+  expect(result.status).toBe(200);
+  if (stream) {
+    expect(result.contentType).toContain("text/event-stream");
+    expect(result.body).toContain(`"text":"${content}"`);
+    expect(result.body).toContain("event: message_stop");
+  } else {
+    expect(JSON.parse(result.body)).toMatchObject({
+      type: "message",
+      content: [{ type: "text", text: content }],
+    });
+  }
+}
 
-test.each([
+async function characterize(id: string, fields: object, normalized: unknown, stream = false) {
+  mock = new LLMock({ port: 0 });
+  mock.addFixture({ match: {}, response: { content: "C05 replay" } });
+  await mock.start();
+  const result = await post(mock, { ...fields, stream });
+  console.log(JSON.stringify({ id, ...result }));
+  expectReplay(result, "C05 replay", stream);
+  expect(result.journal?.body?.messages).toEqual(normalized);
+}
+
+const malformedMessages = [
+  { id: "missing", fields: {} },
+  { id: "number", fields: { messages: 42 } },
+  { id: "string", fields: { messages: "bad" } },
+  { id: "object", fields: { messages: {} } },
+  { id: "null", fields: { messages: null } },
+  { id: "null-entry", fields: { messages: [null] } },
+  { id: "number-entry", fields: { messages: [42] } },
+  { id: "string-entry", fields: { messages: ["bad"] } },
+  { id: "boolean-entry", fields: { messages: [false] } },
+  { id: "array-entry", fields: { messages: [[]] } },
+];
+
+test.each(
+  malformedMessages.flatMap((cell) => [false, true].map((stream) => ({ ...cell, stream }))),
+)(
+  "rejects $id messages before fixture matching (stream=$stream)",
+  async ({ id, fields, stream }) => {
+    mock = new LLMock({ port: 0 });
+    mock.addFixture({ match: { sequenceIndex: 0 }, response: { content: "FIRST" } });
+    mock.addFixture({ match: { sequenceIndex: 1 }, response: { content: "SECOND" } });
+    await mock.start();
+    const malformed = await post(mock, { ...fields, stream });
+    const sentinel = await post(mock, { messages: [{ role: "user", content: "hello" }], stream });
+    console.log(JSON.stringify({ id, stream, malformed, sentinel }));
+    expect(malformed.status).toBe(400);
+    expect(malformed.contentType).toContain("application/json");
+    expect(JSON.parse(malformed.body)).toMatchObject({ error: { type: "invalid_request_error" } });
+    expect(malformed.journal?.response).toMatchObject({ status: 400, fixture: null });
+    expectReplay(sentinel, "FIRST", stream);
+  },
+);
+
+const supportedMessages = [
   { id: "empty-messages", messages: [], normalized: [] },
+  {
+    id: "multimodal",
+    messages: [
+      {
+        role: "user",
+        content: [
+          { type: "image", source: { type: "base64", media_type: "image/png", data: "aGVsbG8=" } },
+          { type: "text", text: "describe" },
+        ],
+      },
+    ],
+    normalized: [{ role: "user", content: "describe" }],
+  },
   {
     id: "empty-content",
     messages: [{ role: "user", content: [] }],
@@ -127,10 +162,15 @@ test.each([
       { role: "tool", content: "result", tool_call_id: "tool_1" },
     ],
   },
-])("control $id", async ({ id, messages, normalized }) => {
+];
+
+test.each(
+  supportedMessages.flatMap((cell) => [false, true].map((stream) => ({ ...cell, stream }))),
+)("control $id (stream=$stream)", async ({ id, messages, normalized, stream }) => {
   await characterize(
     id,
     { messages, tools: [{ name: "f", input_schema: { type: "object" } }] },
     normalized,
+    stream,
   );
 });
