@@ -21,6 +21,7 @@ import {
   isEmbeddingResponse,
   isErrorResponse,
   generateDeterministicEmbedding,
+  MAX_EMBEDDING_DIMENSIONS,
   flattenHeaders,
   isJsonObject,
   getTestId,
@@ -334,10 +335,13 @@ export async function handleGeminiEmbedContent(
 
   // No fixture match — generate deterministic embedding from input text
   const dimensions = embedReq.outputDimensionality ?? DEFAULT_GEMINI_EMBEDDING_DIMENSIONS;
-  // Preserve existing numeric-string coercion and zero/large widths. Only guard
-  // allocation-invalid numeric widths and strings that produce nonnumeric values.
+  // Match the embedding loop's numeric coercion, including array dimensions.
+  // Preserve supported coercion and zero within the local serialization budget.
+  // Guard only the fallback allocation, not unused dimensions on earlier branches.
   // Replay, strict, chaos, and proxy paths above do not consume this field.
+  const exceedsFallbackBudget = dimensions > MAX_EMBEDDING_DIMENSIONS;
   if (
+    exceedsFallbackBudget ||
     (typeof dimensions === "number" && (!Number.isInteger(dimensions) || dimensions < 0)) ||
     (typeof dimensions === "string" && Number.isNaN(Number(dimensions)))
   ) {
@@ -353,7 +357,9 @@ export async function handleGeminiEmbedContent(
       400,
       JSON.stringify({
         error: {
-          message: "outputDimensionality cannot produce a numeric embedding",
+          message: exceedsFallbackBudget
+            ? `outputDimensionality exceeds the fallback serialization budget of ${MAX_EMBEDDING_DIMENSIONS}`
+            : "outputDimensionality cannot produce a numeric embedding",
           code: 400,
           status: "INVALID_ARGUMENT",
         },
