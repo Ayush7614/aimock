@@ -3,9 +3,11 @@
 /**
  * update-competitive-matrix.ts
  *
- * Fetches competitor READMEs from GitHub, extracts feature signals via keyword
- * matching, and updates the comparison table in docs/index.html and
- * corresponding migration pages when evidence of new capabilities is found.
+ * Fetches competitor READMEs and package.json files from GitHub, extracts
+ * feature signals via keyword matching, and updates the comparison table in
+ * docs/index.html when evidence of new capabilities is found. A competitor's
+ * migration page is updated only when that competitor has an applied
+ * homepage change.
  *
  * Usage:
  *   npx tsx scripts/update-competitive-matrix.ts                        # update in place
@@ -316,7 +318,6 @@ export const COMPETITOR_MIGRATION_PAGES: Record<string, string> = {
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 const DRY_RUN = process.argv.includes("--dry-run");
-const DOCS_PATH = resolve(import.meta.dirname ?? __dirname, "../docs/index.html");
 
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN ?? "";
 const HEADERS: Record<string, string> = {
@@ -1285,11 +1286,62 @@ function parseSummaryArg(): string | null {
   return resolve(process.argv[idx + 1]);
 }
 
-function writeSummary(summaryPath: string, changes: DetectedChange[]): void {
+/** A migration-page cell or provider claim the run changed. */
+export interface MigrationPageChange {
+  /** Migration page path relative to the repo root */
+  page: string;
+  /** Change description from updateMigrationPage */
+  change: string;
+}
+
+/**
+ * A detection of a MATRIX_ROWLESS_RULES rule. No homepage row can hold it, so
+ * the run reports it for manual follow-up.
+ */
+export interface RowlessDetection {
+  competitor: string;
+  capability: string;
+}
+
+/**
+ * Builds the markdown summary. The homepage section lists the changes that
+ * were applied; the migration-page, row-less and fetch warning sections
+ * follow it when non-empty. Unplaced changes never reach the summary:
+ * writeMatrixUpdate throws before writing one.
+ *
+ * fetchWarnings are optional-source fetches that failed while the run went
+ * on (a package.json fetch that failed when the README was found). The scan
+ * of those competitors is incomplete, so the headline names them and never
+ * says "no changes".
+ */
+export function formatSummary(
+  changes: DetectedChange[],
+  migrationChanges: MigrationPageChange[] = [],
+  rowless: RowlessDetection[] = [],
+  fetchWarnings: FetchFailure[] = [],
+): string {
   let md: string;
 
+  const incompleteRepos = [...new Set(fetchWarnings.map((w) => w.repo))];
+  const incompleteHeadline =
+    incompleteRepos.length > 0
+      ? `Competitor scan results are incomplete for ${incompleteRepos.join(", ")}. ` +
+        'See "Fetch Warnings" below.\n'
+      : "";
+
   if (changes.length === 0) {
-    md = "No competitive matrix changes detected this week.\n";
+    // No homepage change was computed. The headline must still say whether
+    // anything below needs attention.
+    if (incompleteHeadline !== "") {
+      md = incompleteHeadline;
+    } else if (migrationChanges.length === 0 && rowless.length === 0) {
+      md = "No competitive matrix changes detected this week.\n";
+    } else if (rowless.length > 0) {
+      md =
+        "No homepage competitive matrix changes this week. Detections below need a manual check.\n";
+    } else {
+      md = "No homepage competitive matrix changes this week.\n";
+    }
   } else {
     const lines: string[] = [];
     lines.push("## Competitive Matrix Changes");
@@ -1328,11 +1380,196 @@ function writeSummary(summaryPath: string, changes: DetectedChange[]): void {
     lines.push("```");
     lines.push("");
 
-    md = lines.join("\n");
+    md = incompleteHeadline + (incompleteHeadline !== "" ? "\n" : "") + lines.join("\n");
   }
 
-  writeFileSync(summaryPath, md, "utf-8");
+  if (migrationChanges.length > 0) {
+    const lines = ["## Migration Page Changes", ""];
+    for (const mc of migrationChanges) lines.push(`- \`${mc.page}\`: ${mc.change}`);
+    lines.push("");
+    md += "\n" + lines.join("\n");
+  }
+
+  if (rowless.length > 0) {
+    const lines = [
+      "## Row-Less Detections (Manual Follow-Up)",
+      "",
+      "These rules have no homepage row, so they never update a page by themselves. Check them by hand.",
+      "",
+      "| Competitor | Capability |",
+      "| --- | --- |",
+    ];
+    for (const r of rowless) lines.push(`| ${r.competitor} | ${r.capability} |`);
+    lines.push("");
+    md += "\n" + lines.join("\n");
+  }
+
+  if (fetchWarnings.length > 0) {
+    const lines = [
+      "## Fetch Warnings",
+      "",
+      "These fetches failed. The run went on without them, so the results for these competitors are incomplete.",
+      "",
+    ];
+    for (const w of fetchWarnings) lines.push(`- ${w.repo} ${w.source}: ${w.reason}`);
+    lines.push("");
+    md += "\n" + lines.join("\n");
+  }
+
+  return md;
+}
+
+/**
+ * Writes one file. When the write fails, throws an error that names the file
+ * (as `label`) and every docs file already written, so a run that stops
+ * partway says which pages it changed.
+ */
+function writeOrReport(path: string, label: string, content: string, written: string[]): void {
+  try {
+    writeFileSync(path, content, "utf-8");
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    throw new Error(
+      `Failed to write ${label}: ${reason}. ` +
+        `Files already written: ${written.length > 0 ? written.join(", ") : "none"}.`,
+      { cause: err },
+    );
+  }
+}
+
+/**
+ * Writes the summary. `written` lists the docs files this run already wrote,
+ * so a failed summary write names them.
+ */
+function writeSummary(
+  summaryPath: string,
+  changes: DetectedChange[],
+  migrationChanges: MigrationPageChange[],
+  rowless: RowlessDetection[],
+  fetchWarnings: FetchFailure[],
+  written: string[],
+): void {
+  writeOrReport(
+    summaryPath,
+    summaryPath,
+    formatSummary(changes, migrationChanges, rowless, fetchWarnings),
+    written,
+  );
   console.log(`\nSummary written to ${summaryPath}`);
+}
+
+/** Writes one docs file and adds relPath to `written` (see writeOrReport). */
+function writeDocsFile(path: string, relPath: string, content: string, written: string[]): void {
+  writeOrReport(path, relPath, content, written);
+  written.push(relPath);
+}
+
+// ── Matrix Write ─────────────────────────────────────────────────────────────
+
+/** A migration page to rewrite, with the changes the rewrite makes. */
+export interface MigrationPageUpdate {
+  /** Absolute path of the page. */
+  path: string;
+  /** Repository-relative path, for the log and the summary. */
+  relPath: string;
+  /** The updated page HTML. */
+  html: string;
+  /** What changed on the page, one entry per changed cell or provider claim. */
+  changes: string[];
+}
+
+export interface MatrixUpdateOptions {
+  /** Current homepage HTML. */
+  html: string;
+  /** Changes computed from the competitor scan. */
+  changes: DetectedChange[];
+  /** Where to write the updated homepage. */
+  docsPath: string;
+  /** Where to write the markdown summary, or null for none. */
+  summaryPath: string | null;
+  dryRun: boolean;
+  /** Migration pages to write after the homepage. */
+  migrationUpdates?: MigrationPageUpdate[];
+  /** Row-less detections to list in the summary for manual follow-up. */
+  rowless?: RowlessDetection[];
+  /** Failed optional-source fetches; the summary lists them as warnings. */
+  fetchWarnings?: FetchFailure[];
+}
+
+/**
+ * Applies the changes to the homepage, writes the homepage and then each
+ * migration page, and last writes the summary of what was written.
+ *
+ * Throws before any write, and writes no summary, when any computed change
+ * could not be placed: a scan that reports changes the page does not show
+ * must fail the run. Throws, and writes no summary, when a docs write fails.
+ * A failed docs or summary write throws an error that names the docs files
+ * already written. A dry run writes no docs
+ * file; its summary lists the changes the run would write.
+ * Returns the homepage changes that were written (empty on a dry run).
+ */
+export function writeMatrixUpdate(opts: MatrixUpdateOptions): DetectedChange[] {
+  const { html, changes, docsPath, summaryPath, dryRun } = opts;
+  const migrationUpdates = opts.migrationUpdates ?? [];
+  const rowless = opts.rowless ?? [];
+  const fetchWarnings = opts.fetchWarnings ?? [];
+  const pageChanges = (mu: MigrationPageUpdate): MigrationPageChange[] =>
+    mu.changes.map((change) => ({ page: mu.relPath, change }));
+
+  // Apply changes to index.html
+  const { html: updated, applied, unapplied } = applyChanges(html, changes);
+
+  if (unapplied.length > 0) {
+    console.log(`\n${unapplied.length} change(s) could not be placed in docs/index.html:`);
+    for (const { change: ch, reason } of unapplied) {
+      console.log(`  ${ch.competitor} / ${ch.capability}: ${ch.from} -> ${ch.to} (${reason})`);
+    }
+    throw new Error(
+      `${unapplied.length} of ${changes.length} computed change(s) could not be placed in ` +
+        `docs/index.html: ${unapplied
+          .map(({ change: ch, reason }) => `${ch.competitor} / ${ch.capability} (${reason})`)
+          .join(", ")}.`,
+    );
+  }
+
+  if (dryRun) {
+    if (applied.length > 0) {
+      console.log("\n[DRY RUN] Would update docs/index.html with the above changes.");
+    }
+    if (migrationUpdates.length > 0) {
+      console.log("[DRY RUN] Would update the migration pages above.");
+    }
+    if (summaryPath) {
+      writeSummary(
+        summaryPath,
+        applied,
+        migrationUpdates.flatMap(pageChanges),
+        rowless,
+        fetchWarnings,
+        [],
+      );
+    }
+    return [];
+  }
+
+  // Write the docs, homepage first. A failed write throws before the summary,
+  // so no summary claims a change that was not written.
+  const written: string[] = [];
+  if (applied.length > 0) {
+    writeDocsFile(docsPath, "docs/index.html", updated, written);
+    console.log("\nUpdated docs/index.html successfully.");
+  }
+  const writtenMigrationChanges: MigrationPageChange[] = [];
+  for (const mu of migrationUpdates) {
+    writeDocsFile(mu.path, mu.relPath, mu.html, written);
+    console.log(`Updated ${mu.relPath}.`);
+    writtenMigrationChanges.push(...pageChanges(mu));
+  }
+
+  if (summaryPath) {
+    writeSummary(summaryPath, applied, writtenMigrationChanges, rowless, fetchWarnings, written);
+  }
+  return applied;
 }
 
 // ── Main ─────────────────────────────────────────────────────────────────────
@@ -1344,7 +1581,7 @@ async function main(): Promise<void> {
     console.log("  [DRY RUN] No files will be modified.\n");
   }
 
-  // 1. Fetch competitor data
+  // Fetch competitor data
   const competitorFeatures = new Map<string, Record<string, boolean>>();
   const competitorProviderCounts = new Map<string, number>();
   const competitorReadmes = new Map<string, string>();
@@ -1431,11 +1668,48 @@ async function main(): Promise<void> {
     );
   }
 
-  // 2. Read current HTML
-  console.log(`\nReading ${DOCS_PATH}...`);
-  const html = readFileSync(DOCS_PATH, "utf-8");
+  const summaryPath = parseSummaryArg();
+  runMatrixUpdate({
+    repoRoot: resolve(import.meta.dirname ?? __dirname, ".."),
+    competitorFeatures,
+    competitorProviderCounts,
+    dryRun: DRY_RUN,
+    summaryPath,
+    fetchWarnings,
+  });
+}
 
-  // 3. Parse current matrix
+/** Inputs to runMatrixUpdate: the scan results plus where to read and write. */
+export interface RunMatrixUpdateOptions {
+  /** Repository root; docs/index.html and the migration pages live under it. */
+  repoRoot: string;
+  /** Competitor name -> FEATURE_RULES label -> detected. */
+  competitorFeatures: Map<string, Record<string, boolean>>;
+  /** Competitor name -> detected LLM provider count. */
+  competitorProviderCounts: Map<string, number>;
+  /** When true, report the changes but write no docs files. */
+  dryRun: boolean;
+  /** Where to write the markdown summary, or null for no summary. */
+  summaryPath: string | null;
+  /** Failed optional-source fetches; the summary lists them as warnings. */
+  fetchWarnings?: FetchFailure[];
+}
+
+/**
+ * Applies the scan results to docs/index.html and the migration pages under
+ * opts.repoRoot. Split from main() so tests can run it against copies of the
+ * real pages without network access.
+ */
+export function runMatrixUpdate(opts: RunMatrixUpdateOptions): void {
+  const { repoRoot, competitorFeatures, competitorProviderCounts, dryRun, summaryPath } = opts;
+  const fetchWarnings = opts.fetchWarnings ?? [];
+  const docsPath = resolve(repoRoot, "docs/index.html");
+
+  // 1. Read current HTML
+  console.log(`\nReading ${docsPath}...`);
+  const html = readFileSync(docsPath, "utf-8");
+
+  // 2. Parse current matrix
   const matrix = parseCurrentMatrix(html);
   console.log(
     `Parsed ${matrix.rows.size} capability rows, ${matrix.headers.length} competitor columns.`,
@@ -1455,73 +1729,94 @@ async function main(): Promise<void> {
     );
   }
 
-  // 4. Compute changes
+  // 3. Compute homepage changes
   const changes = computeChanges(html, matrix, competitorFeatures);
 
-  const summaryPath = parseSummaryArg();
-
-  if (changes.length === 0) {
-    console.log("\nNo changes detected. Competitive matrix is up to date.");
-    if (summaryPath) writeSummary(summaryPath, changes);
-    return;
+  // 4. Collect the row-less detections. They never update a page by
+  // themselves; the summary and the log list them for manual follow-up.
+  const rowless: RowlessDetection[] = [];
+  for (const [compName, features] of competitorFeatures) {
+    for (const label of Object.keys(features)) {
+      if (features[label] && isRowlessRule(label)) {
+        rowless.push({ competitor: compName, capability: label });
+      }
+    }
   }
 
-  console.log(`\n${changes.length} change(s) detected:`);
-  for (const ch of changes) {
-    console.log(`  ${ch.competitor} / ${ch.capability}: ${ch.from} -> ${ch.to}`);
-  }
+  // 5. Compute migration-page updates, only for competitors with an applied
+  // homepage change. When any change is unapplied, no migration page is
+  // computed at all (the guard below); writeMatrixUpdate then throws on it.
+  const { applied, unapplied } = applyChanges(html, changes);
+  const migrationCompetitors = new Set(
+    unapplied.length === 0 ? applied.map((ch) => ch.competitor) : [],
+  );
+  const migrationUpdates: MigrationPageUpdate[] = [];
+  const migrationChanges: MigrationPageChange[] = [];
 
-  if (summaryPath) writeSummary(summaryPath, changes);
-
-  if (DRY_RUN) {
-    console.log("\n[DRY RUN] Would update docs/index.html with the above changes.");
-    console.log("[DRY RUN] Would also update migration pages for changed competitors.");
-    return;
-  }
-
-  // 5. Apply changes to index.html
-  const { html: updated } = applyChanges(html, changes);
-  writeFileSync(DOCS_PATH, updated, "utf-8");
-  console.log("\nUpdated docs/index.html successfully.");
-
-  // 6. Update migration pages for competitors with changes
-  const docsDir = resolve(import.meta.dirname ?? __dirname, "..");
-  const updatedCompetitors = new Set(changes.map((ch) => ch.competitor));
-
-  for (const compName of updatedCompetitors) {
+  for (const compName of migrationCompetitors) {
     const migrationPageRelPath = COMPETITOR_MIGRATION_PAGES[compName];
     if (!migrationPageRelPath) {
       console.log(`  No migration page mapped for ${compName}, skipping.`);
       continue;
     }
-
-    const migrationPagePath = resolve(docsDir, migrationPageRelPath);
+    const migrationPagePath = resolve(repoRoot, migrationPageRelPath);
     if (!existsSync(migrationPagePath)) {
       console.log(`  Migration page not found: ${migrationPagePath}, skipping.`);
       continue;
     }
-
-    const migrationHtml = readFileSync(migrationPagePath, "utf-8");
-    const features = competitorFeatures.get(compName) ?? {};
-    const provCount = competitorProviderCounts.get(compName) ?? 0;
-
-    const { html: updatedMigration, changes: migrationChanges } = updateMigrationPage(
-      migrationHtml,
+    const result = updateMigrationPage(
+      readFileSync(migrationPagePath, "utf-8"),
       compName,
-      features,
-      provCount,
+      competitorFeatures.get(compName) ?? {},
+      competitorProviderCounts.get(compName) ?? 0,
     );
-
-    if (migrationChanges.length > 0) {
-      writeFileSync(migrationPagePath, updatedMigration, "utf-8");
-      console.log(`\nUpdated ${migrationPageRelPath}:`);
-      for (const ch of migrationChanges) {
-        console.log(`  ${ch}`);
+    if (result.changes.length > 0) {
+      migrationUpdates.push({
+        path: migrationPagePath,
+        relPath: migrationPageRelPath,
+        html: result.html,
+        changes: result.changes,
+      });
+      for (const change of result.changes) {
+        migrationChanges.push({ page: migrationPageRelPath, change });
       }
-    } else {
-      console.log(`\n${migrationPageRelPath}: no migration page changes needed.`);
     }
   }
+
+  // 6. Report
+  if (changes.length === 0 && migrationChanges.length === 0 && rowless.length === 0) {
+    console.log("\nNo changes detected. Competitive matrix is up to date.");
+  } else if (changes.length === 0) {
+    console.log("\nNo homepage matrix changes detected.");
+  } else {
+    console.log(`\n${changes.length} homepage change(s) detected:`);
+    for (const ch of changes) {
+      console.log(`  ${ch.competitor} / ${ch.capability}: ${ch.from} -> ${ch.to}`);
+    }
+  }
+  if (migrationChanges.length > 0) {
+    console.log(`${migrationChanges.length} migration page change(s) detected:`);
+    for (const mc of migrationChanges) console.log(`  ${mc.page}: ${mc.change}`);
+  }
+  if (rowless.length > 0) {
+    console.log(`${rowless.length} row-less detection(s) to check by hand (no homepage row):`);
+    for (const r of rowless) console.log(`  ${r.competitor} / ${r.capability}`);
+  }
+
+  // 7. Write the homepage, then the migration pages, then the summary of what
+  // was written. This throws before any docs file is written when a computed
+  // homepage change cannot be placed, and names the files already written
+  // when a write fails partway.
+  writeMatrixUpdate({
+    html,
+    changes,
+    docsPath,
+    summaryPath,
+    dryRun,
+    migrationUpdates,
+    rowless,
+    fetchWarnings,
+  });
 }
 
 // Only run when executed directly as a script (not when imported by tests).
