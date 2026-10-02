@@ -84,6 +84,14 @@
           </tbody>
         </table>
 
+        <p>
+          OpenAI image generation and Gemini Imagen requests accept a string or a nonempty array of
+          content parts for <code>prompt</code>. Each part must be an object with a string
+          <code>type</code>. If a part includes <code>text</code>, that value must be a string.
+          Mixed parts, nontext parts, and empty text remain accepted. Unsupported values return HTTP
+          400 before fixture matching and do not consume a fixture sequence position.
+        </p>
+
         <h2>Unit Test: Single Image URL</h2>
         <p>
           Using the programmatic API with vitest, register a fixture and assert on the response.
