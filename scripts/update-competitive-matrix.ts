@@ -16,6 +16,7 @@
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+import { decodeHTML } from "entities";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -623,9 +624,87 @@ function replaceProviderCount(text: string, detectedCount: number): string {
 
 // ── HTML Matrix Parsing & Updating ───────────────────────────────────────────
 
+/** One cell (<th> or <td>) of a table row. */
+interface RowCell {
+  /** The cell's opening tag, e.g. `<td class="col-aimock">` */
+  open: string;
+  /** The cell's inner HTML, untrimmed */
+  inner: string;
+}
+
+/**
+ * Splits a <tr>'s inner HTML into its cells in order. The homepage labels
+ * each row with a <th scope="row"> and uses <td> for the data cells, so both
+ * tags count as cells.
+ */
+function splitRowCells(trInner: string): RowCell[] {
+  const cells: RowCell[] = [];
+  const cellRe = /(<(th|td)\b[^>]*>)([\s\S]*?)<\/\2>/g;
+  let m: RegExpExecArray | null;
+  while ((m = cellRe.exec(trInner)) !== null) {
+    cells.push({ open: m[1], inner: m[3] });
+  }
+  return cells;
+}
+
+interface HeaderLink {
+  /**
+   * The link text with character references decoded, like a row label. Markup
+   * inside the link text is kept, so such a header matches no competitor and
+   * the scan reports it instead of guessing.
+   */
+  name: string;
+  /** The link's href attribute, raw, or undefined when it has none. */
+  href: string | undefined;
+}
+
+/**
+ * Returns the first <a> link in a header cell, or null when the cell has none.
+ * `<a\b` with a following space or `>` matches only an <a> tag, never <abbr>
+ * or another tag that starts with "a". The name is decoded with the same
+ * decoder as row labels, so a header such as "Search &amp; Co" matches the
+ * competitor name "Search & Co".
+ */
+function headerCellLink(cell: RowCell): HeaderLink | null {
+  const link = cell.inner.match(/<a(?=[\s>])([^>]*)>([\s\S]*?)<\/a>/);
+  if (!link) return null;
+  return {
+    name: decodeHTML(link[2]).trim(),
+    href: link[1].match(/\bhref="([^"]*)"/)?.[1],
+  };
+}
+
+/**
+ * Returns the <thead> header cells' links in page order (null for a cell with
+ * no link, such as the "Capability" column). The array index is the cell index
+ * within every body row.
+ */
+function parseHeaderLinks(tableHtml: string): (HeaderLink | null)[] {
+  const thead = tableHtml.match(/<thead>([\s\S]*?)<\/thead>/)?.[1] ?? "";
+  const cells = splitRowCells(thead);
+  return cells.map(headerCellLink);
+}
+
+/**
+ * Reads the column names from the table's <thead>: the decoded link text of
+ * each header cell, or null for a header with no link (the "Capability"
+ * column). The array index is the cell index within every body row.
+ */
+function parseHeaderColumns(tableHtml: string): (string | null)[] {
+  return parseHeaderLinks(tableHtml).map((link) => link?.name ?? null);
+}
+
+/**
+ * Returns a row's label (its first cell) as plain text, with HTML character
+ * references decoded, so rules and lookups use the text a reader sees.
+ */
+function rowLabelText(cell: RowCell): string {
+  return decodeHTML(cell.inner).trim();
+}
+
 /**
  * Parses the comparison table from docs/index.html.
- * Returns a map: competitorName -> { rowLabel -> cellText }
+ * Returns the competitor headers and a map: plain-text rowLabel -> { header -> cell inner HTML }
  */
 export function parseCurrentMatrix(html: string): {
   headers: string[];
@@ -638,35 +717,25 @@ export function parseCurrentMatrix(html: string): {
   }
   const tableHtml = tableMatch[1];
 
-  // Extract header names (the link text inside each <th>)
-  const thRegex = /<th[^>]*>[\s\S]*?<a[^>]*>(.*?)<\/a[\s\S]*?<\/th>/g;
-  const headers: string[] = [];
-  let m: RegExpExecArray | null;
-  while ((m = thRegex.exec(tableHtml)) !== null) {
-    headers.push(m[1].trim());
-  }
-  // headers[0] = "aimock", headers[1] = "MSW", headers[2..] = competitors
+  const columns = parseHeaderColumns(tableHtml);
+  // headers = ["aimock", "MSW", ...competitors]
+  const headers = columns.filter((c): c is string => c !== null);
 
-  // Extract rows
   const rows = new Map<string, Map<string, string>>();
   const tbody = tableHtml.match(/<tbody>([\s\S]*?)<\/tbody>/)?.[1] ?? "";
+  const trIter = /<tr\b[^>]*>([\s\S]*?)<\/tr>/g;
   let tr: RegExpExecArray | null;
-  const trIter = new RegExp(/<tr>([\s\S]*?)<\/tr>/g);
 
   while ((tr = trIter.exec(tbody)) !== null) {
-    const tds: string[] = [];
-    const tdRegex = /<td[^>]*>([\s\S]*?)<\/td>/g;
-    let td: RegExpExecArray | null;
-    while ((td = tdRegex.exec(tr[1])) !== null) {
-      tds.push(td[1].trim());
-    }
-    if (tds.length < 2) continue;
+    const cells = splitRowCells(tr[1]);
+    if (cells.length === 0) continue;
 
-    const rowLabel = tds[0];
+    // The first cell (<th scope="row"> on the homepage) is the row label.
+    const rowLabel = rowLabelText(cells[0]);
     const rowMap = new Map<string, string>();
-    // tds[1] = aimock, tds[2] = MSW, tds[3..5] = competitors
-    for (let i = 1; i < tds.length && i - 1 < headers.length; i++) {
-      rowMap.set(headers[i - 1], tds[i]);
+    for (let i = 1; i < cells.length; i++) {
+      const name = columns[i];
+      if (name !== null) rowMap.set(name, cells[i].inner.trim());
     }
     rows.set(rowLabel, rowMap);
   }
