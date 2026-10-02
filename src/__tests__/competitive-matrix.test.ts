@@ -595,7 +595,7 @@ describe("applyChanges with actual HTML cell structure", () => {
       { competitor: "VidaiMock", capability: "WebSocket APIs", from: "No", to: "Yes" },
     ];
 
-    const result = applyChanges(ACTUAL_HTML_MATRIX, changes);
+    const result = applyChanges(ACTUAL_HTML_MATRIX, changes).html;
 
     // VidaiMock's WebSocket APIs cell should now be yes
     // Parse to verify only VidaiMock column changed
@@ -615,7 +615,7 @@ describe("applyChanges with actual HTML cell structure", () => {
       { competitor: "VidaiMock", capability: "WebSocket APIs", from: "No", to: "Yes" },
     ];
 
-    const result = applyChanges(ACTUAL_HTML_MATRIX, changes);
+    const result = applyChanges(ACTUAL_HTML_MATRIX, changes).html;
 
     const matrix = parseCurrentMatrix(result);
     const embRow = matrix.rows.get("Embeddings API");
@@ -630,7 +630,7 @@ describe("applyChanges with actual HTML cell structure", () => {
       { competitor: "mock-llm", capability: "Embeddings API", from: "No", to: "Yes" },
     ];
 
-    const result = applyChanges(ACTUAL_HTML_MATRIX, changes);
+    const result = applyChanges(ACTUAL_HTML_MATRIX, changes).html;
 
     const matrix = parseCurrentMatrix(result);
     expect(matrix.rows.get("WebSocket APIs")!.get("VidaiMock")).toContain('class="yes"');
@@ -639,7 +639,7 @@ describe("applyChanges with actual HTML cell structure", () => {
 
   it("returns html unchanged when changes array is empty", () => {
     const result = applyChanges(ACTUAL_HTML_MATRIX, []);
-    expect(result).toBe(ACTUAL_HTML_MATRIX);
+    expect(result).toEqual({ html: ACTUAL_HTML_MATRIX, applied: [], unapplied: [] });
   });
 });
 
@@ -781,9 +781,11 @@ describe("Bug 4: literal $-sequences in HTML replacements stay literal", () => {
   it("applyChanges does not duplicate the row when replacement text contains $&", () => {
     const result = applyChanges(matrixWithDollar, [
       { competitor: "VidaiMock", capability: "Docker image", from: "No", to: "Yes" },
-    ]);
+    ]).html;
     // The competitor cell flips to "yes".
-    expect(result).toContain('<td><span class="yes">&#10003;</span></td>');
+    expect(result).toContain(
+      '<td><span class="yes" role="img" aria-label="Yes">&#10003;</span></td>',
+    );
     // The row label must appear exactly once — a $&-expanding replace duplicates it.
     expect((result.match(/Docker image/g) || []).length).toBe(1);
   });

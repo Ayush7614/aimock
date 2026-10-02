@@ -666,6 +666,9 @@ function replaceProviderCount(text: string, detectedCount: number): string {
 
 // ── HTML Matrix Parsing & Updating ───────────────────────────────────────────
 
+/** The page's markup for a "yes" mark in a competitor cell. */
+const YES_MARK = '<span class="yes" role="img" aria-label="Yes">&#10003;</span>';
+
 /** One cell (<th> or <td>) of a table row. */
 interface RowCell {
   /** The cell's opening tag, e.g. `<td class="col-aimock">` */
@@ -888,12 +891,151 @@ export function findUnmatchedCompetitors(matrix: { headers: string[] }): string[
   return COMPETITORS.map((c) => c.name).filter((name) => !matrix.headers.includes(name));
 }
 
+// ── "No" cells: one definition for recognition and flipping ─────────────────
+//
+// A cell shows "no" when it has any no-marker: a `no` class token on the cell
+// tag or on any element inside it, or a cross mark. computeChanges reports a
+// change for every such cell. applyChanges flips only the supported shapes
+// below and reports every other no-cell as unapplied, so a cell is never
+// half-flipped and never dropped without a report.
+//
+// Supported shapes (cell inner HTML, after the cell's open tag):
+//   1. Text, one `<span class="no" ...>` that holds only a cross mark, text.
+//      The span's class must be exactly `no`; other attributes and either
+//      quote style are allowed. The cell tag must not have a `no` class.
+//      The span becomes YES_MARK. The real homepage uses only this shape:
+//      `<td><span class="no" role="img" aria-label="No">&#10007;</span></td>`.
+//   2. Text only, with exactly one cross mark. The cross becomes YES_MARK,
+//      and a `no` class token on the cell tag becomes `yes`.
+// In both shapes the surrounding text must have no tags and no other cross.
+//
+// After a flip, checkFlippedCell must find no no-marker and exactly one yes
+// mark in the result, or the change is reported unapplied.
+
+/** A cross mark: the glyph, or its decimal or hex character reference. */
+const CROSS_SRC = String.raw`(?:✗|&#10007;|&#x2717;)`;
+const CROSS_RE = new RegExp(CROSS_SRC, "gi");
+/** A check mark: the glyph, or its decimal or hex character reference. */
+const CHECK_RE = /✓|&#10003;|&#x2713;/gi;
 /**
- * Updates only competitor cells (not aimock or MSW) where:
- * - The current value indicates "No" (class="no">No</td>)
- * - The feature was detected in the competitor's README
+ * A `no` token in any class attribute, quoted or not. It is deliberately
+ * loose: it also finds the token in a tag the shape patterns cannot read, so
+ * such a cell is still recognized (and then reported as unsupported).
+ */
+const NO_CLASS_RE = /\sclass\s*=\s*["']?(?:[^"'<>]*\s)?no(?![\w-])/i;
+/** One start-tag attribute: name, then an optional double/single/un-quoted value. */
+const ATTR_SRC = String.raw`\s+[^\s"'<>/=]+(?:\s*=\s*(?:"[^"]*"|'[^']*'|[^\s"'=<>\x60]+))?`;
+const ATTR_RE = /\s+([^\s"'<>/=]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>\x60]+)))?/g;
+/** Supported shape 1, anchored to the whole inner HTML. */
+const NO_SPAN_CELL_RE = new RegExp(
+  String.raw`^([^<]*)<span((?:${ATTR_SRC})*)\s*>\s*${CROSS_SRC}\s*</span>([^<]*)$`,
+  "i",
+);
+/** The attribute part of a cell's open tag, e.g. ` class="no"` of `<td class="no">`. */
+const OPEN_TAG_ATTRS_RE = /^<[a-z][\w-]*((?:\s+[^>]*)?)>$/i;
+
+function countMatches(text: string, re: RegExp): number {
+  return text.match(re)?.length ?? 0;
+}
+
+/** The class tokens of a start tag's attribute string; empty when it has none. */
+function classTokens(attrs: string): string[] {
+  for (const m of attrs.matchAll(ATTR_RE)) {
+    if (m[1].toLowerCase() === "class") {
+      return (m[2] ?? m[3] ?? m[4] ?? "").split(/\s+/).filter(Boolean);
+    }
+  }
+  return [];
+}
+
+/** True when the cell (its open tag or inner HTML) has any no-marker. */
+function hasNoMarker(open: string, inner: string): boolean {
+  return NO_CLASS_RE.test(open) || NO_CLASS_RE.test(inner) || countMatches(inner, CROSS_RE) > 0;
+}
+
+export type NoCellShape =
+  /** The cell has no no-marker. */
+  | { kind: "not-no" }
+  /** The cell shows "no" in a shape the flip does not support. */
+  | { kind: "unsupported" }
+  /** The cell shows "no" in a supported shape; `open`/`inner` are the flip result. */
+  | { kind: "flippable"; open: string; inner: string };
+
+/**
+ * Classifies a cell against the supported no-cell shapes (see above) and,
+ * for a supported shape, returns the flipped cell. computeChanges and
+ * applyChanges both use this, so they agree on which cells are "no".
+ */
+export function classifyNoCell(open: string, inner: string): NoCellShape {
+  if (!hasNoMarker(open, inner)) return { kind: "not-no" };
+  const cellAttrs = open.match(OPEN_TAG_ATTRS_RE)?.[1] ?? "";
+  const cellIsNo = classTokens(cellAttrs).includes("no");
+  const textOk = (text: string): boolean => countMatches(text, CROSS_RE) === 0;
+
+  const span = inner.match(NO_SPAN_CELL_RE);
+  if (span) {
+    const [, before, spanAttrs, after] = span;
+    const spanClasses = classTokens(spanAttrs);
+    if (
+      !cellIsNo &&
+      spanClasses.length === 1 &&
+      spanClasses[0] === "no" &&
+      textOk(before) &&
+      textOk(after)
+    ) {
+      return { kind: "flippable", open, inner: before + YES_MARK + after };
+    }
+    return { kind: "unsupported" };
+  }
+
+  if (!inner.includes("<") && countMatches(inner, CROSS_RE) === 1) {
+    // Function-form replacement keeps YES_MARK literal for String.replace.
+    const flipped = inner.replace(new RegExp(CROSS_SRC, "i"), () => YES_MARK);
+    return { kind: "flippable", open: cellIsNo ? flipCellOpenTag(open) : open, inner: flipped };
+  }
+  return { kind: "unsupported" };
+}
+
+/** True when a flipped cell has no no-marker and exactly one yes mark. */
+function checkFlippedCell(open: string, inner: string): boolean {
+  return (
+    !hasNoMarker(open, inner) &&
+    inner.split(YES_MARK).length === 2 &&
+    countMatches(inner, CHECK_RE) === 1
+  );
+}
+
+/**
+ * Reads every body row of the comparison table as its cells, keyed by the
+ * row's plain-text label, with the header columns. Null when the page has no
+ * comparison table.
+ */
+function readTableCells(
+  html: string,
+): { columns: (string | null)[]; rows: Map<string, RowCell[]> } | null {
+  const tableHtml = html.match(/<table class="comparison-table">([\s\S]*?)<\/table>/)?.[1];
+  if (tableHtml === undefined) return null;
+  const columns = parseHeaderColumns(tableHtml);
+  const rows = new Map<string, RowCell[]>();
+  const tbody = tableHtml.match(/<tbody>([\s\S]*?)<\/tbody>/)?.[1] ?? "";
+  for (const tr of tbody.matchAll(/<tr\b[^>]*>([\s\S]*?)<\/tr>/g)) {
+    const cells = splitRowCells(tr[1]);
+    if (cells.length > 0) rows.set(rowLabelText(cells[0]), cells);
+  }
+  return { columns, rows };
+}
+
+/**
+ * Computes the "No" -> "Yes" changes for the competitors in
+ * competitorFeatures (not aimock or MSW): one change for each detected feature
+ * whose matrix row exists and whose current cell shows "no". A cell shows
+ * "no" when it has a no-marker (a `no` class token on the cell tag or on an
+ * element inside it, or a cross mark). The cell's open tag is read from
+ * `html`, so a `<td class="no">` with no inner marker counts.
  *
- * Only upgrades "No" -> "Yes", never downgrades.
+ * Every "no" cell is reported, whether or not its shape is one applyChanges
+ * can flip; applyChanges reports an unsupported shape as unapplied.
+ * It does not modify the HTML; applyChanges does that. Never downgrades.
  */
 export function computeChanges(
   html: string,
@@ -901,6 +1043,7 @@ export function computeChanges(
   competitorFeatures: Map<string, Record<string, boolean>>,
 ): DetectedChange[] {
   const changes: DetectedChange[] = [];
+  const table = readTableCells(html);
 
   for (const [compName, features] of competitorFeatures) {
     for (const [rowLabel, detected] of Object.entries(features)) {
@@ -909,17 +1052,16 @@ export function computeChanges(
       const row = matrix.rows.get(rowLabel);
       if (!row) continue;
 
+      // An empty cell is stored as "", so test for a missing column only.
       const currentCell = row.get(compName);
-      if (!currentCell) continue;
+      if (currentCell === undefined) continue;
 
       // Only upgrade "No" cells — leave "Yes", "Partial", "Manual", etc. alone.
-      // Cells contain inner HTML like '<span class="no">&#10007;</span>',
-      // not bare "No" text, so check for the no-class span or cross-mark entity.
-      if (
-        currentCell.includes('class="no"') ||
-        currentCell.includes("\u2717") ||
-        currentCell.includes("&#10007;")
-      ) {
+      // The open tag comes from the page itself, since the matrix holds only
+      // each cell's inner HTML.
+      const colIdx = table?.columns.indexOf(compName) ?? -1;
+      const open = (colIdx > 0 && table?.rows.get(rowLabel)?.[colIdx]?.open) || "";
+      if (classifyNoCell(open, currentCell).kind !== "not-no") {
         changes.push({
           competitor: compName,
           capability: rowLabel,
@@ -933,80 +1075,149 @@ export function computeChanges(
   return changes;
 }
 
+/** Why applyChanges could not place a change in the homepage table. */
+export type UnappliedReason =
+  /** No <thead> column has the competitor's name. */
+  | "unknown-competitor"
+  /** No body row has the capability as its label. */
+  | "row-not-found"
+  /** The row exists but the competitor's cell is not in the "no" state. */
+  | "cell-not-no"
+  /** The cell shows "no", but not in a shape applyChanges can flip. */
+  | "unsupported-no-cell"
+  /** The flipped cell still had a no-marker or not exactly one yes mark. */
+  | "flip-check-failed";
+
+export interface UnappliedChange {
+  change: DetectedChange;
+  reason: UnappliedReason;
+}
+
+export interface ApplyChangesResult {
+  html: string;
+  /** Changes whose cell was flipped, in input order. */
+  applied: DetectedChange[];
+  /** Changes that could not be placed, in input order, with the reason. */
+  unapplied: UnappliedChange[];
+}
+
 /**
- * Applies detected changes to the HTML string by finding the exact table cells
- * and replacing them.
+ * Applies detected changes to the HTML string. Each target cell is located by
+ * its row label (the row's first cell) and its column (the <thead> header
+ * with the competitor's name). Only cells in a supported no-cell shape are
+ * flipped (see classifyNoCell): the cell's one "no" mark becomes the page's
+ * "yes" mark, and any other text in the cell is kept. A "no" cell in any
+ * other shape is left unchanged and reported as "unsupported-no-cell". Each
+ * flip is then checked (checkFlippedCell); a result that still shows "no", or
+ * does not have exactly one yes mark, is discarded and reported as
+ * "flip-check-failed".
+ *
+ * Returns the updated HTML together with the changes that were applied and
+ * the changes that could not be placed, so the caller never reports a change
+ * the page does not show. Throws, naming the row, when a body row's cell count
+ * does not match the header or a cell has colspan (see assertRowMatchesHeader),
+ * and when a header cell has colspan (see parseHeaderLinks).
  */
-export function applyChanges(html: string, changes: DetectedChange[]): string {
-  if (changes.length === 0) return html;
+export function applyChanges(html: string, changes: DetectedChange[]): ApplyChangesResult {
+  if (changes.length === 0) return { html, applied: [], unapplied: [] };
 
-  // We need to find each specific cell. The approach: locate each <tr> by its
-  // first <td> content, then find the Nth <td> matching the competitor column.
-
-  // First, determine column indices for competitors
   const tableMatch = html.match(/<table class="comparison-table">([\s\S]*?)<\/table>/);
-  if (!tableMatch) return html;
-
-  // Re-parse headers to get column positions
-  const theadMatch = tableMatch[1].match(/<thead>([\s\S]*?)<\/thead>/);
-  if (!theadMatch) return html;
-
-  const thRegex = /<th[^>]*>[\s\S]*?<a[^>]*>(.*?)<\/a[\s\S]*?<\/th>/g;
-  const headers: string[] = [];
-  let m: RegExpExecArray | null;
-  while ((m = thRegex.exec(theadMatch[1])) !== null) {
-    headers.push(m[1].trim());
+  if (!tableMatch) {
+    return {
+      html,
+      applied: [],
+      unapplied: changes.map((change) => ({ change, reason: "row-not-found" as const })),
+    };
   }
-  // Column indices: "Capability" = 0 (no header link), then aimock=1, MSW=2,
-  // VidaiMock=3, mock-llm=4, piyook/llm-mock=5
-  // In the <td> array: index 0 = capability, 1 = aimock, 2 = MSW, 3+ = competitors
-  const compColumnIndex = (name: string): number => {
-    const idx = headers.indexOf(name);
-    return idx === -1 ? -1 : idx + 1; // +1 because first <td> is the row label
-  };
+  const fullTable = tableMatch[0];
+  const columns = parseHeaderColumns(tableMatch[1]);
 
-  let result = html;
+  // rowLabel -> cell indices to flip
+  const targets = new Map<string, Set<number>>();
+  const colIdxByChange = changes.map((change) => {
+    const colIdx = columns.indexOf(change.competitor);
+    if (colIdx <= 0) return -1; // unknown competitor, or the label column
+    if (!targets.has(change.capability)) targets.set(change.capability, new Set());
+    targets.get(change.capability)!.add(colIdx);
+    return colIdx;
+  });
 
-  for (const change of changes) {
-    const colIdx = compColumnIndex(change.competitor);
-    if (colIdx === -1) continue;
+  // What the table walk actually found and flipped.
+  const rowsSeen = new Set<string>();
+  const flipped = new Set<string>(); // `${rowLabel}\0${cellIdx}`
+  const refused = new Map<string, UnappliedReason>(); // no-cells left unflipped
+  const cellKey = (rowLabel: string, idx: number): string => `${rowLabel}\0${idx}`;
 
-    // Find the <tr> containing this capability row
-    // We search for the row by its label in the first <td>
-    const rowPattern = new RegExp(
-      `(<tr>\\s*<td>\\s*${escapeRegex(change.capability)}\\s*</td>)([\\s\\S]*?)(</tr>)`,
-    );
-    const rowMatch = result.match(rowPattern);
-    if (!rowMatch) continue;
+  const updatedTable =
+    targets.size === 0
+      ? fullTable
+      : fullTable.replace(
+          /(<tbody>)([\s\S]*?)(<\/tbody>)/,
+          (_tbodyMatch, tbodyOpen: string, tbodyInner: string, tbodyClose: string) => {
+            const newInner = tbodyInner.replace(
+              /(<tr\b[^>]*>)([\s\S]*?)(<\/tr>)/g,
+              (trMatch, trOpen: string, trInner: string, trClose: string) => {
+                const cells = splitRowCells(trInner);
+                if (cells.length === 0) return trMatch;
+                const rowLabel = rowLabelText(cells[0]);
+                // Same check as parseCurrentMatrix, on every body row: a cell
+                // index is only a column index when the row matches the header.
+                assertRowMatchesHeader(rowLabel, cells, columns.length);
+                const cols = targets.get(rowLabel);
+                if (!cols) return trMatch;
+                rowsSeen.add(rowLabel);
 
-    const prefix = rowMatch[1];
-    const cellsHtml = rowMatch[2];
-    const suffix = rowMatch[3];
+                let cellIdx = 0;
+                const newTrInner = trInner.replace(
+                  /(<(th|td)\b[^>]*>)([\s\S]*?)(<\/\2>)/g,
+                  (cellMatch, open: string, _tag: string, content: string, close: string) => {
+                    const idx = cellIdx++;
+                    if (!cols.has(idx)) return cellMatch;
+                    const shape = classifyNoCell(open, content);
+                    if (shape.kind === "not-no") return cellMatch;
+                    if (shape.kind === "unsupported") {
+                      refused.set(cellKey(rowLabel, idx), "unsupported-no-cell");
+                      return cellMatch;
+                    }
+                    if (!checkFlippedCell(shape.open, shape.inner)) {
+                      refused.set(cellKey(rowLabel, idx), "flip-check-failed");
+                      return cellMatch;
+                    }
+                    flipped.add(cellKey(rowLabel, idx));
+                    return shape.open + shape.inner + close;
+                  },
+                );
+                return trOpen + newTrInner + trClose;
+              },
+            );
+            return tbodyOpen + newInner + tbodyClose;
+          },
+        );
 
-    // Find the Nth <td> in cellsHtml (colIdx - 1 because the first <td> is already in prefix).
-    // Actual cells use <td><span class="no">&#10007;</span></td> (class is on span, not td),
-    // so we match all <td>...</td> and check inner content for no-class spans.
-    const targetTdIdx = colIdx - 1; // 0-based within the remaining cells
-    let tdCount = 0;
-    const tdReplace = cellsHtml.replace(/<td[^>]*>([\s\S]*?)<\/td>/g, (fullMatch, content) => {
-      const currentIdx = tdCount++;
-      if (
-        currentIdx === targetTdIdx &&
-        (content.includes('class="no"') ||
-          content.includes("\u2717") ||
-          content.includes("&#10007;"))
-      ) {
-        return `<td><span class="yes">&#10003;</span></td>`;
-      }
-      return fullMatch;
-    });
+  const applied: DetectedChange[] = [];
+  const unapplied: UnappliedChange[] = [];
+  changes.forEach((change, i) => {
+    const colIdx = colIdxByChange[i];
+    if (colIdx < 0) unapplied.push({ change, reason: "unknown-competitor" });
+    else if (!rowsSeen.has(change.capability)) unapplied.push({ change, reason: "row-not-found" });
+    else if (!flipped.has(cellKey(change.capability, colIdx))) {
+      const reason = refused.get(cellKey(change.capability, colIdx)) ?? "cell-not-no";
+      unapplied.push({ change, reason });
+    } else applied.push(change);
+  });
 
-    // Function-form replacement keeps the HTML-derived text literal so any
-    // $ / $& / $1 in the row is not interpreted by String.replace.
-    result = result.replace(rowPattern, () => prefix + tdReplace + suffix);
-  }
+  // Function-form replacement keeps the HTML-derived text literal so any
+  // $ / $& / $1 in the table is not interpreted by String.replace.
+  return { html: html.replace(fullTable, () => updatedTable), applied, unapplied };
+}
 
-  return result;
+/** Changes a `no` token in the cell tag's class attribute to `yes`. */
+function flipCellOpenTag(open: string): string {
+  return open.replace(
+    /(\sclass\s*=\s*)(["'])([^"']*)\2/i,
+    (_m, pre: string, quote: string, classes: string) =>
+      pre + quote + classes.replace(/(^|\s)no(?=\s|$)/, "$1yes") + quote,
+  );
 }
 
 function escapeRegex(str: string): string {
@@ -1166,7 +1377,7 @@ async function main(): Promise<void> {
   }
 
   // 5. Apply changes to index.html
-  const updated = applyChanges(html, changes);
+  const { html: updated } = applyChanges(html, changes);
   writeFileSync(DOCS_PATH, updated, "utf-8");
   console.log("\nUpdated docs/index.html successfully.");
 
