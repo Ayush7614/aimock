@@ -119,9 +119,10 @@ interface InteractionsRequest {
   [key: string]: unknown;
 }
 
-// Check only the containers consumed by the selected input variant. Other
-// values retain their existing normalization, including omitted/numeric input.
+// Check unsupported numeric input and containers consumed by the selected variant.
+// Other values retain their existing normalization, including omitted input.
 function validateInteractionsInput(input: unknown): string | null {
+  if (typeof input === "number") return "input must not be a number";
   if (!Array.isArray(input)) return null;
   const first = input[0];
   if (isJsonObject(first) && "role" in first) {

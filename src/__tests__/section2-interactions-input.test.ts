@@ -24,6 +24,7 @@ async function post(server: LLMock, body: unknown) {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
+    signal: AbortSignal.timeout(5000),
   });
   return {
     status: response.status,
@@ -32,33 +33,42 @@ async function post(server: LLMock, body: unknown) {
   };
 }
 
-// Existing numeric input is ignored; tightening this behavior is deferred.
-test("deferred numeric input characterization", async () => {
-  const server = await start();
-  const result = await post(server, { input: 42, stream: false });
-  observe({ cell: "C08-input-42", result, messages: server.getLastRequest()?.body });
-  expect(result.status).toBe(200);
-  expect(result.text).toContain("first-result");
-  expect(server.getLastRequest()?.body).toMatchObject({ messages: [] });
-});
+for (const stream of [false, true]) {
+  test.each([42, 0, 1, -1])(
+    `numeric input %s rejects before fixture consumption stream=${String(stream)}`,
+    async (input) => {
+      await expectRejectedInput(`R09-input-${input}`, input, stream, "input must not be a number");
+    },
+  );
+}
 
 const malformed = [
   { id: "C08-input-null-item", input: [null] },
   { id: "C08-input-turn-string", input: [{ role: "user", content: "bad" }] },
 ];
-async function expectRejectedInput(id: string, input: unknown, stream: false | undefined) {
+async function expectRejectedInput(
+  id: string,
+  input: unknown,
+  stream: boolean | undefined,
+  message?: string,
+) {
   const server = await start();
-  const result = await post(server, { input, stream });
+  const result = await post(server, { model: "gemini-2.0-flash", input, stream });
   const journals = server.getRequests();
   const next = await post(server, { input: "hello", stream: false });
   observe({ cell: id, stream: stream ?? "default", result, journals, next });
-  expect(next.status).toBe(200);
-  expect(next.text).toContain("first-result");
-  expect(journals.every((entry) => entry.response.fixture === null)).toBe(true);
   expect(result.status).toBe(400);
+  expect(next.status).toBe(200);
+  expect(JSON.parse(next.text)).toMatchObject({
+    status: "completed",
+    output_text: "first-result",
+    steps: [{ type: "model_output", content: [{ type: "text", text: "first-result" }] }],
+  });
+  expect(journals).toHaveLength(1);
+  expect(journals[0].response.fixture).toBeNull();
   expect(result.contentType).toContain("application/json");
   expect(JSON.parse(result.text)).toMatchObject({
-    error: { code: "INVALID_ARGUMENT", message: expect.stringContaining("input") },
+    error: { code: "INVALID_ARGUMENT", message: message ?? expect.stringContaining("input") },
   });
 }
 test.each(malformed)(
@@ -146,6 +156,13 @@ const controls: { name: string; request: object; messages: ChatMessage[] }[] = [
     messages: [],
   },
   { name: "absent input", request: {}, messages: [] },
+  { name: "null input", request: { input: null }, messages: [] },
+  { name: "ignored boolean input", request: { input: false }, messages: [] },
+  {
+    name: "ignored Content object input",
+    request: { input: { type: "text", text: "ignored" } },
+    messages: [],
+  },
   {
     name: "empty Step content",
     request: { input: [{ type: "user_input" }, { type: "model_output" }] },
@@ -155,7 +172,7 @@ const controls: { name: string; request: object; messages: ChatMessage[] }[] = [
     ],
   },
 ];
-for (const stream of [undefined, false]) {
+for (const stream of [undefined, false, true]) {
   test.each(controls)(
     `control $name stream=${String(stream)}`,
     async ({ name, request, messages }) => {
