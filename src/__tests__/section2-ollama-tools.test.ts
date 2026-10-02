@@ -28,6 +28,7 @@ async function post(
 ) {
   const response = await fetch(`${server.url}/api/chat`, {
     method: "POST",
+    signal: AbortSignal.timeout(5_000),
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ model: "llama3", messages: inputMessages, stream, tools }),
   });
@@ -61,23 +62,70 @@ test.each([undefined, null, []])("control optional tools %j", async (tools) => {
   expect(JSON.parse(result.text)).toMatchObject({ message: { content: "plain" }, done: true });
 });
 
-test("control shorthand retains generic validation acceptance and characterizes Ollama failure", async () => {
-  const shorthand = [{ type: "function" }];
-  expect(validateToolsField(shorthand)).toBeNull();
-  const result = await post(await start(), shorthand);
-  // Phase A characterization only: no new rejection or shorthand normalization is authorized.
-  expect(result.status).toBe(500);
-});
+function expectTextResponse(
+  result: Awaited<ReturnType<typeof post>>,
+  stream: boolean,
+  content: string,
+) {
+  expect(result.status).toBe(200);
+  if (stream) {
+    const chunks = result.text
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    expect(chunks.map((chunk) => chunk.message.content).join("")).toBe(content);
+    expect(chunks.at(-1)).toMatchObject({ done: true, done_reason: "stop" });
+  } else {
+    expect(JSON.parse(result.text)).toMatchObject({ message: { content }, done: true });
+  }
+}
+
+const shorthandCases = [false, true].flatMap((stream) =>
+  ["model", "tool"].map((matcher) => ({ stream, matcher })),
+);
+
+test.each(shorthandCases)(
+  "missing function rejects before consuming $matcher fixture (stream=$stream)",
+  async ({ stream, matcher }) => {
+    const shorthand = [{ type: "function" }];
+    expect(validateToolsField(shorthand)).toBeNull();
+    const server = await start();
+    server
+      .clearFixtures()
+      .on(
+        matcher === "model"
+          ? { model: "llama3", sequenceIndex: 0 }
+          : { toolName: "f", sequenceIndex: 0 },
+        { content: "sentinel" },
+      );
+    server.on({ model: "llama3" }, { content: "fallback" });
+    const result = await post(server, shorthand, stream);
+    expectTextResponse(await post(server, nested, stream), stream, "sentinel");
+    expect(result.status).toBe(400);
+    expect(JSON.parse(result.text)).toEqual({
+      error: {
+        message: "Invalid request: tools[0].function must be an object",
+        type: "invalid_request_error",
+      },
+    });
+  },
+);
+
+const toleratedFunctions = ["x", 1, false, []].flatMap((func) =>
+  [false, true].map((stream) => ({ func, stream })),
+);
+
+test.each(toleratedFunctions)(
+  "control non-null function $func remains accepted (stream=$stream)",
+  async ({ func, stream }) => {
+    const result = await post(await start(), [{ type: "function", function: func }], stream);
+    expectTextResponse(result, stream, "plain");
+  },
+);
 
 test("control nested tools complete NDJSON", async () => {
   const result = await post(await start(), nested, true);
-  expect(result.status).toBe(200);
-  const chunks = result.text
-    .trim()
-    .split("\n")
-    .map((line) => JSON.parse(line));
-  expect(chunks.map((chunk) => chunk.message.content).join("")).toBe("first");
-  expect(chunks.at(-1)).toMatchObject({ done: true, done_reason: "stop" });
+  expectTextResponse(result, true, "first");
 });
 
 test("control Ollama output tool-call arguments remain objects", async () => {
