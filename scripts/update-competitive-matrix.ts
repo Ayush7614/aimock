@@ -65,7 +65,11 @@ export const FEATURE_RULES = [
   },
   {
     rowLabel: "Responses API SSE",
-    keywords: ["responses", "/v1/responses", "response.create"],
+    // Evidence of the Responses API itself. The plain word "responses" is
+    // ordinary English, and the Realtime event "response.create" is not the
+    // Responses API. "v1/responses" has no leading slash so it also matches
+    // inside a URL such as localhost:8100/v1/responses.
+    keywords: ["v1/responses", "responses api", "responses\\.create"],
   },
   {
     rowLabel: "Claude Messages API",
