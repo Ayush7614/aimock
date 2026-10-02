@@ -438,19 +438,50 @@ describe("the 2026-09-24..30 model-family wave is classified", () => {
     ).toEqual([]);
   });
 
-  it("gemini-3.8-flash-tts and gemini-3.8-flash-lite-tts are EXCLUDED", () => {
-    expect(excludeFamilies.gemini.has("gemini-3.8-flash-tts")).toBe(true);
-    expect(excludeFamilies.gemini.has("gemini-3.8-flash-lite-tts")).toBe(true);
+  it("gemini-3.8-flash-tts is EXCLUDED in a /models-shaped payload", () => {
+    expect(isClassifiedFamily("gemini-3.8-flash-tts", "gemini")).toBe(true);
     expect(
       unclassifiedFamilies(
         [
           "gemini-3.8-flash", // the text tier, already included
           "gemini-3.8-flash-tts",
-          "gemini-3.8-flash-lite-tts",
+          "gemini-3.8-flash-tts-2026-09-24", // dated snapshot collapses onto the family
         ],
         "gemini",
       ),
     ).toEqual([]);
+  });
+
+  it("gemini-3.8-flash-lite-tts is EXCLUDED in a /models-shaped payload", () => {
+    expect(isClassifiedFamily("gemini-3.8-flash-lite-tts", "gemini")).toBe(true);
+    expect(
+      unclassifiedFamilies(
+        [
+          "gemini-3.8-flash", // the text tier, already included
+          "gemini-3.8-flash-lite-tts",
+          "gemini-3.8-flash-lite-tts-2026-09-24", // dated snapshot collapses onto the family
+        ],
+        "gemini",
+      ),
+    ).toEqual([]);
+  });
+
+  it("the gemini-3.8 tts exclude keys do not classify a prefix or an extension", () => {
+    // Forward direction: `gemini-3.8-flash-lite` is a strict PREFIX of the
+    // excluded `gemini-3.8-flash-lite-tts` and is itself unclassified — it must
+    // stay reported. Reverse direction: a family that merely EXTENDS an
+    // excluded key must not be swallowed either (a `startsWith`-shaped bug).
+    expect(isClassifiedFamily("gemini-3.8-flash-lite", "gemini")).toBe(false);
+    expect(isClassifiedFamily("gemini-3.8-flash-tts-hd", "gemini")).toBe(false);
+    expect(
+      unclassifiedFamilies(
+        ["gemini-3.8-flash-tts", "gemini-3.8-flash-lite-tts", "gemini-3.8-flash-lite"],
+        "gemini",
+      ),
+    ).toEqual(["gemini-3.8-flash-lite"]);
+    expect(unclassifiedFamilies(["gemini-3.8-flash-tts-hd"], "gemini")).toEqual([
+      "gemini-3.8-flash-tts-hd",
+    ]);
   });
 
   it("no key in this wave classifies a neighbouring family", () => {
