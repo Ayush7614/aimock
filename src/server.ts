@@ -3366,6 +3366,7 @@ export async function createServerWithResolvedAuth(
           defaults,
           setCorsHeaders,
           embeddingsProvider,
+          originalPathname === EMBEDDINGS_PATH,
         );
       } catch (err: unknown) {
         routeError(req, res, err, pathname);
