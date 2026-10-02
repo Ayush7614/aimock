@@ -38,15 +38,17 @@ Rationale: text-to-speech, the same category as the enumerated
 pattern-excluded `gemini-3.1-flash-tts-preview`. The id ends in `-tts`, not
 `-preview`, so PREVIEW_FAMILY cannot reach it and it must be enumerated.
 
-Evidence (live, 2026-10-02): `GET v1beta/models/<id>` returned 200 with
-`displayName: "Gemini 3.8 Flash Lite TTS"`, `inputTokenLimit: 8192` (the text tier
-`gemini-3.8-flash` declares 1048576; `gemini-2.5-flash-preview-tts` declares
-8192), and `supportedGenerationMethods: [generateContent, countTokens,
-batchGenerateContent]`. The methods list alone looks like a text model, so it
-is not the deciding fact (same trap as `lyria-3.5`). A plain text
-`generateContent` call to `gemini-3.8-flash-tts` returned 200 with one
-`inlineData` part, `mimeType: "audio/wav"`, and no text part. It emits audio,
-not a text turn.
+Evidence (live probe of this exact id, 2026-10-02):
+`GET v1beta/models/gemini-3.8-flash-lite-tts` returned 200 with
+`displayName: "Gemini 3.8 Flash Lite TTS"`, `inputTokenLimit: 8192` (the text
+tier `gemini-3.8-flash` declares 1048576; `gemini-2.5-flash-preview-tts`
+declares 8192), `outputTokenLimit: 16384`, and `supportedGenerationMethods:
+[generateContent, countTokens, batchGenerateContent]`. The methods list alone
+looks like a text model, so it is not the deciding fact (same trap as
+`lyria-3.5`). A plain text `generateContent` call to
+`gemini-3.8-flash-lite-tts` returned 200 with one `inlineData` part,
+`mimeType: "audio/wav"`, no text part, and `candidatesTokensDetails`
+`modality: "AUDIO"`. It emits audio, not a text turn.
 
 No `knownVoiceModelFamilies` pairing is needed: that seed set is watched only by
 the OpenAI realtime canary (ws-realtime.drift.ts reads `listOpenAIModels`), and

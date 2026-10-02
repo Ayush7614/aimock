@@ -38,7 +38,7 @@ Rationale: text-to-speech, the same category as the enumerated
 pattern-excluded `gemini-3.1-flash-tts-preview`. The id ends in `-tts`, not
 `-preview`, so PREVIEW_FAMILY cannot reach it and it must be enumerated.
 
-Evidence (live, 2026-10-02): `GET v1beta/models/<id>` returned 200 with
+Evidence (live, 2026-10-02): `GET v1beta/models/gemini-3.8-flash-tts` returned 200 with
 `displayName: "Gemini 3.8 Flash TTS"`, `inputTokenLimit: 8192` (the text tier
 `gemini-3.8-flash` declares 1048576; `gemini-2.5-flash-preview-tts` declares
 8192), and `supportedGenerationMethods: [generateContent, countTokens,

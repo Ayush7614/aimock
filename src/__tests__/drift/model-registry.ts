@@ -527,9 +527,10 @@ export const excludeFamilies: Record<Provider, Set<string>> = {
     // TTS"` / `"Gemini 3.8 Flash Lite TTS"`, and `inputTokenLimit: 8192`
     // (vs 1048576 for the text tier `gemini-3.8-flash`) — identical to
     // `gemini-2.5-flash-preview-tts`. A plain text generateContent call to
-    // `gemini-3.8-flash-tts` returned 200 with a single `inlineData` part,
-    // `mimeType: "audio/wav"`, and no text part (2026-10-02). They emit audio,
-    // not a text turn, so they can never be text-generation drift.
+    // each id (`gemini-3.8-flash-tts` and `gemini-3.8-flash-lite-tts`, each
+    // probed live 2026-10-02) returned 200 with a single `inlineData` part,
+    // `mimeType: "audio/wav"`, and no text part. They emit audio, not a text
+    // turn, so they can never be text-generation drift.
     //
     // No knownVoiceModelFamilies pairing: that seed set is watched only by the
     // OpenAI realtime canary (ws-realtime.drift.ts reads listOpenAIModels), and
