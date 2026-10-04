@@ -7,6 +7,7 @@
 - MCP scenario fakes: a fixture file's `mcpFakes` key scripts MCP tool answers per test id or context, with ordered answers, exact or any-argument matching, scripted tool errors and an optional closed world (`undeclaredTools: "deny"`). A mismatch, an exhausted tool or an undeclared tool under `deny` fails loud with a JSON-RPC error keyed by `error.data.aimock.code`
 - `POST /__aimock/fixtures` accepts an `mcpFakes` key; `fixtures` is optional when it is sent, and the response adds `mcpFakesAdded`. Callers that do not send `mcpFakes` get `{"added": n}` as before
 - `GET /__aimock/mcp/fakes` lists the fakes that apply to a test id and context, with each entry's consumed state
+- MCP requests accept an opt-in `X-AIMock-MCP-Undeclared` header or `?undeclared=` query parameter (`allow` or `deny`) that overrides the undeclared-tool policy for the request, or for the session when sent at `initialize`. With `deny`, every `tools/call` to a tool that no fake declares fails with `MCP_FAKE_NOT_DECLARED`, even on a mount with no fakes loaded, so `onToolCall` handlers and config `result` values do not run
 - The CLI and `aimock validate` accept fixture files that hold only `mcpFakes`. A start with only fakes warns "No LLM fixtures loaded; LLM requests will return 404" and no longer aborts under `--strict` or `--validate-on-load`
 
 ### Changed
@@ -16,11 +17,16 @@
 - MCP journal entries carry `testId` and `context`. `GET /__aimock/journal?testId=` lists an MCP request under the test id bound at `initialize`, or under the decoded header value, instead of `"__default__"` or the encoded string
 - MCP requests read `X-Test-Id` and `X-AIMock-Context`, percent-decoded, to pick fakes. Answers on a mount without fakes do not change
 - An MCP request that sends a test id, context or `X-AIMock-MCP-Undeclared` override more than once on one path (repeated header or query name) gets HTTP 400 `MCP_DUPLICATE_IDENTITY`
+- An MCP request with an `X-AIMock-MCP-Undeclared` or `?undeclared=` value other than `allow` or `deny` gets HTTP 400 `MCP_INVALID_UNDECLARED` (for example `Invalid X-AIMock-MCP-Undeclared header value "zzz": expected allow or deny`). This applies to every MCP request, also on a mount without fakes
+- An MCP `tools/call` whose `name` is not a string (for example `123`) gets the JSON-RPC error `Invalid tool name: expected a string, got number` instead of `Unknown tool: 123`. A missing or empty name still gets `Missing tool name`
+- A JSON-RPC batch POST to an MCP mount is journaled as one entry per message, each with its own `body`, instead of one entry per HTTP request. Journal and `getRequests()` counts go up for batch callers
 - `POST /__aimock/reset`, `DELETE /__aimock/fixtures`, `LLMock.reset()` and `LLMock.clearFixtures()` also unload MCP fakes
 - Under `undeclaredTools: "deny"`, an undeclared tool fails with `MCP_FAKE_NOT_DECLARED` even when an `onToolCall` handler or a config `result` exists for it
 - The recorder's snapshot merge keeps top-level keys it does not own (such as `mcpFakes`) instead of dropping them
 - A bad `mcpFakes` block, a block whose `mount` path is held by a mount that is not an MCP mock, or a `--watch` reload whose `mcpFakes` changed fails the load with a `FixtureLoadError` instead of being skipped. On `--watch` the previous fixtures stay loaded. No effect without `mcpFakes`
 - The free functions `loadFixtureFile` and `loadFixturesFromDir` throw on a file with a top-level `mcpFakes` key; use `loadFixtureFileWithServices` / `loadFixturesFromDirWithServices` or the `LLMock` methods
+- The pytest plugin's `load_fixtures` still raises `requests.HTTPError` when the server answers 400 with a JSON body, but the message is now `aimock rejected fixtures from <path>: <error>`, followed by one line per item of `details`, instead of the default `requests` text
+- `aimock validate --json` always includes `run.mcpFakeBlocks`, which is `0` when no file has `mcpFakes`
 
 ### Fixed
 
