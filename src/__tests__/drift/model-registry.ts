@@ -21,9 +21,14 @@
  *
  *   - `exclude` — families we deliberately DO NOT treat as text-generation drift:
  *     retired/legacy ids, preview-only ids, and non-text families (embeddings,
- *     image, tts/audio/transcribe voice families — the last are the realtime
- *     canary's responsibility in `voice-models.ts`, not this text check). A live
- *     family in this set is expected and generates no drift.
+ *     image, tts/audio/transcribe voice families). OpenAI voice families are
+ *     also watched by the OpenAI realtime canary (`ws-realtime.drift.ts`, which
+ *     checks the OpenAI listing against `voice-models.ts`'s
+ *     `knownVoiceModelFamilies`). No voice canary watches Gemini voice/tts ids:
+ *     the realtime canary never reads the Gemini listing, and the Gemini Live
+ *     leg (`ws-gemini-live.drift.ts`) only picks a `bidiGenerateContent` model
+ *     to exercise the Live protocol shape — it never classifies families. A
+ *     live family in this set is expected and generates no drift.
  *
  * A family MUST NOT appear in both `include` and `exclude` for the same provider
  * (asserted in the unit test) — the two sets partition the "already classified"
@@ -94,8 +99,8 @@ export const includeFamilies: Record<Provider, Set<string>> = {
     "gpt-5.6-terra",
     // gpt-6 named variant (text chat), first listed 2026-08-27. Classified on a
     // DECLARED-CAPABILITY probe, not on the name — "astra" carries no modality
-    // signal, and the /v1/models listing exposes none either (id / owned_by /
-    // created only), so shape alone could not decide this. A minimal
+    // signal, and the /v1/models listing exposes no capability field either,
+    // so shape alone could not decide this. A minimal
     // /v1/chat/completions call returns 200 with `finish_reason: "stop"` and a
     // real assistant turn, byte-for-byte the same shape the already-included
     // `gpt-5.6-luna` returns; the negative control `whisper-1` is refused on the
@@ -186,14 +191,10 @@ export const includeFamilies: Record<Provider, Set<string>> = {
     // `claude-opus-4-1` is of `claude-opus-4` — `display_name: "Claude Fable
     // 5.1"`, `created_at: 2026-08-28`, against Fable 5's 2026-06-07.
     //
-    // Classified on a DECLARED-CAPABILITY probe like the rest of this wave.
-    // Anthropic's /v1/models carries no capability field (id / display_name /
-    // created_at only), so there is no `supportedGenerationMethods` to compare
-    // — but /v1/messages answers the same question directly: a minimal call
-    // returns 200 with `stop_reason: "end_turn"` and a real assistant turn.
-    // Corroborating: all 11 ids on the live listing are text-chat Claude
-    // families, and the canary reported exactly ONE unclassified anthropic
-    // family, so every other live id already normalized into this set.
+    // Classified 2026-09-08 on a live /v1/messages probe: a minimal call
+    // returned 200 with `stop_reason: "end_turn"` and a real assistant turn.
+    // As of 2026-10-05 its /v1/models entry carries a `capabilities` object
+    // that does not list generation methods.
     //
     // Decision: INCLUDE, recorded in
     // drift-proposals/anthropic-claude-fable-5-1-new-family.md.
@@ -220,12 +221,13 @@ export const includeFamilies: Record<Provider, Set<string>> = {
     // release of the already-included `claude-sonnet-5`, exactly as
     // `claude-sonnet-4-5` is of `claude-sonnet-4`.
     //
-    // Classified on DECLARED CAPABILITY plus a live probe (2026-10-02). Its
-    // /v1/models entry now carries a `capabilities` object: `display_name:
-    // "Claude Sonnet 5.5"`, `line: "sonnet"`, `created_at: 2026-09-28`, with
-    // image_input / pdf_input / structured_outputs / thinking / batch all
-    // `supported: true`. A minimal /v1/messages call returned 200,
-    // `stop_reason: "end_turn"` and a real text content block.
+    // Classified by a LIVE PROBE on 2026-10-02: a minimal /v1/messages call
+    // returned 200, `stop_reason: "end_turn"` and a real text content block.
+    // Its /v1/models entry carries `display_name: "Claude Sonnet 5.5"`,
+    // `line: "sonnet"` and `created_at: 2026-09-28` as top-level fields, plus a
+    // `capabilities` object declaring image_input / pdf_input /
+    // structured_outputs / thinking (adaptive) / batch / citations as
+    // supported.
     //
     // Decision: INCLUDE, recorded in
     // drift-proposals/anthropic-claude-sonnet-5-5-new-family.md.
@@ -262,8 +264,9 @@ export const includeFamilies: Record<Provider, Set<string>> = {
 /**
  * Families we deliberately DO NOT count as text-generation drift, per provider:
  * retired/legacy ids, preview-only ids, and non-text families (embeddings,
- * image, and the voice/audio/tts/transcribe families the realtime canary in
- * `voice-models.ts` owns). A live family here is expected, not drift.
+ * image, voice/audio/tts/transcribe). OpenAI voice families are also watched by
+ * the OpenAI realtime canary (`ws-realtime.drift.ts`, against `voice-models.ts`'s
+ * `knownVoiceModelFamilies`). A live family here is expected, not drift.
  */
 export const excludeFamilies: Record<Provider, Set<string>> = {
   openai: familySet("openai", [
@@ -307,7 +310,8 @@ export const excludeFamilies: Record<Provider, Set<string>> = {
     "o3-deep-research",
     "o4-mini-deep-research",
     "gpt-5-search-api",
-    // Voice / audio / tts / transcribe — owned by the realtime canary
+    // Voice / audio / tts / transcribe — classified here; also watched by the
+    // OpenAI realtime canary (ws-realtime.drift.ts)
     "tts-1",
     "tts-1-hd",
     "whisper-1",
@@ -400,7 +404,7 @@ export const excludeFamilies: Record<Provider, Set<string>> = {
     "imagen-4.0-fast-generate",
     "imagen-4.0-generate",
     "imagen-4.0-ultra-generate",
-    // Audio / native-audio (realtime canary domain)
+    // Audio / native-audio (voice, not text)
     "gemini-2.5-flash-native-audio-latest",
     // NOTE: the open-weight Gemma line (`gemma-4-26b-a4b-it`, `gemma-4-31b-it`,
     // and any future variant) is auto-excluded by the GEMMA_FAMILY rule (see
@@ -420,7 +424,7 @@ export const excludeFamilies: Record<Provider, Set<string>> = {
     // Experimental / thinking (kept explicit — historic `-exp`, not `-preview`)
     "gemini-2.0-flash-exp",
     "gemini-2.0-flash-thinking-exp",
-    // Live/full-duplex voice — owned by the realtime canary, not this text check
+    // Live/full-duplex voice — a voice surface, not text; classified only here
     "gemini-live",
     // The Gemini 3.5 Transcribe line, GA 2026-08-26, first observed by the daily
     // /models canary on 2026-08-27 (that later date is the `Detected:` stamp in
@@ -432,9 +436,10 @@ export const excludeFamilies: Record<Provider, Set<string>> = {
     // Google's model card gives both the same signature — input `Audio (up to
     // 1 hour)`, output `Text, Word annotations` — i.e. speech->text only. They
     // emit no chat completion of their own; the text they return is a
-    // transcript of the caller's audio. That is the realtime/audio canary's
-    // domain (voice-models.ts), exactly like `gemini-live` above, and it can
-    // never be TEXT-GENERATION drift.
+    // transcript of the caller's audio. That is a voice/audio surface, exactly
+    // like `gemini-live` above (and, as with it, classified only here — the
+    // realtime canary reads only the OpenAI listing), and it can never be
+    // TEXT-GENERATION drift.
     //
     // `-live` carries a second, independently observed capability fact. The Live
     // leg's discovery filters SOLELY on declared `bidiGenerateContent` (no name
@@ -526,17 +531,21 @@ export const excludeFamilies: Record<Provider, Set<string>> = {
     // so no rule reaches them and they must be enumerated.
     //
     // Classified on the live model, not on the "tts" substring alone, and NOT
-    // on `supportedGenerationMethods` alone: both declare `[generateContent,
-    // countTokens, batchGenerateContent]` — the same shape as a text model, so
-    // a methods-only rule would have argued INCLUDE (the `lyria-3.5` trap
-    // above). Their live entries settle it: `displayName: "Gemini 3.8 Flash
-    // TTS"` / `"Gemini 3.8 Flash Lite TTS"`, and `inputTokenLimit: 8192`
-    // (vs 1048576 for the text tier `gemini-3.8-flash`) — identical to
-    // `gemini-2.5-flash-preview-tts`. A plain text generateContent call to
-    // each id (`gemini-3.8-flash-tts` and `gemini-3.8-flash-lite-tts`, each
-    // probed live 2026-10-02) returned 200 with a single `inlineData` part,
-    // `mimeType: "audio/wav"`, and no text part. They emit audio, not a text
-    // turn, so they can never be text-generation drift.
+    // on `supportedGenerationMethods` alone. Both ids declare `generateContent`
+    // (their list, `[generateContent, countTokens, batchGenerateContent]`, is
+    // the text tier `gemini-3.8-flash`'s list minus `createCachedContent`), so a
+    // methods-only rule would have argued INCLUDE (the `lyria-3.5` trap above).
+    //
+    // The deciding fact is the probe: a plain text generateContent call to each
+    // id returned 200 with a single `inlineData` part, `mimeType: "audio/wav"`,
+    // no text part, and `candidatesTokensDetails` `modality: "AUDIO"`
+    // (`gemini-3.8-flash-lite-tts` probed live 2026-10-02;
+    // `gemini-3.8-flash-tts` probed live 2026-10-02 and re-probed 2026-10-05,
+    // the re-probe recording the `modality: "AUDIO"` field). They emit audio,
+    // not a text turn, so they can never be text-generation drift. The listing
+    // entries corroborate it: `displayName: "Gemini 3.8 Flash TTS"` /
+    // `"Gemini 3.8 Flash Lite TTS"`, and `inputTokenLimit: 8192` (vs 1048576 for the text
+    // tier `gemini-3.8-flash`) — identical to `gemini-2.5-flash-preview-tts`.
     //
     // No knownVoiceModelFamilies pairing: that seed set is watched only by the
     // OpenAI realtime canary (ws-realtime.drift.ts reads listOpenAIModels), and
