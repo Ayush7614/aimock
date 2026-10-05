@@ -319,7 +319,7 @@ describe("the 2026-09-05 model-family wave is classified", () => {
 
 // ---------------------------------------------------------------------------
 // The 2026-09-23 wave — BEHAVIOURAL coverage of the four classifications made
-// for drift PR #477, in the same shape as the block above.
+// for drift PR #478, in the same shape as the block above.
 //
 // `gpt-6-luna`, `gpt-6-sol` and `claude-opus-5-5` were classified INCLUDE and
 // `antigravity-preview-latest` EXCLUDE in model-registry.ts (rationale beside
@@ -395,9 +395,9 @@ describe("the 2026-09-23 model-family wave is classified", () => {
 });
 
 // ---------------------------------------------------------------------------
-// The rest of the 2026-09-23 wave — BEHAVIOURAL coverage of the four families
-// that appeared after #478 was opened (first listed 2026-09-24 .. 2026-09-30),
-// in the same shape as the block above.
+// The 2026-09-24..30 wave — BEHAVIOURAL coverage of the four families first
+// listed 2026-09-24 .. 2026-09-30, after the #478 classification PR for the
+// 2026-09-23 wave was opened. Same shape as the block above.
 //
 // `gpt-6.1-sol` and `claude-sonnet-5-5` were classified INCLUDE and
 // `gemini-3.8-flash-tts` / `gemini-3.8-flash-lite-tts` EXCLUDE in

@@ -42,11 +42,18 @@ Evidence (live, 2026-10-02): `GET v1beta/models/gemini-3.8-flash-tts` returned 2
 `displayName: "Gemini 3.8 Flash TTS"`, `inputTokenLimit: 8192` (the text tier
 `gemini-3.8-flash` declares 1048576; `gemini-2.5-flash-preview-tts` declares
 8192), and `supportedGenerationMethods: [generateContent, countTokens,
-batchGenerateContent]`. The methods list alone looks like a text model, so it
-is not the deciding fact (same trap as `lyria-3.5`). A plain text
+batchGenerateContent]`. The list includes `generateContent` (it is the text
+tier's list minus `createCachedContent`), so a methods-only rule would argue
+INCLUDE, and the methods list is not the deciding fact (same trap as
+`lyria-3.5`). A plain text
 `generateContent` call to `gemini-3.8-flash-tts` returned 200 with one
 `inlineData` part, `mimeType: "audio/wav"`, and no text part. It emits audio,
 not a text turn.
+
+Re-probed live 2026-10-05: the same listing entry also declares
+`outputTokenLimit: 16384`, and the same plain text `generateContent` call
+returned one `inlineData` part (`mimeType: "audio/wav"`, no text part) with
+`candidatesTokensDetails` `modality: "AUDIO"`.
 
 No `knownVoiceModelFamilies` pairing is needed: that seed set is watched only by
 the OpenAI realtime canary (ws-realtime.drift.ts reads `listOpenAIModels`), and

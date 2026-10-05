@@ -43,9 +43,10 @@ Evidence (live probe of this exact id, 2026-10-02):
 `displayName: "Gemini 3.8 Flash Lite TTS"`, `inputTokenLimit: 8192` (the text
 tier `gemini-3.8-flash` declares 1048576; `gemini-2.5-flash-preview-tts`
 declares 8192), `outputTokenLimit: 16384`, and `supportedGenerationMethods:
-[generateContent, countTokens, batchGenerateContent]`. The methods list alone
-looks like a text model, so it is not the deciding fact (same trap as
-`lyria-3.5`). A plain text `generateContent` call to
+[generateContent, countTokens, batchGenerateContent]`. The list includes
+`generateContent` (it is the text tier's list minus `createCachedContent`), so a
+methods-only rule would argue INCLUDE, and the methods list is not the deciding
+fact (same trap as `lyria-3.5`). A plain text `generateContent` call to
 `gemini-3.8-flash-lite-tts` returned 200 with one `inlineData` part,
 `mimeType: "audio/wav"`, no text part, and `candidatesTokensDetails`
 `modality: "AUDIO"`. It emits audio, not a text turn.
