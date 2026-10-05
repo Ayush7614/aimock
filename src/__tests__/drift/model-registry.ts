@@ -111,10 +111,13 @@ export const includeFamilies: Record<Provider, Set<string>> = {
     // `gpt-6-astra` above. No name token places them in an excluded cluster
     // (image / audio / realtime / transcribe / tts / search).
     //
-    // EVIDENCE LIMIT: classified by lineage, not by a fresh probe — no OpenAI
-    // key was available to repeat the /v1/chat/completions call that decided
-    // `gpt-6-astra`, and /v1/models exposes no capability field. The live
-    // canary is what catches it if that inference is wrong.
+    // First classified by lineage on 2026-09-23 (no probe then). Confirmed by
+    // a LIVE PROBE on 2026-10-05: /v1/models exposes no capability field
+    // (`GET /v1/models/<id>` returns only `id` / `object` / `created` /
+    // `owned_by` / `shutdown_date: null`), so the probe is the evidence. A
+    // minimal /v1/chat/completions call to each id returned 200,
+    // `object: "chat.completion"`, `finish_reason: "stop"` and a real
+    // assistant text turn — the same shape `gpt-6-astra` returned.
     //
     // Decision: INCLUDE, recorded in
     // drift-proposals/openai-gpt-6-luna-new-family.md and
@@ -201,11 +204,14 @@ export const includeFamilies: Record<Provider, Set<string>> = {
     // Anthropic's listing is text chat on /v1/messages; the only anthropic
     // excludes are retired ids.
     //
-    // EVIDENCE LIMIT: no /v1/messages probe was run (no Anthropic key was
-    // available), and /v1/models carries no capability field. Same argument as
-    // `claude-opus-5` (72f85f8): on the live listing, base family already
-    // included, and the canary reported exactly ONE unclassified anthropic
-    // family that run.
+    // First classified by lineage on 2026-09-23 (no probe then). Confirmed by
+    // a LIVE PROBE on 2026-10-05: `GET /v1/models/claude-opus-5-5` returned
+    // 200 with `display_name: "Claude Opus 5.5"`, `line: "opus"` and
+    // `created_at: 2026-09-21` as top-level fields, plus a `capabilities`
+    // object declaring image_input / pdf_input / structured_outputs /
+    // thinking (adaptive) / batch / citations, among others, as supported. A
+    // minimal /v1/messages call returned 200, `stop_reason: "end_turn"` and a
+    // real text content block.
     //
     // Decision: INCLUDE, recorded in
     // drift-proposals/anthropic-claude-opus-5-5-new-family.md.
