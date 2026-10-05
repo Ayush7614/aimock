@@ -9,10 +9,18 @@
 - `GET /__aimock/mcp/fakes` lists the fakes that apply to a test id and context, with each entry's consumed state
 - MCP requests accept an opt-in `X-AIMock-MCP-Undeclared` header or `?undeclared=` query parameter (`allow` or `deny`) that overrides the undeclared-tool policy for the request, or for the session when sent at `initialize`. With `deny`, every `tools/call` to a tool that no fake declares fails with `MCP_FAKE_NOT_DECLARED`, even on a mount with no fakes loaded, so `onToolCall` handlers and config `result` values do not run
 - The CLI and `aimock validate` accept fixture files that hold only `mcpFakes`. A start with only fakes warns "No LLM fixtures loaded; LLM requests will return 404" and no longer aborts under `--strict` or `--validate-on-load`
+- `LLMock.loadFixtureFile()`, `LLMock.loadFixtureDir()`, `llmock --fixtures` and `llm.fixtures` in an `aimock --config` file load a file's `mcpFakes` with its LLM fixtures. When no mount serves a block's `mount` path (default `/mcp`), aimock mounts an `MCPMock` there. `LLMock.resetMatchCounts(testId?)` also marks that test id's fake entries as unused
+- `MCPMock` methods for fakes: `loadFakes(blocks)` (returns `{ warnings }`, throws `McpFakesAddError` on a bad block), `addMcpFakes(sources, origin)`, `fakesSnapshot(testId?, context?)`, `resetScenarioState(testId?)`, `clearMcpFakes()` and `setLogger(logger)`
+- New exports from `@copilotkit/aimock`: `loadFixtureFileWithServices` and `loadFixturesFromDirWithServices`, which return `{ fixtures, mcpFakes, mcpFakeWarnings, unreadable }` (`unreadable` lists the files that could not be read or parsed), `FixtureLoadError`, `McpFakesAddError`, `MCP_FAKE_ERROR_CODES` and the `McpFake*` types. `@copilotkit/aimock/mcp` also exports `McpFakesAddError`, `MCP_FAKE_ERROR_CODES` and the `McpFake*` types
+- Every MCP fake failure is logged at error level as an `MCP-FAKE:` line and counted in the `aimock_mcp_fake_failures_total{code}` metric
+- The Vitest and Jest `useAimock` plugins load the `mcpFakes` of their `fixtures` path. A bad block fails `beforeAll` with a `FixtureLoadError`, and `beforeEach` marks every fake entry as unused
+- The pytest plugin's `load_fixtures` posts a file's `mcpFakes` with its fixtures, and accepts a file with only `mcpFakes`. Against an aimock release without MCP fakes it raises `RuntimeError` ("aimock server too old for mcpFakes") and adds nothing from the file
+- `aimock validate` checks `mcpFakes` blocks by the server's load rules and entry ids across files. The `OK` line counts blocks (`OK (0 fixture(s), 1 mcpFakes block(s))`), and a `--json` file entry with `mcpFakes` has `mcpFakeBlocks`
+- `LLMock.mount()` after start logs a warning when an `MCPMock` that aimock mounted for fakes already serves that path, because the auto-mounted mock keeps those requests
 
 ### Changed
 
-- `GET` on an MCP mount now answers 405 with `Allow: POST, DELETE` instead of falling through to the LLM routes
+- `GET` on an MCP mount, and on any path of a standalone `MCPMock`, now answers 405 with `Allow: POST, DELETE` instead of falling through to the LLM routes or the JSON-RPC handler
 - MCP `tools/call` journal entries now carry the request `body` (was `null`), and `response.mcpFake` (`id`, `outcome`) when a fake answered or failed
 - MCP journal entries carry `testId` and `context`. `GET /__aimock/journal?testId=` lists an MCP request under the test id bound at `initialize`, or under the decoded header value, instead of `"__default__"` or the encoded string
 - MCP requests read `X-Test-Id` and `X-AIMock-Context`, percent-decoded, to pick fakes. Answers on a mount without fakes do not change

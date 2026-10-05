@@ -159,6 +159,8 @@ Against the server's `--validate-on-load` it is stricter in one direction and we
 
 Anything the filesystem or a fixture entry can throw is contained in the report instead of crashing the run: a malformed entry, an unreadable file or directory, a stat failure, or a symlink cycle each becomes a per-file `[error]` line and exits 1. One stat failure is deliberately silent: a directory entry that vanishes between the `readdir` and the `stat` (`ENOENT` — a dangling symlink, or a file deleted mid-walk) is skipped without a finding, exactly as the server's loader skips it; every other stat failure is surfaced. A directory argument that walks cleanly but holds no `*.json` files is likewise a per-path `[error]` and exits 1. A crash inside the validator itself is contained too: a per-file one becomes a file-level `[error]` naming no entry, and one in the combined pass becomes a run-level `[error]` printed after the per-file output.
 
+A file may also hold an [`mcpFakes`](https://aimock.copilotkit.dev/mcp-mock#scenario-fakes) key. `validate` checks its blocks by the server's load rules (a bad block is an error that names its rule, such as `[mcp-fakes/bad-block:a]`; an `args` entry after an `anyArgs` entry is a warning) and checks entry ids across all files. Mount conflicts depend on the running server and are not checked. A file with only `mcpFakes` is validated, not skipped, and a run of fakes-only files does not fail the zero-fixture rule. The `OK` line counts blocks: `account/read-only.json: OK (0 fixture(s), 1 mcpFakes block(s))`.
+
 Errors go to stderr while `OK` and summary lines go to stdout; warnings follow the exit they produce — stdout by default, stderr under `--strict`. Every file gets exactly one stdout line — including a file that failed fatally, and a file the walk skipped (`<file>: skipped (...)`) — so a reader tallying stdout never loses a file. `OK` is withheld in one case: on a run that failed because it loaded no fixtures at all, the file that loaded none reads `<file>: 0 fixture(s), loaded nothing — see the run-level error`. With `--json`, stdout carries the report alone and the one-line failure reason goes to stderr; a usage error is reported the same way, as a document with `files: []` and the reason in `run.errors`. Exit codes: `0` clean; `1` everything else — validation errors, a malformed fixture entry, unreadable/unparseable files, a NAMED path of the wrong shape (a walked one is skipped instead), a remote `http(s)://` path, a stat failure or symlink cycle while walking a directory, a `*.json` path that is not a regular file, a directory holding no `*.json` files, no fixtures loaded at all, `--strict` warnings, or a usage error (no paths given, or an unknown option). There is no exit code 2; every other CLI in this package reports a usage error as 1 too.
 
 `--json` emits one document on stdout, and only that document — a usage error included. Validating a directory holding a file with invalid JSON and a file with one bad entry and a duplicate `userMessage`:
@@ -200,6 +202,7 @@ Errors go to stderr while `OK` and summary lines go to stdout; warnings follow t
   ],
   "run": {
     "fixtures": 2,
+    "mcpFakeBlocks": 0,
     "errors": []
   }
 }
@@ -214,12 +217,13 @@ A usage error carries the reason in `run.errors` (`aimock validate --json`, exit
   "files": [],
   "run": {
     "fixtures": 0,
+    "mcpFakeBlocks": 0,
     "errors": ["no fixture paths given."]
   }
 }
 ```
 
-`failed` is the boolean the exit code follows, and `strict` echoes the flag it was computed under. `files` has one entry per path the run touched, in argv/walk order: `mention` is which load of that path this is (1-based, always present); `fixtures` is how many entries converted; `skipped` (present only when set) is why a walked non-fixture file was passed over; `fatal` (present only when set) is the reason the file produced no report at all, and that same reason also appears in `errors`, so a tally of `files[].errors` matches the error count on the file's stdout line; and `errors`/`warnings` hold findings. A finding always has `message`; `index` is the entry it belongs to and is **absent** on a file-level finding; `detail` carries the raw thrown text when `message` is a rephrasing of it. `run` covers the combined pass: `fixtures` is the total fixture count across every file, and `errors` holds run-level strings such as `"Cross-file validation failed: ..."`, the `"No fixtures loaded from any input — the server aborts startup on this under --validate-on-load/--strict"` line, or the reason a usage error failed.
+`failed` is the boolean the exit code follows, and `strict` echoes the flag it was computed under. `files` has one entry per path the run touched, in argv/walk order: `mention` is which load of that path this is (1-based, always present); `fixtures` is how many entries converted; `skipped` (present only when set) is why a walked non-fixture file was passed over; `fatal` (present only when set) is the reason the file produced no report at all, and that same reason also appears in `errors`, so a tally of `files[].errors` matches the error count on the file's stdout line; and `errors`/`warnings` hold findings; a file with an `mcpFakes` key also has `mcpFakeBlocks`, the number of blocks it adds. A finding always has `message`; `index` is the entry it belongs to and is **absent** on a file-level finding; `detail` carries the raw thrown text when `message` is a rephrasing of it. `run` covers the combined pass: `fixtures` is the total fixture count across every file, `mcpFakeBlocks` (always present, `0` when no file has `mcpFakes`) is the total number of `mcpFakes` blocks, and `errors` holds run-level strings such as `"Cross-file validation failed: ..."`, the `"No fixtures loaded from any input — the server aborts startup on this under --validate-on-load/--strict"` line, or the reason a usage error failed.
 
 ### Remote fixture URLs
 

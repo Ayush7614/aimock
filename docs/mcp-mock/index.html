@@ -329,6 +329,15 @@ mcp.onToolCall(<span class="str">"rich-tool"</span>, () =&gt; [
           unique on each mount.
         </p>
         <p>
+          The part before the colon is the block id. In the array form, it ends with the
+          block&rsquo;s position, as in <code>multi/travel.json[0]:search_flights#0</code>. When the
+          same file is loaded again, its blocks are added again, with <code>@2</code>,
+          <code>@3</code> and so on after the file name
+          (<code>weather/seattle.json@2:get_weather#0</code>). Blocks added from code get the block
+          id <code>code#&lt;n&gt;</code>, and blocks added through the control API get
+          <code>control-api#&lt;n&gt;</code>. Each mount numbers these calls from 1.
+        </p>
+        <p>
           An array of blocks, one per MCP server. aimock mounts an <code>MCPMock</code> at
           <code>/mcp/flights</code> and one at <code>/mcp/hotels</code>. In the test
           <code>travel › book trip</code>, <code>search_flights</code> on
@@ -404,7 +413,11 @@ mcp.onToolCall(<span class="str">"rich-tool"</span>, () =&gt; [
           A field sent twice on one path (two <code>X-Test-Id</code> headers, or
           <code>?testId=</code> twice) is rejected with HTTP 400 and code
           <code>MCP_DUPLICATE_IDENTITY</code>. When the header and the query both carry a value, the
-          header is used.
+          header is used. The body of such a 400 is
+          <code>{ "error": "&lt;message&gt;", "code": "MCP_DUPLICATE_IDENTITY" }</code>, for example
+          <code>Duplicate ?testId= query parameter: 2 values sent, expected one</code>. A bad
+          undeclared override (see <a href="#closed-world">Closed world</a>) gets the same shape
+          with <code>MCP_INVALID_UNDECLARED</code>.
         </p>
 
         <h3>Encode test ids on the MCP client</h3>
@@ -711,8 +724,9 @@ mcp.onToolCall(<span class="str">"rich-tool"</span>, () =&gt; [
           that has a <code>response.mcpFake.outcome</code> other than <code>answered</code>, or that
           has <code>response.error</code>. Entries for other methods, and calls that no fake
           answered, have no <code>response.mcpFake</code>. A standalone <code>MCPMock</code> (not
-          mounted on an <code>LLMock</code> server) has no journal, metrics or logger, so only the
-          JSON-RPC error is sent.
+          mounted on an <code>LLMock</code> server) has no journal and no metrics, and logs only
+          after <code>setLogger()</code> (see <a href="#fakes-api">API for fakes</a>), so the
+          JSON-RPC error may be the only trace.
         </p>
 
         <h3 id="closed-world">Closed world (<code>undeclaredTools: "deny"</code>)</h3>
@@ -827,7 +841,10 @@ mcp.onToolCall(<span class="str">"rich-tool"</span>, () =&gt; [
           <li>
             <code>llmock --fixtures &lt;path&gt;</code> and <code>LLMock.loadFixtureFile()</code> /
             <code>loadFixtureDir()</code> load <code>mcpFakes</code> with the LLM fixtures. A file
-            may hold only <code>mcpFakes</code>.
+            may hold only <code>mcpFakes</code>. So do <code>llm.fixtures</code> in an
+            <code>aimock --config</code> file, which is resolved to an absolute path (so the entry
+            ids hold that path), and the <code>fixtures</code> option of the
+            <a href="/test-plugins#mcp-fakes">Vitest and Jest plugins</a>.
           </li>
           <li>
             If no mount serves a block&rsquo;s <code>mount</code> path, aimock mounts an
@@ -891,6 +908,123 @@ mcp.onToolCall(<span class="str">"rich-tool"</span>, () =&gt; [
           example <code>mcp-fakes/bad-block:a</code> or <code>mcp-fakes/mount-conflict</code>) names
           the check, and its message names the file and block. <code>aimock validate</code> reports
           the same errors per file, except mount conflicts, which depend on the running server.
+        </p>
+        <p>
+          When one input has more than one problem, the error is a <code>McpFakesAddError</code>, a
+          subclass of <code>FixtureLoadError</code>. Its <code>errors</code> array holds one
+          <code>FixtureLoadError</code> per problem, and its <code>warnings</code> array holds the
+          shadowed-entry warnings of the same input. Each <code>FixtureLoadError</code> has
+          <code>rule</code>, <code>file</code>, <code>blockId</code>, <code>entryId</code> and
+          <code>message</code>, and <code>toJSON()</code> returns those fields with
+          <code>name</code>.
+        </p>
+        <p>
+          A load that succeeds can still warn. An <code>args</code> entry after an
+          <code>anyArgs</code> entry for the same tool is a shadowed-entry warning: the CLI and
+          <code>LLMock</code> log it, and <code>mcp.loadFakes()</code> returns it as
+          <code>{ warnings: [{ file, blockId, entryId, message }] }</code>. If you call
+          <code>llm.mount(path, mcp)</code> after start at a path where aimock already mounted an
+          <code>MCPMock</code> for fakes, the auto-mounted mock keeps those requests, and aimock
+          logs a warning that the new mount is shadowed.
+        </p>
+
+        <h3 id="fakes-api">API for fakes</h3>
+        <p>These <code>MCPMock</code> methods work on the fakes of one mount:</p>
+        <table class="endpoint-table">
+          <thead>
+            <tr>
+              <th>Method</th>
+              <th>Effect</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>loadFakes(blocks)</code></td>
+              <td>
+                Adds one <code>mcpFakes</code> value (a block or an array of blocks), in the fixture
+                file form. Adds all or nothing. Returns <code>{ warnings }</code>; throws a
+                <code>McpFakesAddError</code> on a bad block.
+              </td>
+            </tr>
+            <tr>
+              <td><code>addMcpFakes(sources, origin)</code></td>
+              <td>
+                The lower-level add that the loaders use. <code>sources</code> is an array of
+                <code>{ source, blockIndex, raw }</code>, as the
+                <code>&hellip;WithServices</code> loaders return them, and <code>origin</code> is
+                <code>{ kind: "file" }</code>, <code>{ kind: "code" }</code> or
+                <code>{ kind: "control-api" }</code>. With <code>"file"</code>, the entry ids use
+                each <code>source</code>; with the other two, they use
+                <code>code#&lt;n&gt;</code> or <code>control-api#&lt;n&gt;</code>.
+              </td>
+            </tr>
+            <tr>
+              <td><code>fakesSnapshot(testId?, context?)</code></td>
+              <td>
+                The blocks on this mount that apply to that test id and context, with each
+                entry&rsquo;s id and consumed state for the test id: the <code>blocks</code> of one
+                mount in <a href="/control-api#mcp-fakes">GET /__aimock/mcp/fakes</a>. Omit an
+                argument, or pass <code>null</code>, for &ldquo;not sent&rdquo;. The result is
+                frozen.
+              </td>
+            </tr>
+            <tr>
+              <td><code>resetScenarioState(testId?)</code></td>
+              <td>
+                Marks the entries of that test id (or of every test id) as unused. The fakes stay
+                loaded. <code>LLMock.resetMatchCounts()</code> calls it on every mount.
+              </td>
+            </tr>
+            <tr>
+              <td><code>clearMcpFakes()</code></td>
+              <td>
+                Unloads every fake on this mount, with its consumption state. Tools, resources,
+                prompts and sessions stay.
+              </td>
+            </tr>
+            <tr>
+              <td><code>setLogger(logger)</code></td>
+              <td>
+                Sets the logger for <code>MCP-FAKE:</code> lines and for warnings about a test id or
+                context that does not decode. <code>LLMock</code> calls it when it mounts the mock,
+                so you need it only for a mock that you use without <code>LLMock</code>.
+              </td>
+            </tr>
+          </tbody>
+        </table>
+        <p>
+          <code>loadFixtureFileWithServices(path)</code> and
+          <code>loadFixturesFromDirWithServices(dir)</code> read files the way
+          <code>LLMock</code> does and return
+          <code>{ fixtures, mcpFakes, mcpFakeWarnings, unreadable }</code>:
+        </p>
+        <ul>
+          <li><code>fixtures</code>: the LLM fixtures.</li>
+          <li>
+            <code>mcpFakes</code>: one <code>{ source, blockIndex, raw }</code> per block, ready for
+            <code>addMcpFakes(sources, { kind: "file" })</code>. <code>blockIndex</code> is
+            <code>null</code> for the single-object form.
+          </li>
+          <li><code>mcpFakeWarnings</code>: the shadowed-entry warnings.</li>
+          <li>
+            <code>unreadable</code>: the source names of files that could not be read or were not
+            valid JSON. Such a file is skipped with a warning, as before, and adds nothing.
+          </li>
+        </ul>
+        <p>
+          A bad block makes these loaders throw, after they have checked every file. The main entry
+          <code>@copilotkit/aimock</code> exports the two loaders, <code>FixtureLoadError</code>,
+          <code>McpFakesAddError</code>, <code>MCP_FAKE_ERROR_CODES</code> and the fake types
+          (<code>McpFakeBlock</code>, <code>McpFakeTool</code>, <code>McpFakeCall</code>,
+          <code>McpFakeResult</code>, <code>McpFakeScope</code>, <code>McpFakeBlockSnapshot</code>,
+          <code>McpFakeErrorCode</code> and others). The <code>@copilotkit/aimock/mcp</code> subpath
+          exports <code>MCPMock</code>, <code>McpFakesAddError</code>,
+          <code>MCP_FAKE_ERROR_CODES</code> and the same types, but not the loaders.
+          <code>MCP_FAKE_ERROR_CODES</code> maps each code to its JSON-RPC code:
+          <code>MCP_FAKE_NOT_DECLARED</code> and <code>MCP_FAKE_MISMATCH</code> to
+          <code>-32602</code>, <code>MCP_FAKE_EXHAUSTED</code> to <code>-31010</code> and
+          <code>MCP_FAKE_EVICTED</code> to <code>-31011</code>.
+          <code>MCP_FAKE_INTERNAL_ERROR</code> is not in the map.
         </p>
 
         <h3>Inspecting fakes</h3>
