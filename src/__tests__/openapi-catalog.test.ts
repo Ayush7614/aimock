@@ -49,6 +49,68 @@ describe("OpenAPI route catalog", () => {
     await mock.stop();
   });
 
+  const ollamaEmbeddingInputs = [
+    { label: "legacy prompt", fields: { prompt: "hello" } },
+    { label: "text input", fields: { input: "hello" } },
+    { label: "text array", fields: { input: ["hello", "world"] } },
+    { label: "numeric array", fields: { input: [1, 2] } },
+    { label: "numeric matrix", fields: { input: [[1, 2], [3]] } },
+    { label: "both fields", fields: { prompt: "hello", input: "world" } },
+  ];
+
+  it.each(
+    ["/api/embeddings", "/api/embed"].flatMap((path) =>
+      ollamaEmbeddingInputs.map((input) => ({ path, ...input })),
+    ),
+  )("describes real Ollama embeddings for $path with $label", async ({ path, fields }) => {
+    const doc = await (await fetch(`${mock.url}/__aimock/openapi.json`)).json();
+    const response = await fetch(`${mock.url}${path}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: "nomic-embed-text", ...fields }),
+    });
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(Object.keys(body).sort()).toEqual(["embedding", "model"]);
+    expect(body.model).toBe("nomic-embed-text");
+    expect(Array.isArray(body.embedding)).toBe(true);
+    expect(body.embedding.length).toBeGreaterThan(0);
+    for (const value of body.embedding) expect(typeof value).toBe("number");
+
+    const operation = doc.paths[path].post;
+    expect(operation.requestBody.content["application/json"].schema).toEqual({
+      $ref: "#/components/schemas/OllamaEmbedRequest",
+    });
+    expect(operation.responses["200"].content["application/json"].schema).toEqual({
+      $ref: "#/components/schemas/OllamaEmbedResponse",
+    });
+    expect.soft(doc.components.schemas.OllamaEmbedRequest).toEqual({
+      type: "object",
+      required: ["model"],
+      anyOf: [{ required: ["prompt"] }, { required: ["input"] }],
+      properties: {
+        model: { type: "string" },
+        prompt: { type: "string" },
+        input: {
+          anyOf: [
+            { type: "string" },
+            { type: "array", items: { type: "string" } },
+            { type: "array", items: { type: "number" } },
+            { type: "array", items: { type: "array", items: { type: "number" } } },
+          ],
+        },
+      },
+    });
+    expect.soft(doc.components.schemas.OllamaEmbedResponse).toEqual({
+      type: "object",
+      required: ["model", "embedding"],
+      properties: {
+        model: { type: "string" },
+        embedding: { type: "array", items: { type: "number" } },
+      },
+    });
+  });
+
   it.each(["completed", "failed"] as const)(
     "describes real Grok video submit and %s polling responses",
     async (status) => {

@@ -658,17 +658,27 @@ const COMPONENTS: Record<string, unknown> = {
   },
   OllamaEmbedRequest: {
     type: "object",
-    required: ["model", "input"],
+    required: ["model"],
+    anyOf: [{ required: ["prompt"] }, { required: ["input"] }],
     properties: {
       model: { type: "string" },
-      input: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" } }] },
+      prompt: { type: "string" },
+      input: {
+        anyOf: [
+          { type: "string" },
+          { type: "array", items: { type: "string" } },
+          { type: "array", items: { type: "number" } },
+          { type: "array", items: { type: "array", items: { type: "number" } } },
+        ],
+      },
     },
   },
   OllamaEmbedResponse: {
     type: "object",
+    required: ["model", "embedding"],
     properties: {
       model: { type: "string" },
-      embeddings: { type: "array", items: { type: "array", items: { type: "number" } } },
+      embedding: { type: "array", items: { type: "number" } },
     },
   },
   OllamaTagsResponse: {
