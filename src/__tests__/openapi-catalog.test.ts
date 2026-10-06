@@ -491,6 +491,164 @@ describe("OpenAPI route catalog", () => {
     expect(doc.components.schemas.EmbeddingRequest).toBeDefined();
   });
 
+  it.each([
+    { label: "string", input: "catalog interactions", stream: false },
+    {
+      label: "turns",
+      input: [{ role: "user", content: [{ type: "text", text: "catalog interactions" }] }],
+      stream: false,
+    },
+    {
+      label: "steps",
+      input: [{ type: "user_input", content: [{ type: "text", text: "catalog interactions" }] }],
+      stream: false,
+    },
+    { label: "explicit stream", input: "catalog interactions", stream: true },
+    { label: "default stream", input: "catalog interactions", stream: undefined },
+  ])("describes live Interactions $label", async ({ input, stream }) => {
+    mock.addFixture({
+      match: { userMessage: "catalog interactions" },
+      response: { content: "hello interaction" },
+      chunkSize: 3,
+    });
+    const doc = await (await fetch(`${mock.url}/__aimock/openapi.json`)).json();
+    const request = {
+      model: "gemini-test",
+      input,
+      generation_config: { temperature: 0, max_output_tokens: 20 },
+      stream,
+    };
+    const response = await fetch(`${mock.url}/v1beta/interactions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(request),
+    });
+    const wire = await response.text();
+    expect(response.status).toBe(200);
+    const operation = doc.paths["/v1beta/interactions"].post;
+    const requestRef = operation.requestBody.content["application/json"].schema.$ref;
+    const requestSchema = doc.components.schemas[requestRef.split("/").at(-1)];
+    const content = operation.responses["200"].content;
+    console.log(JSON.stringify({ request, wire, requestSchema, content }));
+    expect.soft(requestSchema.properties.input).toEqual({
+      description: "Text, turns, steps, or content blocks normalized for fixture matching.",
+      oneOf: [{ type: "string" }, { type: "array", items: { type: "object" } }],
+    });
+    expect.soft(requestSchema.properties.generation_config).toMatchObject({
+      type: "object",
+      properties: { temperature: { type: "number" }, max_output_tokens: { type: "integer" } },
+    });
+    expect.soft(requestSchema.properties.stream).toMatchObject({ type: "boolean", default: true });
+    expect.soft(requestSchema.properties).not.toHaveProperty("contents");
+    expect.soft(requestSchema.properties).not.toHaveProperty("generationConfig");
+    const schema = doc.components.schemas.InteractionsResponse;
+    expect
+      .soft(content["application/json"].schema.$ref)
+      .toBe("#/components/schemas/InteractionsResponse");
+    expect.soft(schema.properties).not.toHaveProperty("candidates");
+    expect.soft(schema.properties).not.toHaveProperty("usageMetadata");
+    if (stream === false) {
+      expect(response.headers.get("content-type")).toContain("application/json");
+      const body = JSON.parse(wire);
+      expect(body.output_text).toBe("hello interaction");
+      expect(body.steps).toEqual([
+        { type: "model_output", content: [{ type: "text", text: "hello interaction" }] },
+      ]);
+      expect(body.usage).toEqual({
+        total_input_tokens: 0,
+        total_output_tokens: 0,
+        total_tokens: 0,
+      });
+      expect.soft(schema.properties.output_text?.type).toBe(typeof body.output_text);
+      expect
+        .soft(schema.properties.steps)
+        .toMatchObject({ type: "array", items: { type: "object" } });
+      expect.soft(schema.properties.usage).toMatchObject({ type: "object" });
+    } else {
+      expect(response.headers.get("content-type")).toContain("text/event-stream");
+      const frames = sseDataFrames(wire);
+      expect(frames).not.toContain("[DONE]");
+      const events: {
+        event_type: string;
+        event_id: string;
+        delta?: { type: string; text: string };
+        interaction?: { status: string };
+      }[] = frames.map((frame) => JSON.parse(frame));
+      expect(events[0].event_type).toBe("interaction.created");
+      expect(events.at(-1)?.event_type).toBe("interaction.completed");
+      expect(events.at(-1)?.interaction?.status).toBe("completed");
+      expect(events.map((event) => event.delta?.text ?? "").join("")).toBe("hello interaction");
+      expect(content["text/event-stream"]).toBeDefined();
+      const streamSchema =
+        doc.components.schemas[content["text/event-stream"].schema.$ref.split("/").at(-1)];
+      expect(streamSchema.type).toBe("string");
+      expect(streamSchema.description).toContain("data:");
+      expect(streamSchema.description).toContain("blank line");
+      expect(streamSchema.description).toContain("no event: prefix or [DONE]");
+      const eventSchema =
+        doc.components.schemas[streamSchema["x-sse-data-schema"].$ref.split("/").at(-1)];
+      expect(eventSchema.required).toEqual(["event_type", "event_id"]);
+      for (const event of events) {
+        expect(eventSchema.properties.event_type.enum).toContain(event.event_type);
+        expect(typeof event.event_id).toBe(eventSchema.properties.event_id.type);
+      }
+      expect(eventSchema.properties.delta.type).toBe("object");
+      expect(eventSchema.properties.interaction.type).toBe("object");
+    }
+  });
+
+  it.each([false, true])("describes tool-only Interactions with stream=%s", async (stream) => {
+    mock.addFixture({
+      match: { userMessage: "catalog interaction tool" },
+      response: {
+        toolCalls: [{ id: "call_catalog", name: "weather", arguments: '{"city":"Paris"}' }],
+      },
+    });
+    const doc = await (await fetch(`${mock.url}/__aimock/openapi.json`)).json();
+    const response = await fetch(`${mock.url}/v1beta/interactions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: "gemini-test", input: "catalog interaction tool", stream }),
+    });
+    expect(response.status).toBe(200);
+    const wire = await response.text();
+    console.log(JSON.stringify({ stream, wire }));
+    if (!stream) {
+      const body = JSON.parse(wire);
+      const schema = doc.components.schemas.InteractionsResponse;
+      expect(body.status).toBe("requires_action");
+      expect(body).not.toHaveProperty("output_text");
+      expect(schema.required).not.toContain("output_text");
+      for (const field of schema.required) expect(body).toHaveProperty(field);
+      expect(schema.properties.status.enum).toContain(body.status);
+      expect(body.steps).toEqual([
+        {
+          type: "function_call",
+          id: "call_catalog",
+          name: "weather",
+          arguments: { city: "Paris" },
+        },
+      ]);
+      expect(schema.properties.steps.items.properties.type.enum).toContain(body.steps[0].type);
+      for (const [field, value] of Object.entries(body.usage)) {
+        expect(schema.properties.usage.properties[field].type).toBe(typeof value);
+      }
+    } else {
+      const events: {
+        event_type: string;
+        delta?: { type: string; arguments: string };
+        interaction?: { status: string };
+      }[] = sseDataFrames(wire).map((frame) => JSON.parse(frame));
+      const delta = events.find((event) => event.event_type === "step.delta")?.delta;
+      expect(delta).toEqual({ type: "arguments_delta", arguments: '{"city":"Paris"}' });
+      expect(events.at(-1)?.interaction?.status).toBe("requires_action");
+      const schema = doc.components.schemas.InteractionsSSEEvent;
+      expect(schema.properties.delta.properties.type.enum).toContain(delta?.type);
+      expect(schema.properties.delta.properties.arguments.type).toBe(typeof delta?.arguments);
+      expect(schema.properties.interaction.properties.status.enum).toContain("requires_action");
+    }
+  });
+
   const streamRoutes = [
     { family: "chat", path: "/v1/chat/completions", actual: "/v1/chat/completions" },
     {

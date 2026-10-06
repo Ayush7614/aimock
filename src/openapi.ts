@@ -1052,18 +1052,99 @@ const COMPONENTS: Record<string, unknown> = {
   InteractionsRequest: {
     type: "object",
     description:
-      "Gemini interaction payload (contents + generationConfig), recorded and replayed verbatim.",
+      "Gemini Interactions input normalized for fixture matching; streams unless stream is false.",
     properties: {
-      contents: { type: "array", items: { type: "object" } },
-      generationConfig: { type: "object" },
+      model: { type: "string" },
+      input: {
+        description: "Text, turns, steps, or content blocks normalized for fixture matching.",
+        oneOf: [{ type: "string" }, { type: "array", items: { type: "object" } }],
+      },
+      system_instruction: { type: "string" },
+      tools: { type: "array", items: { type: "object" } },
+      generation_config: {
+        type: "object",
+        properties: {
+          temperature: { type: "number" },
+          max_output_tokens: { type: "integer" },
+        },
+      },
+      stream: { type: "boolean", default: true },
+      previous_interaction_id: { type: "string" },
     },
   },
   InteractionsResponse: {
     type: "object",
-    description: "Recorded interaction replay envelope.",
+    description:
+      "Nonstreaming Interactions response. output_text is omitted for tool-only responses.",
+    required: ["id", "status", "model", "role", "steps", "usage"],
     properties: {
-      candidates: { type: "array", items: { type: "object" } },
-      usageMetadata: { type: "object" },
+      id: { type: "string" },
+      status: { type: "string", enum: ["completed", "requires_action"] },
+      model: { type: "string" },
+      role: { type: "string", enum: ["model"] },
+      output_text: { type: "string" },
+      steps: {
+        type: "array",
+        items: {
+          type: "object",
+          properties: {
+            type: { type: "string", enum: ["model_output", "function_call"] },
+            content: { type: "array", items: { type: "object" } },
+            id: { type: "string" },
+            name: { type: "string" },
+            arguments: {},
+          },
+        },
+      },
+      usage: {
+        type: "object",
+        properties: {
+          total_input_tokens: { type: "number" },
+          total_output_tokens: { type: "number" },
+          total_tokens: { type: "number" },
+        },
+      },
+    },
+  },
+  InteractionsSSEStream: {
+    type: "string",
+    description:
+      "SSE data: JSON frames separated by a blank line, with no event: prefix or [DONE] sentinel. Event identity is in event_type; a complete stream ends with interaction.completed. Interruption may end the stream earlier.",
+    "x-sse-data-schema": { $ref: "#/components/schemas/InteractionsSSEEvent" },
+  },
+  InteractionsSSEEvent: {
+    type: "object",
+    required: ["event_type", "event_id"],
+    properties: {
+      event_type: {
+        type: "string",
+        enum: [
+          "interaction.created",
+          "step.start",
+          "step.delta",
+          "step.stop",
+          "interaction.completed",
+        ],
+      },
+      event_id: { type: "string" },
+      index: { type: "integer" },
+      interaction: {
+        type: "object",
+        properties: {
+          id: { type: "string" },
+          status: { type: "string", enum: ["in_progress", "completed", "requires_action"] },
+          usage: { type: "object" },
+        },
+      },
+      step: { type: "object" },
+      delta: {
+        type: "object",
+        properties: {
+          type: { type: "string", enum: ["text", "arguments_delta"] },
+          text: { type: "string" },
+          arguments: { type: "string" },
+        },
+      },
     },
   },
   BedrockInvokeRequest: {
@@ -1983,6 +2064,7 @@ const SCHEMA_REFS: Record<string, OperationSchemas> = {
   "POST /v1beta/interactions": {
     request: "InteractionsRequest",
     response: "InteractionsResponse",
+    streamResponse: "InteractionsSSEStream",
   },
   "POST /v1beta/models/{model}:embedContent": {
     request: "GeminiEmbedRequest",
