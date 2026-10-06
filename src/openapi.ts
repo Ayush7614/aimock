@@ -1318,6 +1318,13 @@ const COMPONENTS: Record<string, unknown> = {
       description: { type: "string" },
     },
   },
+  ElevenLabsVoiceDeleteResponse: {
+    type: "object",
+    required: ["status"],
+    properties: {
+      status: { type: "string", enum: ["ok"] },
+    },
+  },
   ElevenLabsMusicRequest: {
     type: "object",
     properties: {
@@ -2036,7 +2043,7 @@ const SCHEMA_REFS: Record<string, OperationSchemas> = {
   },
   "POST /v1/text-to-voice": { request: "VoiceCreateRequest", response: "VoiceCreateResponse" },
   "GET /v1/voices/{voice_id}": { response: "ElevenLabsVoice" },
-  "DELETE /v1/voices/{voice_id}": { response: "ElevenLabsVoice" },
+  "DELETE /v1/voices/{voice_id}": { response: "ElevenLabsVoiceDeleteResponse" },
   "POST /v1/text-to-speech/{voice_id}": { request: "ElevenLabsTTSRequest", respContent: AUDIO },
   "POST /v1/music": { request: "ElevenLabsMusicRequest", respContent: AUDIO },
   "POST /v1/music/{subtype}": { request: "ElevenLabsMusicRequest", respContent: AUDIO },

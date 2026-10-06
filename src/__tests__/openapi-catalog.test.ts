@@ -49,6 +49,36 @@ describe("OpenAPI route catalog", () => {
     await mock.stop();
   });
 
+  it("describes the real voice deletion status without changing voice schemas", async () => {
+    const doc = await (await fetch(`${mock.url}/__aimock/openapi.json`)).json();
+    const response = await fetch(`${mock.url}/v1/voices/catalog-delete-proof`, {
+      method: "DELETE",
+    });
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body).toEqual({ status: "ok" });
+
+    const voiceOperations = doc.paths["/v1/voices/{voice_id}"];
+    const ref = voiceOperations.delete.responses["200"].content["application/json"].schema;
+    const schema = doc.components.schemas[ref.$ref.split("/").at(-1)];
+    for (const key of schema.required) expect(body).toHaveProperty(key);
+    expect(schema).toEqual({
+      type: "object",
+      required: ["status"],
+      properties: { status: { type: "string", enum: ["ok"] } },
+    });
+    expect(voiceOperations.get.responses["200"].content["application/json"].schema).toEqual({
+      $ref: "#/components/schemas/ElevenLabsVoice",
+    });
+    expect(
+      doc.paths["/v1/text-to-voice"].post.responses["200"].content["application/json"].schema,
+    ).toEqual({ $ref: "#/components/schemas/VoiceCreateResponse" });
+    for (const name of ["ElevenLabsVoice", "VoiceCreateResponse"]) {
+      expect(doc.components.schemas[name].required).toContain("voice_id");
+      expect(doc.components.schemas[name].properties.voice_id).toEqual({ type: "string" });
+    }
+  });
+
   const ollamaEmbeddingInputs = [
     { label: "legacy prompt", fields: { prompt: "hello" } },
     { label: "text input", fields: { input: "hello" } },
