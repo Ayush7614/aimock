@@ -74,6 +74,7 @@ const COMPONENTS: Record<string, unknown> = {
             role: { type: "string", enum: ["system", "user", "assistant", "tool"] },
             content: {
               oneOf: [
+                { type: "null" },
                 { type: "string" },
                 {
                   type: "array",

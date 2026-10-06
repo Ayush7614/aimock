@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import type { SSEChunk, ChatCompletion } from "../types.js";
+import type { SSEChunk, ChatCompletion, ChatCompletionRequest } from "../types.js";
 import { LLMock } from "../llmock.js";
 import { CATALOG_ROUTES, buildOpenApiDocument } from "../openapi.js";
 import { ROUTE_DEFINITIONS, matchRouteDefinition, templateToRegExp } from "../route-registry.js";
@@ -109,6 +109,62 @@ describe("OpenAPI route catalog", () => {
       }
     },
   );
+
+  it("describes null assistant content in real tool-call history", async () => {
+    mock.addFixture({
+      match: { userMessage: "catalog tool history" },
+      response: { content: "The weather is sunny." },
+    });
+    const request: ChatCompletionRequest = {
+      model: "test",
+      messages: [
+        { role: "user", content: [{ type: "text", text: "catalog tool history" }] },
+        {
+          role: "assistant",
+          content: null,
+          tool_calls: [
+            {
+              id: "call_weather",
+              type: "function",
+              function: { name: "get_weather", arguments: "{}" },
+            },
+          ],
+        },
+        { role: "tool", content: "sunny", tool_call_id: "call_weather" },
+      ],
+      stream: false,
+    };
+    const doc = await (await fetch(`${mock.url}/__aimock/openapi.json`)).json();
+    const response = await fetch(`${mock.url}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(request),
+    });
+    expect(response.status).toBe(200);
+    const body: ChatCompletion = await response.json();
+    expect(body.choices[0].message.content).toBe("The weather is sunny.");
+
+    const ref =
+      doc.paths["/v1/chat/completions"].post.requestBody.content["application/json"].schema;
+    expect(ref).toEqual({ $ref: "#/components/schemas/ChatCompletionRequest" });
+    const messageSchema = doc.components.schemas.ChatCompletionRequest.properties.messages.items;
+    expect(messageSchema.required).toEqual(["role", "content"]);
+    const alternatives: StreamCatalogSchema[] = messageSchema.properties.content.oneOf;
+    console.log(JSON.stringify({ request, status: response.status, body, alternatives }));
+    expect(alternatives).toContainEqual({ type: "null" });
+    expect(alternatives).toContainEqual({ type: "string" });
+    expect(alternatives.map((branch) => branch.type).sort()).toEqual(["array", "null", "string"]);
+    expect(alternatives.find((branch) => branch.type === "array")).toMatchObject({
+      items: {
+        type: "object",
+        required: ["type"],
+        properties: {
+          type: { type: "string", enum: ["text", "image_url", "input_audio", "file"] },
+          text: { type: "string" },
+        },
+      },
+    });
+  });
 
   it("preserves real provider object errors and their catalog schema", async () => {
     const doc = await (await fetch(`${mock.url}/__aimock/openapi.json`)).json();
