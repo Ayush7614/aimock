@@ -56,6 +56,8 @@ describe("OpenAPI route catalog", () => {
     { label: "numeric array", fields: { input: [1, 2] } },
     { label: "numeric matrix", fields: { input: [[1, 2], [3]] } },
     { label: "both fields", fields: { prompt: "hello", input: "world" } },
+    { label: "null prompt fallback", fields: { prompt: null, input: "hello" } },
+    { label: "null input fallback", fields: { prompt: "hello", input: null } },
   ];
 
   it.each(
@@ -87,12 +89,16 @@ describe("OpenAPI route catalog", () => {
     expect.soft(doc.components.schemas.OllamaEmbedRequest).toEqual({
       type: "object",
       required: ["model"],
-      anyOf: [{ required: ["prompt"] }, { required: ["input"] }],
+      anyOf: [
+        { required: ["prompt"], properties: { prompt: { not: { type: "null" } } } },
+        { required: ["input"], properties: { input: { not: { type: "null" } } } },
+      ],
       properties: {
         model: { type: "string" },
-        prompt: { type: "string" },
+        prompt: { type: ["string", "null"] },
         input: {
           anyOf: [
+            { type: "null" },
             { type: "string" },
             { type: "array", items: { type: "string" } },
             { type: "array", items: { type: "number" } },
@@ -110,6 +116,29 @@ describe("OpenAPI route catalog", () => {
       },
     });
   });
+
+  it.each(["/api/embeddings", "/api/embed"])(
+    "does not advertise absent or all-null Ollama input for %s",
+    async (path) => {
+      const doc = await (await fetch(`${mock.url}/__aimock/openapi.json`)).json();
+      // Nullable properties alone must not make either null a valid alternative.
+      expect(doc.components.schemas.OllamaEmbedRequest.anyOf).toEqual([
+        { required: ["prompt"], properties: { prompt: { not: { type: "null" } } } },
+        { required: ["input"], properties: { input: { not: { type: "null" } } } },
+      ]);
+      for (const fields of [{}, { prompt: null }, { input: null }, { prompt: null, input: null }]) {
+        const response = await fetch(`${mock.url}${path}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ model: "test", ...fields }),
+        });
+        expect(response.status).toBe(400);
+        expect(await response.json()).toMatchObject({
+          error: { message: "Invalid request: prompt or input field is required" },
+        });
+      }
+    },
+  );
 
   it.each(["completed", "failed"] as const)(
     "describes real Grok video submit and %s polling responses",

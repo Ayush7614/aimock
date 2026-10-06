@@ -659,12 +659,16 @@ const COMPONENTS: Record<string, unknown> = {
   OllamaEmbedRequest: {
     type: "object",
     required: ["model"],
-    anyOf: [{ required: ["prompt"] }, { required: ["input"] }],
+    anyOf: [
+      { required: ["prompt"], properties: { prompt: { not: { type: "null" } } } },
+      { required: ["input"], properties: { input: { not: { type: "null" } } } },
+    ],
     properties: {
       model: { type: "string" },
-      prompt: { type: "string" },
+      prompt: { type: ["string", "null"] },
       input: {
         anyOf: [
+          { type: "null" },
           { type: "string" },
           { type: "array", items: { type: "string" } },
           { type: "array", items: { type: "number" } },
