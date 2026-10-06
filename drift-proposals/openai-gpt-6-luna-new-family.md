@@ -37,15 +37,18 @@ Rationale: gpt-6 named variant (text chat). It is the gpt-6 generation of the
 already-included `gpt-5.6-luna`, and a sibling of the already-included
 `gpt-6-astra`. Listed on the same day as `gpt-6-sol`.
 
-EVIDENCE LIMIT, stated plainly: no live capability probe was run for this one.
-OpenAI's `/v1/models` carries no capability field (`id` / `owned_by` / `created`
-only), and no OpenAI key was available to repeat the `/v1/chat/completions`
-probe that decided `gpt-6-astra`. The drift-sync run that surfaced it
-(35827604040) records only the family key. The argument is by lineage: the
+First classified by lineage on 2026-09-23: no probe was run then, and the
+drift-sync run that surfaced it (35827604040) records only the family key. The
 same named-variant scheme is already included one generation back
 (`gpt-5.6-luna` / `gpt-5.6-sol` / `gpt-5.6-terra`), and the first gpt-6 named
-variant, `gpt-6-astra`, was probe-verified as plain text chat. The name carries
-no image / audio / realtime / transcribe / tts / search / codex token that would
-put it in an excluded cluster. If that inference is ever wrong, the live canary
-(`drift-live-pr`) and the next capability probe are what catch it, which is why
-this limit is recorded here and not assumed away.
+variant, `gpt-6-astra`, was probe-verified as plain text chat.
+
+Evidence (live, 2026-10-05), which confirms the lineage call:
+`GET /v1/models/gpt-6-luna` returned 200 with `id: "gpt-6-luna"`, `object: "model"`,
+`created: 1789406102`, `owned_by: "system"`, `shutdown_date: null`. There is
+no capability field, so the listing cannot decide this. A minimal
+`POST /v1/chat/completions` with `model: "gpt-6-luna"` returned 200,
+`object: "chat.completion"`, `finish_reason: "stop"`, and a real assistant text
+turn. That is the same shape `gpt-6-astra` returned. The name carries no image /
+audio / realtime / transcribe / tts / search token that would put it in
+an excluded cluster.
