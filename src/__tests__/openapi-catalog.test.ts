@@ -927,42 +927,135 @@ describe("OpenAPI route catalog", () => {
   }, 60000);
 
   it("every dispatch pattern has a catalog entry (router → catalog, no drift)", () => {
-    // The reverse direction of the probe above: the dispatcher matches
-    // against the `*_PATH` / `*_RE` bindings imported from route-registry.ts,
-    // so each of those bindings must resolve to at least one catalog entry.
-    // A new dispatch branch that forgets its ROUTE_DEFINITIONS entry fails
-    // here instead of silently drifting.
-    //
-    // Deliberately NOT covered (documented in route-registry.ts): the
-    // WebSocket-only upgrade paths (no HTTP method, so no OpenAPI operation),
-    // CONTROL_PREFIX (a prefix, not a route), and FAL_ROUTE_RE (a
-    // header-gated upstream mirror, not a fixed route).
-    const WS_ONLY = new Set(["REALTIME_PATH", "GEMINI_LIVE_PATH", "LIVE_PATH"]);
-    const NON_ROUTES = new Set(["CONTROL_PREFIX", "FAL_ROUTE_RE"]);
-    const catalogPaths = new Set(ROUTE_DEFINITIONS.map((r) => `${r.method} ${r.path}`));
-    const catalogExamples = ROUTE_DEFINITIONS.map((r) => ({
-      key: `${r.method} ${r.path}`,
-      method: r.method,
-      probe: r.examplePath ?? r.path,
-    }));
-
-    for (const [name, value] of Object.entries(registry)) {
-      if (NON_ROUTES.has(name) || WS_ONLY.has(name)) continue;
-      if (typeof value === "string" && name.endsWith("_PATH")) {
-        const covered = ROUTE_DEFINITIONS.some((r) => r.path === value);
-        expect(covered, `dispatch path ${name} (${value}) has no catalog entry`).toBe(true);
-      } else if (value instanceof RegExp && name.endsWith("_RE")) {
-        const covered = catalogExamples.filter((e) => value.test(e.probe));
+    // Independently enumerate server.ts method guards and semantic regex
+    // alternatives. One matching example cannot prove that a sibling operation
+    // (e.g. Gemini streaming, or DELETE on a shared path) is cataloged.
+    // Keep this table current when adding an operation to an existing binding;
+    // the binding-set assertion also catches newly exported dispatch patterns.
+    // Exclude WebSocket-only upgrades, CONTROL_PREFIX (not a route), and
+    // FAL_ROUTE_RE (a header-gated dynamic upstream mirror).
+    const excluded = new Set([
+      "REALTIME_PATH",
+      "GEMINI_LIVE_PATH",
+      "LIVE_PATH",
+      "CONTROL_PREFIX",
+      "FAL_ROUTE_RE",
+    ]);
+    const expectedOperations: { [binding: string]: readonly string[] } = {
+      AZURE_DEPLOYMENT_RE: [
+        "POST /openai/deployments/{deploymentId}/chat/completions",
+        "POST /openai/deployments/{deploymentId}/embeddings",
+      ],
+      BATCHES_CANCEL_RE: ["POST /v1/batches/{batch_id}/cancel"],
+      BATCHES_ID_RE: ["GET /v1/batches/{batch_id}"],
+      BATCHES_PATH: ["GET /v1/batches", "POST /v1/batches"],
+      BEDROCK_CONVERSE_RE: ["POST /model/{modelId}/converse"],
+      BEDROCK_CONVERSE_STREAM_RE: ["POST /model/{modelId}/converse-stream"],
+      BEDROCK_INVOKE_RE: ["POST /model/{modelId}/invoke"],
+      BEDROCK_STREAM_RE: ["POST /model/{modelId}/invoke-with-response-stream"],
+      BYTEPLUS_VIDEO_STATUS_RE: [
+        "GET /contents/generations/tasks/{id}",
+        "GET /api/v3/contents/generations/tasks/{id}",
+      ],
+      BYTEPLUS_VIDEO_SUBMIT_RE: [
+        "POST /contents/generations/tasks",
+        "POST /api/v3/contents/generations/tasks",
+      ],
+      COHERE_CHAT_PATH: ["POST /v2/chat"],
+      COHERE_EMBED_PATH: ["POST /v2/embed"],
+      COMPLETIONS_PATH: ["POST /v1/chat/completions"],
+      ELEVENLABS_MUSIC_RE: ["POST /v1/music", "POST /v1/music/{subtype}"],
+      ELEVENLABS_SOUND_GENERATION_PATH: ["POST /v1/sound-generation"],
+      ELEVENLABS_TTS_RE: ["POST /v1/text-to-speech/{voice_id}"],
+      ELEVENLABS_VOICE_CREATE_PATH: ["POST /v1/text-to-voice"],
+      ELEVENLABS_VOICE_DESIGN_PATH: ["POST /v1/text-to-voice/design"],
+      ELEVENLABS_VOICE_RE: ["GET /v1/voices/{voice_id}", "DELETE /v1/voices/{voice_id}"],
+      EMBEDDINGS_PATH: ["POST /v1/embeddings"],
+      FAL_QUEUE_REQUESTS_RE: [
+        "GET /fal/queue/requests/{requestId}",
+        "POST /fal/queue/requests/{requestId}",
+        "PUT /fal/queue/requests/{requestId}",
+      ],
+      FAL_QUEUE_SUBMIT_RE: ["POST /fal/queue/submit/{model}"],
+      FAL_RUN_RE: ["POST /fal/run/{model}"],
+      FILES_CONTENT_RE: ["GET /v1/files/{file_id}/content"],
+      FILES_ID_RE: ["GET /v1/files/{file_id}", "DELETE /v1/files/{file_id}"],
+      FILES_PATH: ["GET /v1/files", "POST /v1/files"],
+      FINE_TUNING_CANCEL_RE: ["POST /v1/fine_tuning/jobs/{job_id}/cancel"],
+      FINE_TUNING_EVENTS_RE: ["GET /v1/fine_tuning/jobs/{job_id}/events"],
+      FINE_TUNING_ID_RE: ["GET /v1/fine_tuning/jobs/{job_id}"],
+      FINE_TUNING_JOBS_PATH: ["GET /v1/fine_tuning/jobs", "POST /v1/fine_tuning/jobs"],
+      GEMINI_EMBED_RE: ["POST /v1beta/models/{model}:embedContent"],
+      GEMINI_INTERACTIONS_PATH: ["POST /v1beta/interactions"],
+      GEMINI_PATH_RE: [
+        "POST /v1beta/models/{model}:generateContent",
+        "POST /v1beta/models/{model}:streamGenerateContent",
+      ],
+      GEMINI_PREDICT_RE: ["POST /v1beta/models/{model}:predict"],
+      GROK_VIDEO_STATUS_RE: ["GET /v1/videos/{id}"],
+      GROK_VIDEO_SUBMIT_PATH: ["POST /v1/videos/generations"],
+      HEALTH_PATH: ["GET /health"],
+      IMAGES_EDIT_PATH: ["POST /v1/images/edits"],
+      IMAGES_PATH: ["POST /v1/images/generations"],
+      IMAGES_VARIATIONS_PATH: ["POST /v1/images/variations"],
+      MESSAGES_PATH: ["POST /v1/messages"],
+      METRICS_PATH: ["GET /metrics"],
+      MODELS_PATH: ["GET /v1/models"],
+      MODERATIONS_PATH: ["POST /v1/moderations"],
+      OLLAMA_CHAT_PATH: ["POST /api/chat"],
+      OLLAMA_EMBEDDINGS_PATH: ["POST /api/embeddings"],
+      OLLAMA_EMBED_PATH: ["POST /api/embed"],
+      OLLAMA_GENERATE_PATH: ["POST /api/generate"],
+      OLLAMA_TAGS_PATH: ["GET /api/tags"],
+      OPENAI_VIDEO_STATUS_RE: ["GET /v1/videos/{id}"],
+      OPENROUTER_CREDITS_PATH: ["GET /api/v1/credits"],
+      OPENROUTER_KEY_PATH: ["GET /api/v1/key"],
+      OPENROUTER_MODELS_PATH: ["GET /api/v1/models"],
+      OPENROUTER_VIDEOS_PATH: ["POST /api/v1/videos"],
+      OPENROUTER_VIDEO_CONTENT_RE: ["GET /api/v1/videos/{jobId}/content"],
+      OPENROUTER_VIDEO_MODELS_PATH: ["GET /api/v1/videos/models"],
+      OPENROUTER_VIDEO_STATUS_RE: ["GET /api/v1/videos/{jobId}"],
+      READY_PATH: ["GET /ready"],
+      REQUESTS_PATH: ["GET /v1/_requests", "DELETE /v1/_requests"],
+      RERANK_PATH: ["POST /v2/rerank"],
+      RESPONSES_PATH: ["POST /v1/responses"],
+      SEARCH_PATH: ["POST /search"],
+      SPEECH_PATH: ["POST /v1/audio/speech"],
+      TRANSCRIPTIONS_PATH: ["POST /v1/audio/transcriptions"],
+      TRANSLATIONS_PATH: ["POST /v1/audio/translations"],
+      VEO_OPERATION_RE: ["GET /v1beta/operations/{name}"],
+      VEO_PREDICT_LRO_RE: ["POST /v1beta/models/{model}:predictLongRunning"],
+      VERTEX_AI_RE: [
+        "POST /v1/projects/{project}/locations/{location}/publishers/google/models/{model}:generateContent",
+        "POST /v1/projects/{project}/locations/{location}/publishers/google/models/{model}:streamGenerateContent",
+      ],
+      VIDEOS_PATH: ["POST /v1/videos"],
+    };
+    const dispatchBindings = Object.entries(registry).filter(
+      ([name, value]) =>
+        !excluded.has(name) &&
+        ((typeof value === "string" && name.endsWith("_PATH")) ||
+          (value instanceof RegExp && name.endsWith("_RE"))),
+    );
+    expect(dispatchBindings.map(([name]) => name).sort()).toEqual(
+      Object.keys(expectedOperations).sort(),
+    );
+    const catalogOperations = new Map(ROUTE_DEFINITIONS.map((r) => [`${r.method} ${r.path}`, r]));
+    expect(catalogOperations.size).toBe(ROUTE_DEFINITIONS.length);
+    for (const [name, matcher] of dispatchBindings) {
+      for (const identity of expectedOperations[name]) {
+        const route = catalogOperations.get(identity);
+        expect(route, `dispatch operation ${name}: ${identity} has no catalog entry`).toBeDefined();
+        if (!route) continue;
+        const probe = route.examplePath ?? route.path;
         expect(
-          covered.length > 0,
-          `dispatch pattern ${name} (${value}) matches no catalog examplePath`,
+          typeof matcher === "string"
+            ? route.path === matcher
+            : matcher instanceof RegExp && matcher.test(probe),
+          `catalog operation ${identity} does not match dispatch binding ${name}`,
         ).toBe(true);
       }
     }
-    // Sanity: the loop above actually inspected the dispatch surface.
-    const pathCount = Object.keys(registry).filter((k) => k.endsWith("_PATH")).length;
-    expect(pathCount).toBeGreaterThan(20);
-    expect(catalogPaths.size).toBe(ROUTE_DEFINITIONS.length);
   });
 
   it("every catalog operation carries a real schema (no bare paths)", async () => {
