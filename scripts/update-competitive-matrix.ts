@@ -278,11 +278,11 @@ export type RuleLabel = (typeof FEATURE_RULES)[number]["rowLabel"];
 /**
  * Rules that intentionally have no row in the docs/index.html matrix, with the
  * reason. A detection of one of these rules never changes the homepage:
- * runMatrixUpdate() lists every row-less detection in the summary and the log
- * for manual follow-up, with what the competitor's migration page did with it
- * (the page is updated when it has a row for the rule). Every other rule must
- * name a real homepage row; the run fails if one does not, so a renamed row
- * cannot silently stop the scan.
+ * runMatrixUpdate() lists every row-less detection for manual follow-up.
+ * The log identifies the competitor and capability. The summary also includes
+ * what the competitor's migration page did with it (the page is updated when
+ * it has a row for the rule). Every other rule must name a real homepage row;
+ * the run fails if one does not, so a renamed row cannot silently stop the scan.
  */
 export const MATRIX_ROWLESS_RULES: Partial<Record<RuleLabel, string>> = {
   "Realtime GA protocol": "The homepage folds Realtime into the WebSocket APIs row.",
