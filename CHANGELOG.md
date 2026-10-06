@@ -4,6 +4,7 @@
 
 ### Added
 
+- Add `GET /__aimock/openapi.json` (OpenAPI 3.1) and `GET /__aimock/routes` (`{ count, routes }`) for HTTP route discovery, plus package exports for the catalog and route definitions (#451).
 - MCP scenario fakes: a fixture file's `mcpFakes` key scripts MCP tool answers per test id or context, with ordered answers, exact or any-argument matching, scripted tool errors and an optional closed world (`undeclaredTools: "deny"`). A mismatch, an exhausted tool or an undeclared tool under `deny` fails loud with a JSON-RPC error keyed by `error.data.aimock.code`
 - `POST /__aimock/fixtures` accepts an `mcpFakes` key; `fixtures` is optional when it is sent, and the response adds `mcpFakesAdded`. Callers that do not send `mcpFakes` get `{"added": n}` as before
 - `GET /__aimock/mcp/fakes` lists the fakes that apply to a test id and context, with each entry's consumed state
