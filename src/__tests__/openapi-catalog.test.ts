@@ -49,6 +49,30 @@ describe("OpenAPI route catalog", () => {
     await mock.stop();
   });
 
+  it.each([
+    { path: "/ready", status: "ready", schemaName: "ReadyResponse" },
+    { path: "/health", status: "ok", schemaName: "HealthResponse" },
+    { path: "/__aimock/health", status: "ok", schemaName: "HealthResponse" },
+  ])("describes the real $path status response", async ({ path, status, schemaName }) => {
+    const doc = await (await fetch(`${mock.url}/__aimock/openapi.json`)).json();
+    const response = await fetch(`${mock.url}${path}`);
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body).toEqual({ status });
+
+    const ref = doc.paths[path].get.responses["200"].content["application/json"].schema;
+    const schema = doc.components.schemas[ref.$ref.split("/").at(-1)];
+    expect(schema.type).toBe("object");
+    expect(schema.required).toEqual(["status"]);
+    expect(schema.properties.status.type).toBe(typeof body.status);
+    expect(schema.properties.status.enum).toEqual([body.status]);
+    expect(ref).toEqual({ $ref: `#/components/schemas/${schemaName}` });
+    expect(schema.properties).toEqual({
+      status: { type: "string", enum: [status] },
+      ...(status === "ok" ? { services: { type: "object" } } : {}),
+    });
+  });
+
   it("describes the real voice deletion status without changing voice schemas", async () => {
     const doc = await (await fetch(`${mock.url}/__aimock/openapi.json`)).json();
     const response = await fetch(`${mock.url}/v1/voices/catalog-delete-proof`, {

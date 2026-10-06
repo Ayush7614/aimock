@@ -1657,6 +1657,11 @@ const COMPONENTS: Record<string, unknown> = {
       },
     },
   },
+  ReadyResponse: {
+    type: "object",
+    required: ["status"],
+    properties: { status: { type: "string", enum: ["ready"] } },
+  },
   HealthResponse: {
     type: "object",
     required: ["status"],
@@ -2058,7 +2063,7 @@ const SCHEMA_REFS: Record<string, OperationSchemas> = {
   "POST /fal/run/{model}": { request: "FalRunRequest", response: "FalRunResponse" },
   // Ops
   "GET /health": { response: "HealthResponse" },
-  "GET /ready": { response: "HealthResponse" },
+  "GET /ready": { response: "ReadyResponse" },
   "GET /metrics": { respContent: "text/plain; version=0.0.4" },
   // Legacy journal
   "GET /v1/_requests": {
