@@ -3240,7 +3240,7 @@
               </tr>
               <tr>
                 <th scope="row">Scenario-scoped MCP tool fakes</th>
-                <td class="col-aimock"><span class="yes">Built-in &#10003;</span></td>
+                <td class="col-aimock"><a href="#mcp-fakes-preview">Preview &#10003;</a></td>
                 <td><span class="no" role="img" aria-label="No">&#10007;</span></td>
                 <td><span class="no" role="img" aria-label="No">&#10007;</span></td>
                 <td><span class="no" role="img" aria-label="No">&#10007;</span></td>
@@ -3251,7 +3251,7 @@
               </tr>
               <tr>
                 <th scope="row">Fail on undeclared MCP tool</th>
-                <td class="col-aimock"><span class="yes">Built-in &#10003;</span></td>
+                <td class="col-aimock"><a href="#mcp-fakes-preview">Preview &#10003;</a></td>
                 <td><span class="no" role="img" aria-label="No">&#10007;</span></td>
                 <td><span class="no" role="img" aria-label="No">&#10007;</span></td>
                 <td><span class="no" role="img" aria-label="No">&#10007;</span></td>
@@ -3501,12 +3501,22 @@
         </div>
 
         <h3 class="agent-tools-title fade-in">Agent tool mocking</h3>
+        <p id="mcp-fakes-preview" class="fade-in">
+          MCP fakes require a preview package; they are not included in npm release 1.43.0. To try
+          the <a href="/mcp-mock#scenario-fakes">MCP fakes examples</a>, install the verified
+          preview:
+          <code style="overflow-wrap: anywhere"
+            >npm install https://pkg.pr.new/@copilotkit/aimock@d0398c0</code
+          >.
+        </p>
         <div class="comparison-wrap fade-in" style="transition-delay: 0.1s">
           <table class="agent-tools-table">
             <thead>
               <tr>
                 <th scope="col">Capability</th>
-                <th scope="col" class="col-aimock"><a href="/mcp-mock">aimock MCP fakes</a></th>
+                <th scope="col" class="col-aimock">
+                  <a href="/mcp-mock">aimock MCP fakes (preview)</a>
+                </th>
                 <th scope="col">
                   <a href="https://mastra.ai/docs/evals/experiments"
                     >Mastra Experiment Tool Mocks</a
