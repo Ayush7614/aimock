@@ -277,7 +277,6 @@ import {
 } from "./api-key-auth.js";
 import type { McpFakeSource } from "./types.js";
 import {
-  CONTROL_PREFIX,
   ensureFakeMount,
   findFakeMount,
   handOffMcpFakes,
