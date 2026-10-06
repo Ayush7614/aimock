@@ -3,7 +3,7 @@ import { existsSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
-// These tests exercise the REAL functions from the drift-automation script
+// These tests exercise the REAL functions from the competitive-matrix script
 // (not a reimplemented mirror), so behavioral bugs surface here directly.
 import {
   countProviders,
@@ -14,6 +14,7 @@ import {
   parseCurrentMatrix,
   computeChanges,
   applyChanges,
+  findUnmatchedCompetitors,
   COMPETITOR_MIGRATION_PAGES,
   type DetectedChange,
 } from "../../scripts/update-competitive-matrix.js";
@@ -445,16 +446,23 @@ describe("parseCurrentMatrix header extraction", () => {
     expect(chatRow!.get("mokksy/ai-mocks")).toContain("&#10003;");
   });
 
-  it("fails to parse headers when <th> lacks <a> anchor tags", () => {
+  it("reports every competitor as unmatched when <th> lacks <a> anchor tags", () => {
     const noLinks = MATRIX_WITH_LINKS.replace(/<a[^>]*>(.*?)<\/a>/g, "$1");
-    const { headers } = parseCurrentMatrix(noLinks);
-    expect(headers).toHaveLength(0);
+    const matrix = parseCurrentMatrix(noLinks);
+    expect(matrix.headers).toHaveLength(0);
+    expect(findUnmatchedCompetitors(matrix)).toEqual([
+      "VidaiMock",
+      "mock-llm",
+      "piyook/llm-mock",
+      "mokksy/ai-mocks",
+    ]);
   });
 });
 
 describe("computeChanges with actual HTML cell structure", () => {
-  // This matrix uses the actual HTML structure from docs/index.html:
-  // cells contain <span class="no">&#10007;</span> not bare "No"
+  // This matrix uses the span.no/span.yes cell markup of docs/index.html:
+  // cells contain <span class="no">&#10007;</span>, not bare "No". Row labels
+  // are simplified to <td>; the real page uses <th scope="row">.
   const ACTUAL_HTML_MATRIX = `
 <table class="comparison-table">
   <thead>
@@ -595,7 +603,7 @@ describe("applyChanges with actual HTML cell structure", () => {
       { competitor: "VidaiMock", capability: "WebSocket APIs", from: "No", to: "Yes" },
     ];
 
-    const result = applyChanges(ACTUAL_HTML_MATRIX, changes);
+    const result = applyChanges(ACTUAL_HTML_MATRIX, changes).html;
 
     // VidaiMock's WebSocket APIs cell should now be yes
     // Parse to verify only VidaiMock column changed
@@ -615,7 +623,7 @@ describe("applyChanges with actual HTML cell structure", () => {
       { competitor: "VidaiMock", capability: "WebSocket APIs", from: "No", to: "Yes" },
     ];
 
-    const result = applyChanges(ACTUAL_HTML_MATRIX, changes);
+    const result = applyChanges(ACTUAL_HTML_MATRIX, changes).html;
 
     const matrix = parseCurrentMatrix(result);
     const embRow = matrix.rows.get("Embeddings API");
@@ -630,7 +638,7 @@ describe("applyChanges with actual HTML cell structure", () => {
       { competitor: "mock-llm", capability: "Embeddings API", from: "No", to: "Yes" },
     ];
 
-    const result = applyChanges(ACTUAL_HTML_MATRIX, changes);
+    const result = applyChanges(ACTUAL_HTML_MATRIX, changes).html;
 
     const matrix = parseCurrentMatrix(result);
     expect(matrix.rows.get("WebSocket APIs")!.get("VidaiMock")).toContain('class="yes"');
@@ -639,7 +647,70 @@ describe("applyChanges with actual HTML cell structure", () => {
 
   it("returns html unchanged when changes array is empty", () => {
     const result = applyChanges(ACTUAL_HTML_MATRIX, []);
-    expect(result).toBe(ACTUAL_HTML_MATRIX);
+    expect(result).toEqual({ html: ACTUAL_HTML_MATRIX, applied: [], unapplied: [] });
+  });
+});
+
+describe("applyChanges keeps the other text in every no-cell shape", () => {
+  // Built from the real docs/index.html conventions: <th scope="row"> row
+  // labels, classes on the inner <span>, never on the <td> itself.
+  const YES = '<span class="yes" role="img" aria-label="Yes">&#10003;</span>';
+  const matrixWith = (cell: string) => `
+<table class="comparison-table">
+  <thead>
+    <tr>
+      <th scope="col">Capability</th>
+      <th scope="col" class="col-aimock"><a href="https://github.com/CopilotKit/aimock">aimock</a></th>
+      <th scope="col"><a href="https://github.com/mswjs/msw">MSW</a></th>
+      <th scope="col"><a href="https://github.com/vidaiUK/VidaiMock">VidaiMock</a></th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <th scope="row">WebSocket APIs</th>
+      <td class="col-aimock"><span class="yes">Built-in &#10003;</span></td>
+      <td><span class="no" role="img" aria-label="No">&#10007;</span></td>
+      ${cell}
+    </tr>
+  </tbody>
+</table>`;
+  const flip = (cell: string) => {
+    const result = applyChanges(matrixWith(cell), [
+      { competitor: "VidaiMock", capability: "WebSocket APIs", from: "No", to: "Yes" },
+    ]);
+    expect(result.unapplied).toEqual([]);
+    return parseCurrentMatrix(result.html).rows.get("WebSocket APIs")!.get("VidaiMock")!;
+  };
+
+  it("span form: replaces only the span and keeps the text", () => {
+    expect(
+      flip('<td><span class="no" role="img" aria-label="No">&#10007;</span> (planned v2)</td>'),
+    ).toBe(`${YES} (planned v2)`);
+  });
+
+  it("bare &#10007; form: replaces only the entity and keeps the text", () => {
+    expect(flip("<td>&#10007; (planned v2)</td>")).toBe(`${YES} (planned v2)`);
+  });
+
+  it("bare ✗ form: replaces only the glyph and keeps the text", () => {
+    expect(flip("<td>(planned v2) ✗</td>")).toBe(`(planned v2) ${YES}`);
+  });
+
+  it('bare cross in a <td class="no">: keeps the text and flips the cell class to yes', () => {
+    const matrix = applyChanges(matrixWith('<td class="no">&#10007; (planned v2)</td>'), [
+      { competitor: "VidaiMock", capability: "WebSocket APIs", from: "No", to: "Yes" },
+    ]).html;
+    expect(matrix).toContain(`<td class="yes">${YES} (planned v2)</td>`);
+    expect(matrix).not.toContain('<td class="no">');
+  });
+
+  it("leaves the other no-cells in the row unchanged", () => {
+    const matrix = applyChanges(matrixWith("<td>&#10007; (planned v2)</td>"), [
+      { competitor: "VidaiMock", capability: "WebSocket APIs", from: "No", to: "Yes" },
+    ]).html;
+    expect(parseCurrentMatrix(matrix).rows.get("WebSocket APIs")!.get("MSW")).toBe(
+      '<span class="no" role="img" aria-label="No">&#10007;</span>',
+    );
   });
 });
 
@@ -706,11 +777,11 @@ describe("extractFeatures keyword precision", () => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Regression coverage for the 6 pre-existing drift-automation bugs. Each block
-// is a red→green repro: it fails against the pre-fix script and passes after.
+// Behavior pins for the competitive-matrix script. Each block below names the
+// behavior it checks.
 // ═══════════════════════════════════════════════════════════════════════════
 
-// ── Bug 1: migration-page paths must resolve; missing competitor mapping ─────
+// ── Mapped migration-page paths exist; mokksy/ai-mocks has a mapping ─────────
 describe("Bug 1: COMPETITOR_MIGRATION_PAGES", () => {
   it("maps every mapped competitor to a file that actually exists on disk", () => {
     for (const [competitor, relPath] of Object.entries(COMPETITOR_MIGRATION_PAGES)) {
@@ -724,7 +795,7 @@ describe("Bug 1: COMPETITOR_MIGRATION_PAGES", () => {
   });
 });
 
-// ── Bug 2: unanchored keyword regexes → false substring flips ────────────────
+// ── Keywords match only at word boundaries, not inside other words ───────────
 describe("Bug 2: extractFeatures keyword anchoring", () => {
   it('does not flip "CLI server" from the words "client"/"click"', () => {
     const feats = extractFeatures("This mock has a Python client library and you click buttons.");
@@ -747,7 +818,7 @@ describe("Bug 2: extractFeatures keyword anchoring", () => {
   });
 });
 
-// ── Bug 3: countProviders substring inflation + redundant group ──────────────
+// ── countProviders ignores substrings and counts Gemini once ─────────────────
 describe("Bug 3: countProviders substring safety", () => {
   it('does not count "cohere" inside "coherent" or "aws" inside "flaws"', () => {
     expect(countProviders("The system is coherent and has flaws.")).toBe(0);
@@ -758,7 +829,7 @@ describe("Bug 3: countProviders substring safety", () => {
   });
 });
 
-// ── Bug 4: String.replace $-sequence corruption ──────────────────────────────
+// ── Literal $-sequences in replacement HTML stay literal ─────────────────────
 describe("Bug 4: literal $-sequences in HTML replacements stay literal", () => {
   const matrixWithDollar = `
 <table class="comparison-table">
@@ -781,9 +852,11 @@ describe("Bug 4: literal $-sequences in HTML replacements stay literal", () => {
   it("applyChanges does not duplicate the row when replacement text contains $&", () => {
     const result = applyChanges(matrixWithDollar, [
       { competitor: "VidaiMock", capability: "Docker image", from: "No", to: "Yes" },
-    ]);
+    ]).html;
     // The competitor cell flips to "yes".
-    expect(result).toContain('<td><span class="yes">&#10003;</span></td>');
+    expect(result).toContain(
+      '<td><span class="yes" role="img" aria-label="Yes">&#10003;</span></td>',
+    );
     // The row label must appear exactly once — a $&-expanding replace duplicates it.
     expect((result.match(/Docker image/g) || []).length).toBe(1);
   });
@@ -810,7 +883,7 @@ describe("Bug 4: literal $-sequences in HTML replacements stay literal", () => {
   });
 });
 
-// ── Bug 5: migration cell column located by header name, not adjacency ───────
+// ── Migration cell column is found by header name, not adjacency ─────────────
 describe("Bug 5: migration cell column resolution by header name", () => {
   it("flips the competitor cell even when aimock is the first data column", () => {
     const migration = `
@@ -852,7 +925,7 @@ describe("Bug 5: migration cell column resolution by header name", () => {
   });
 });
 
-// ── Bug 6: orphaned variant key renamed to the real FEATURE_RULE label ───────
+// ── Realtime variant key uses the real FEATURE_RULE label ────────────────────
 describe("Bug 6: buildMigrationRowPatterns realtime variant key", () => {
   it("returns variants for the real rule label 'Realtime transcription/translation'", () => {
     const patterns = buildMigrationRowPatterns("Realtime transcription/translation");

@@ -336,6 +336,13 @@ export function buildTextStreamEvents(
   return events;
 }
 
+function requireFixtureToolArguments(value: unknown): string {
+  if (typeof value !== "string") {
+    throw new Error('Invalid fixture tool call: "arguments" must be a string after normalization');
+  }
+  return value;
+}
+
 export function buildToolCallStreamEvents(
   toolCalls: ToolCall[],
   model: string,
@@ -379,7 +386,7 @@ export function buildToolCallStreamEvents(
     });
 
     // function_call_arguments.delta
-    const args = tc.arguments;
+    const args = requireFixtureToolArguments(tc.arguments);
     for (let i = 0; i < args.length; i += chunkSize) {
       const slice = args.slice(i, i + chunkSize);
       events.push({
@@ -836,7 +843,7 @@ function buildFunctionCallOutputEvents(
 ): FunctionCallBlockResult {
   const callId = toolCall.id || generateToolCallId();
   const fcId = generateId("fc");
-  const args = toolCall.arguments;
+  const args = requireFixtureToolArguments(toolCall.arguments);
   const events: ResponsesSSEEvent[] = [];
 
   events.push({
@@ -1003,7 +1010,7 @@ function buildToolCallResponse(
       id: generateId("fc"),
       call_id: tc.id || generateToolCallId(),
       name: tc.name,
-      arguments: tc.arguments,
+      arguments: requireFixtureToolArguments(tc.arguments),
       status: "completed",
     });
   }
@@ -1109,7 +1116,7 @@ function buildFunctionCallOutputItem(tc: { name: string; arguments: string; id?:
     id: generateId("fc"),
     call_id: tc.id || generateToolCallId(),
     name: tc.name,
-    arguments: tc.arguments,
+    arguments: requireFixtureToolArguments(tc.arguments),
     status: "completed",
   };
 }
@@ -1301,6 +1308,58 @@ export async function handleResponses(
           type: "invalid_request_error",
         },
       }),
+    );
+    return;
+  }
+
+  // Guard only shapes consumed by input conversion. Other item fields may be
+  // intentionally ignored, and falsy message content normalizes to empty text.
+  let inputError: string | undefined;
+  if (typeof responsesReq.input !== "string" && !Array.isArray(responsesReq.input)) {
+    inputError = "input must be a string or an array";
+  } else if (Array.isArray(responsesReq.input)) {
+    for (const [index, item] of responsesReq.input.entries()) {
+      if (item === null) {
+        inputError = `input[${index}] must not be null`;
+        break;
+      }
+      if (
+        (item.role === "system" ||
+          item.role === "developer" ||
+          item.role === "user" ||
+          item.role === "assistant") &&
+        item.content &&
+        typeof item.content !== "string" &&
+        !Array.isArray(item.content)
+      ) {
+        inputError = `input[${index}].content must be a string or an array`;
+        break;
+      }
+    }
+  }
+  // Keep the converter's empty/falsy bypass and ignored non-function entries.
+  // Only reject collections that would throw when the converter reads them.
+  let toolsError: string | undefined;
+  if (responsesReq.tools && responsesReq.tools.length !== 0) {
+    if (!Array.isArray(responsesReq.tools)) {
+      toolsError = "tools must be an array";
+    } else if (responsesReq.tools.some((tool) => tool === null)) {
+      toolsError = "tools entries must not be null";
+    }
+  }
+  const validationError = inputError ?? toolsError;
+  if (validationError) {
+    journal.add({
+      method: req.method ?? "POST",
+      path: req.url ?? "/v1/responses",
+      headers: flattenHeaders(req.headers),
+      body: responsesReq,
+      response: { status: 400, fixture: null },
+    });
+    writeErrorResponse(
+      res,
+      400,
+      JSON.stringify({ error: { message: validationError, type: "invalid_request_error" } }),
     );
     return;
   }
