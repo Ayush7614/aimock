@@ -2,7 +2,7 @@
  * Machine-readable route catalog for aimock.
  *
  * `GET /__aimock/openapi.json` returns an OpenAPI 3.1 document and
- * `GET /__aimock/routes` returns the same list as a flat JSON array for
+ * `GET /__aimock/routes` returns the same list in a `{ count, routes }` object for
  * shells that just need `method + path`. SDK codegen, docs checks, and
  * harness smoke tests can assert against this instead of hard-coding a
  * route list that drifts.
