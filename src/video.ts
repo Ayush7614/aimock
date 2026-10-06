@@ -217,6 +217,38 @@ export async function handleVideoCreate(
     return;
   }
 
+  const prompt = videoReq.prompt;
+  const validParts =
+    Array.isArray(prompt) &&
+    prompt.length > 0 &&
+    prompt.every(
+      (part: unknown) =>
+        isJsonObject(part) &&
+        typeof part.type === "string" &&
+        (!("text" in part) || typeof part.text === "string"),
+    );
+  if (typeof prompt !== "string" && !validParts) {
+    journal.add({
+      method,
+      path,
+      headers: flattenHeaders(req.headers),
+      body: null,
+      response: { status: 400, fixture: null },
+    });
+    writeErrorResponse(
+      res,
+      400,
+      JSON.stringify({
+        error: {
+          message:
+            "Invalid parameter: 'prompt' must be a string or a non-empty array of content parts",
+          type: "invalid_request_error",
+        },
+      }),
+    );
+    return;
+  }
+
   const syntheticReq: ChatCompletionRequest = {
     model: videoReq.model ?? "sora-2",
     messages: [{ role: "user", content: videoReq.prompt }],

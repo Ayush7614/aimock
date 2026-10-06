@@ -184,7 +184,7 @@ describe("model-family pipeline (injected /models)", () => {
     const geminiPayload = [
       "gemini-2.5-flash", // include
       "gemini-2.0-flash", // include
-      "gemini-1.5-pro-2024-05-14", // → gemini-1.5-pro (include)
+      "gemini-1.5-pro-2024-05-14", // → gemini-1.5-pro (exclude)
     ];
     expect(unclassifiedFamilies(geminiPayload, "gemini")).toEqual([]);
 
@@ -264,16 +264,16 @@ describe("gemma families are excluded by rule", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Regression: the FULL live /models family wave (run 29478043559, 2026-07-16).
-// These are the exact families the drift job flagged as UNCLASSIFIED (OpenAI 48
-// / Anthropic 10 / Gemini 45). This suite injects representative raw ids for
-// every one of them into the REAL enumerate→normalize→subtract pipeline and
-// asserts the registry now classifies all of them — zero drift. It exercises
-// the same `unclassifiedFamilies` surface the live canary uses, so it is a true
+// Regression: the live /models family wave, seeded from run 29478043559
+// (2026-07-16; OpenAI 48 / Anthropic 10 / Gemini 45 unclassified families then)
+// and extended with families classified in some later waves. This suite
+// injects representative raw ids into the REAL enumerate→normalize→subtract
+// pipeline and asserts the registry classifies all of them — zero drift. It
+// exercises the same `unclassifiedFamilies` surface the live canary uses, so it is a true
 // regression against the classification (not a fake against a private copy).
 // ---------------------------------------------------------------------------
 
-describe("full live /models wave is fully classified (2026-07-16 drift)", () => {
+describe("recorded /models family waves are classified", () => {
   it("OpenAI: every live family is classified (zero unclassified)", () => {
     const openaiLive = [
       // Existing include families (dated snapshots collapse onto them)
@@ -306,6 +306,12 @@ describe("full live /models wave is fully classified (2026-07-16 drift)", () => 
       "gpt-5.6-luna",
       "gpt-5.6-sol",
       "gpt-5.6-terra",
+      // gpt-6 named variants (2026-09-23 wave)
+      "gpt-6-luna",
+      "gpt-6-sol",
+      // gpt-6.1 point release (2026-09-24..30 wave, first listed 09-30; its own
+      // normalized family)
+      "gpt-6.1-sol",
       // o-series reasoning
       "o1",
       "o1-pro",
@@ -372,15 +378,20 @@ describe("full live /models wave is fully classified (2026-07-16 drift)", () => 
       "claude-sonnet-4-6",
       "claude-sonnet-5",
       "claude-fable-5",
+      // 2026-09-23 wave: Opus 5.5 point release
+      "claude-opus-5-5",
+      // 2026-09-24..30 wave (first listed 09-29): Sonnet 5.5 point release
+      "claude-sonnet-5-5",
     ];
     expect(unclassifiedFamilies(anthropicLive, "anthropic")).toEqual([]);
   });
 
-  it("Gemini: every live family is classified (zero unclassified)", () => {
+  it("Gemini: every recorded family is classified (zero unclassified)", () => {
     const geminiLive = [
-      // Existing include
+      // Existing exclude (Gemini 1.5, retired upstream)
       "gemini-1.5-pro",
       "gemini-1.5-flash",
+      // Existing include
       "gemini-2.0-flash",
       "gemini-2.5-flash",
       "gemini-2.5-pro",
@@ -402,6 +413,7 @@ describe("full live /models wave is fully classified (2026-07-16 drift)", () => 
       // Preview specialty surfaces (pattern OR explicit)
       "gemini-3.1-pro-preview-customtools", // explicit exclude (not -preview$)
       "antigravity-preview-05", // pattern
+      "antigravity-preview-latest", // explicit exclude (-preview-latest alias, not -preview$)
       "aqa", // explicit exclude (retired specialty)
       "deep-research-max-preview-04", // pattern
       "deep-research-preview-04", // pattern
@@ -424,6 +436,8 @@ describe("full live /models wave is fully classified (2026-07-16 drift)", () => 
       "gemini-3.1-flash-image-preview", // pattern
       "gemini-3.1-flash-lite-image",
       "gemini-3.1-flash-tts-preview", // pattern
+      "gemini-3.8-flash-tts", // explicit exclude (non-preview -tts, 2026-09-24..30 wave)
+      "gemini-3.8-flash-lite-tts", // explicit exclude (non-preview -tts, 2026-09-24..30 wave)
       "gemini-embedding",
       "gemini-embedding-2",
       "gemini-embedding-2-preview", // pattern

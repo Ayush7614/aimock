@@ -638,6 +638,21 @@ dup.json[2]: [warning] #1 cross-file: duplicate userMessage 'bye' &mdash; shadow
 dup.json[2]: 2 fixture(s), 0 error(s), 2 warning(s)</code></pre>
         </div>
 
+        <h3 id="validate-mcp-fakes">MCP fakes</h3>
+        <p>
+          A fixture file may hold an
+          <a href="/mcp-mock#scenario-fakes"><code>mcpFakes</code></a> key.
+          <code>validate</code> checks its blocks by the rules the server uses at load: each bad
+          block is an error that names its rule (for example
+          <code>[mcp-fakes/bad-block:a] block has no scope</code>), and an <code>args</code> entry
+          after an <code>anyArgs</code> entry is a warning. Entry ids are also checked across all
+          files of the run. Mount conflicts are not checked, because they depend on the running
+          server. A file that holds only <code>mcpFakes</code> is a fixture file: a directory walk
+          checks it instead of skipping it, and a run whose files hold only fakes does not fail the
+          zero-fixture rule. The <code>OK</code> line of a file with fakes counts its blocks, for
+          example <code>account/read-only.json: OK (0 fixture(s), 1 mcpFakes block(s))</code>.
+        </p>
+
         <h3>The <code>--json</code> Report</h3>
         <p>
           <code>--json</code> writes one document to stdout and nothing else &mdash; a usage error
@@ -685,6 +700,7 @@ dup.json[2]: 2 fixture(s), 0 error(s), 2 warning(s)</code></pre>
   ],
   "run": {
     "fixtures": 2,
+    "mcpFakeBlocks": 0,
     "errors": []
   }
 }</code></pre>
@@ -704,6 +720,7 @@ dup.json[2]: 2 fixture(s), 0 error(s), 2 warning(s)</code></pre>
   "files": [],
   "run": {
     "fixtures": 0,
+    "mcpFakeBlocks": 0,
     "errors": [
       "no fixture paths given."
     ]
@@ -740,6 +757,7 @@ dup.json[2]: 2 fixture(s), 0 error(s), 2 warning(s)</code></pre>
   ],
   "run": {
     "fixtures": 2,
+    "mcpFakeBlocks": 0,
     "errors": []
   }
 }</code></pre>
@@ -771,7 +789,9 @@ dup.json[2]: 2 fixture(s), 0 error(s), 2 warning(s)</code></pre>
                 only when the walk passed the file over &mdash; and <code>fatal</code> &mdash;
                 present only when the file produced no report at all. The <code>fatal</code> reason
                 also appears in <code>errors</code>, so a tally of <code>files[].errors</code>
-                matches the error count on the file's stdout line
+                matches the error count on the file's stdout line. A file with an
+                <code>mcpFakes</code> key also has <code>mcpFakeBlocks</code>, the number of blocks
+                it adds (<code>0</code> when a block is bad)
               </td>
             </tr>
             <tr>
@@ -787,7 +807,9 @@ dup.json[2]: 2 fixture(s), 0 error(s), 2 warning(s)</code></pre>
               <td><code>run</code></td>
               <td>
                 The combined pass: <code>fixtures</code> is the total fixture count across every
-                file, and <code>errors</code> holds run-level strings such as
+                file, <code>mcpFakeBlocks</code> (always present, <code>0</code> when no file has
+                <code>mcpFakes</code>) is the total number of <code>mcpFakes</code> blocks, and
+                <code>errors</code> holds run-level strings such as
                 <code>"Cross-file validation failed: ..."</code>,
                 <code
                   >"No fixtures loaded from any input &mdash; the server aborts startup on this

@@ -8,7 +8,7 @@ import {
   symlinkSync,
   readdirSync,
 } from "node:fs";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { format } from "node:util";
@@ -1233,58 +1233,57 @@ describe("aimock validate CLI — run-level containment and reporting", () => {
     expect(errors[0]).toContain("inner: 'v'");
   });
 
-  // --- Entry conversion: shape classified BEFORE the conversion runs -------
-  //
-  // `entryToFixture` reads `entry.match.userMessage` and friends, so it throws
-  // only for a non-object `entry` or a null/absent `entry.match`. A `match`
-  // that is a string, a number, a boolean or an array reads back `undefined`
-  // for every field WITHOUT throwing, so it converted into an empty match — a
-  // catch-all answering every request — and `validate` printed `OK`, exit 0.
-  // The server does the same (verified live under `--validate-on-load`: it
-  // starts, loads the fixture and answers an unrelated prompt from it), so
-  // this lint may not invent an error the server does not have: it warns, and
-  // `--strict` turns that into the failure.
-
+  // Known malformed matches are rejected before conversion; valid siblings
+  // still participate in rules using their original source indices.
   it.each([
-    ["string", '"nope"', "a string"],
-    ["number", "42", "a number"],
-    ["array", "[]", "an array"],
-    ["boolean", "true", "a boolean"],
-  ])("warns on a %s match instead of silently accepting a catch-all", (_label, json, got) => {
-    const f = write(
-      "catchall.json",
-      `{"fixtures":[{"match":${json},"response":{"content":"hi"}}]}`,
-    );
+    ["string", "nope", "a string"],
+    ["number", 42, "a number"],
+    ["array", [], "an array"],
+    ["boolean", true, "a boolean"],
+  ])("rejects a %s match without losing siblings or source indices", (_label, match, got) => {
+    for (const invalidIndex of [0, 1, 2]) {
+      const fixtures: { match: unknown; response: { content: string } }[] = [
+        { match: { userMessage: "hi" }, response: { content: "a" } },
+        { match: { userMessage: "hi" }, response: { content: "b" } },
+      ];
+      fixtures.splice(invalidIndex, 0, { match, response: { content: "bad" } });
+      const f = write("malformed-match.json", JSON.stringify({ fixtures }));
+      const validIndices = [0, 1, 2].filter((index) => index !== invalidIndex);
+      const duplicate = `duplicate userMessage 'hi' — shadows fixture ${validIndices[0]}`;
+      const expectedError = `Invalid fixture entry #${invalidIndex}: "match" is ${got}, expected an object`;
 
-    const r = harness([f]);
-    expect(r.code).toBe(0);
-    const warned = r.logs.concat(r.errors).join("\n");
-    expect(warned).toContain(`"match" is ${got}, not an object`);
-    expect(warned).toContain("CATCH-ALL");
-    // It still converts, exactly as the server loads it.
-    expect(r.logs.join("\n")).toContain("1 fixture(s), 0 error(s), 1 warning(s)");
-
-    // --strict is what turns the warning into a failing run.
-    expect(harness(["--strict", f]).code).toBe(1);
-  });
-
-  it("keeps a non-object-match fixture in the array the rules see", () => {
-    const f = write(
-      "catchall-first.json",
-      JSON.stringify({
-        fixtures: [
-          { match: "nope", response: { content: "a" } },
-          { match: { userMessage: "hi" }, response: { content: "b" } },
-        ],
-      }),
-    );
-    const r = harness([f]);
-    // Both the conversion warning AND the ordering rule that only fires
-    // because the converted fixture reached `validateFixtures` at all.
-    const out = r.logs.concat(r.errors).join("\n");
-    expect(out).toContain('"match" is a string, not an object');
-    expect(out).toContain("empty match acts as catch-all but is not the last fixture");
-    expect(r.logs.join("\n")).toContain("2 fixture(s), 0 error(s), 2 warning(s)");
+      // Exercise the installed entry point and real files, with no dist skip.
+      for (const strict of [false, true]) {
+        for (const json of [false, true]) {
+          const args = [
+            resolve("dist/aimock-cli.js"),
+            "validate",
+            ...(strict ? ["--strict"] : []),
+            ...(json ? ["--json"] : []),
+            f,
+          ];
+          const result = spawnSync(process.execPath, args, { encoding: "utf8", timeout: 15000 });
+          expect(result.error).toBeUndefined();
+          expect(result.status).toBe(1);
+          const output = result.stdout + result.stderr;
+          expect(output).toContain(expectedError.replaceAll('"', json ? '\\"' : '"'));
+          expect(output).not.toContain("CATCH-ALL");
+          expect(output).not.toContain("could not be converted");
+          if (json) {
+            const doc = JSON.parse(result.stdout) as JsonReport;
+            expect(doc.files[0].fixtures).toBe(2);
+            expect(doc.run.fixtures).toBe(2);
+            expect(doc.files[0].errors).toEqual([
+              { index: invalidIndex, message: expect.stringContaining(expectedError) },
+            ]);
+            expect(doc.files[0].warnings).toEqual([{ index: validIndices[1], message: duplicate }]);
+          } else {
+            expect(result.stdout).toContain("2 fixture(s), 1 error(s), 1 warning(s)");
+            expect(output).toContain(`#${validIndices[1]} ${duplicate}`);
+          }
+        }
+      }
+    }
   });
 
   it("classifies every unconvertible entry shape by the entry, not by the throw", () => {
