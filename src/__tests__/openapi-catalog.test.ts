@@ -49,6 +49,113 @@ describe("OpenAPI route catalog", () => {
     await mock.stop();
   });
 
+  it.each(["completed", "failed"] as const)(
+    "describes real Grok video submit and %s polling responses",
+    async (status) => {
+      mock.addFixture({
+        match: { userMessage: "catalog Grok clip", endpoint: "video" },
+        response: {
+          video: {
+            id: "video_catalog_grok",
+            status,
+            url: "https://example.com/v.mp4",
+            duration: 6,
+            cost: 0.05,
+            error: "generation failed",
+          },
+        },
+      });
+      const doc = await (await fetch(`${mock.url}/__aimock/openapi.json`)).json();
+      const submit = await fetch(`${mock.url}/v1/videos/generations`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ prompt: "catalog Grok clip" }),
+      });
+      expect(submit.status).toBe(200);
+      const created = await submit.json();
+      expect(created).toEqual({ request_id: expect.any(String) });
+      const poll = await fetch(`${mock.url}/v1/videos/${created.request_id}`);
+      expect(poll.status).toBe(200);
+      const body = await poll.json();
+      expect(body).toMatchObject({
+        request_id: created.request_id,
+        status: status === "completed" ? "done" : "failed",
+        progress: expect.any(Number),
+      });
+      if (status === "completed") {
+        expect(body.video).toEqual({ url: "https://example.com/v.mp4", duration: 6 });
+        expect(body.usage).toEqual({ cost_in_usd_ticks: 500_000_000 });
+      } else {
+        expect(body).toMatchObject({ code: "generation_failed", error: "generation failed" });
+      }
+      expect(
+        doc.paths["/v1/videos/generations"].post.responses["200"].content["application/json"]
+          .schema,
+      ).toEqual({ $ref: "#/components/schemas/GrokVideoSubmitResponse" });
+      expect(doc.components.schemas.GrokVideoSubmitResponse).toEqual({
+        type: "object",
+        required: ["request_id"],
+        properties: { request_id: { type: "string" } },
+      });
+      expect(
+        doc.paths["/v1/videos/{id}"].get.responses["200"].content["application/json"].schema,
+      ).toEqual({ $ref: "#/components/schemas/VideoStatusResponse" });
+      expect(doc.components.schemas.VideoStatusResponse).toEqual({
+        oneOf: [
+          { $ref: "#/components/schemas/VideoJob" },
+          { $ref: "#/components/schemas/GrokVideoJob" },
+        ],
+      });
+      const grok = doc.components.schemas.GrokVideoJob;
+      expect(grok.required).toEqual(["request_id", "status"]);
+      expect(grok.properties).toEqual({
+        request_id: { type: "string" },
+        status: { type: "string", enum: ["pending", "in_progress", "done", "failed", "expired"] },
+        progress: { type: "number" },
+        video: {
+          type: "object",
+          properties: { url: { type: "string" }, duration: { type: "number" } },
+        },
+        usage: {
+          type: "object",
+          properties: { cost_in_usd_ticks: { type: "number" } },
+        },
+        code: { type: "string" },
+        error: { type: "string" },
+      });
+      expect(grok.properties.status.enum).toContain(body.status);
+    },
+  );
+
+  it("preserves Sora video submit and shared polling contracts", async () => {
+    mock.addFixture({
+      match: { userMessage: "catalog Sora clip", endpoint: "video" },
+      response: { video: { id: "video_catalog_sora", status: "completed" } },
+    });
+    const doc = await (await fetch(`${mock.url}/__aimock/openapi.json`)).json();
+    const submit = await fetch(`${mock.url}/v1/videos`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ prompt: "catalog Sora clip" }),
+    });
+    expect(submit.status).toBe(200);
+    const created = await submit.json();
+    const poll = await fetch(`${mock.url}/v1/videos/${created.id}`);
+    expect(poll.status).toBe(200);
+    const body = await poll.json();
+    expect(created).toMatchObject({ id: "video_catalog_sora", status: "completed" });
+    expect(body).toMatchObject({ id: created.id, status: created.status });
+    expect(
+      doc.paths["/v1/videos"].post.responses["200"].content["application/json"].schema,
+    ).toEqual({ $ref: "#/components/schemas/VideoJob" });
+    expect(doc.components.schemas.VideoStatusResponse.oneOf).toContainEqual({
+      $ref: "#/components/schemas/VideoJob",
+    });
+    expect(doc.components.schemas.VideoJob.required).toEqual(["id", "status"]);
+    expect(doc.components.schemas.VideoJob.properties.id).toEqual({ type: "string" });
+    expect(doc.components.schemas.VideoJob.properties.status.enum).toContain(body.status);
+  });
+
   it("derives the catalog from the router registry (no hand-maintained copy)", () => {
     expect(CATALOG_ROUTES.length).toBe(ROUTE_DEFINITIONS.length);
     const registryKeys = new Set(ROUTE_DEFINITIONS.map((r) => `${r.method} ${r.path}`));

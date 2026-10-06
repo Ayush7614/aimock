@@ -1137,6 +1137,36 @@ const COMPONENTS: Record<string, unknown> = {
       progress: { type: "number" },
     },
   },
+  GrokVideoSubmitResponse: {
+    type: "object",
+    required: ["request_id"],
+    properties: { request_id: { type: "string" } },
+  },
+  GrokVideoJob: {
+    type: "object",
+    required: ["request_id", "status"],
+    properties: {
+      request_id: { type: "string" },
+      status: { type: "string", enum: ["pending", "in_progress", "done", "failed", "expired"] },
+      progress: { type: "number" },
+      video: {
+        type: "object",
+        properties: { url: { type: "string" }, duration: { type: "number" } },
+      },
+      usage: {
+        type: "object",
+        properties: { cost_in_usd_ticks: { type: "number" } },
+      },
+      code: { type: "string" },
+      error: { type: "string" },
+    },
+  },
+  VideoStatusResponse: {
+    oneOf: [
+      { $ref: "#/components/schemas/VideoJob" },
+      { $ref: "#/components/schemas/GrokVideoJob" },
+    ],
+  },
   OpenRouterVideoSubmitRequest: {
     type: "object",
     required: ["model", "prompt"],
@@ -1953,8 +1983,11 @@ const SCHEMA_REFS: Record<string, OperationSchemas> = {
   },
   // Video
   "POST /v1/videos": { request: "VideoSubmitRequest", response: "VideoJob" },
-  "POST /v1/videos/generations": { request: "VideoSubmitRequest", response: "VideoJob" },
-  "GET /v1/videos/{id}": { response: "VideoJob" },
+  "POST /v1/videos/generations": {
+    request: "VideoSubmitRequest",
+    response: "GrokVideoSubmitResponse",
+  },
+  "GET /v1/videos/{id}": { response: "VideoStatusResponse" },
   "POST /api/v1/videos": {
     request: "OpenRouterVideoSubmitRequest",
     response: "OpenRouterVideoJob",
