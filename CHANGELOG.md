@@ -39,6 +39,8 @@
 ### Fixed
 
 - Return HTTP 202 from OpenRouter video submission on fixture replay and successful record/proxy paths, with matching journal status; polling and downloads remain HTTP 200 (#492).
+- Fix the competitive-matrix updater to apply detected capabilities to migration pages even when homepage cells are unchanged or no homepage row exists. Report migration outcomes and flag ambiguous or unsupported cells for manual review without changing them (#488)
+- Allow PUT in CORS preflight responses so browsers can call the existing `/fal/queue/requests/{requestId}` route (#480).
 - Fix internal errors for specific malformed provider fields and control fixture inputs, while preserving supported input forms and defaults. `toolName` matching safely skips malformed tools, and `addFixturesFromJSON` explains its array requirement. Multipart parsing distinguishes `name` from `filename`. Invalid HTTP and WebSocket request targets return 400 while retaining existing diagnostics and HTTP journal/CORS behavior (#474)
 - Reject missing Ollama tool functions and malformed Anthropic message collections before fixture matching. Reject numeric user/assistant content in Anthropic requests and numeric Gemini Interactions input (#474)
 - Validate malformed tool shapes on native `/v1/chat/completions` before fixture matching or proxy forwarding, while preserving supported shorthand. Compatible routes skip `toolName` matches for non-array tools without changing the request or proxy payload (#474)
