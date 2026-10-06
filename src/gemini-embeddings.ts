@@ -21,6 +21,7 @@ import {
   isEmbeddingResponse,
   isErrorResponse,
   generateDeterministicEmbedding,
+  MAX_EMBEDDING_DIMENSIONS,
   flattenHeaders,
   isJsonObject,
   getTestId,
@@ -133,6 +134,30 @@ export async function handleGeminiEmbedContent(
 
   // Extract text from content.parts
   const parts = embedReq.content?.parts ?? [];
+  // Preserve nullish defaults and ignored non-null entries; guard only the
+  // shapes that cannot be consumed by the text extraction below.
+  const partsError = !Array.isArray(parts)
+    ? "content.parts must be an array"
+    : parts.some((part) => part === null)
+      ? "content.parts must not contain null entries"
+      : undefined;
+  if (partsError) {
+    journal.add({
+      method: req.method ?? "POST",
+      path: req.url ?? `/v1beta/models/${model}:embedContent`,
+      headers: flattenHeaders(req.headers),
+      body: null,
+      response: { status: 400, fixture: null },
+    });
+    writeErrorResponse(
+      res,
+      400,
+      JSON.stringify({
+        error: { message: partsError, code: 400, status: "INVALID_ARGUMENT" },
+      }),
+    );
+    return;
+  }
   const inputText = parts
     .filter((p) => p.text !== undefined)
     .map((p) => p.text!)
@@ -310,6 +335,38 @@ export async function handleGeminiEmbedContent(
 
   // No fixture match — generate deterministic embedding from input text
   const dimensions = embedReq.outputDimensionality ?? DEFAULT_GEMINI_EMBEDDING_DIMENSIONS;
+  // Match the embedding loop's numeric coercion, including array dimensions.
+  // Preserve supported coercion and zero within the local serialization budget.
+  // Guard only the fallback allocation, not unused dimensions on earlier branches.
+  // Replay, strict, chaos, and proxy paths above do not consume this field.
+  const exceedsFallbackBudget = dimensions > MAX_EMBEDDING_DIMENSIONS;
+  if (
+    exceedsFallbackBudget ||
+    (typeof dimensions === "number" && (!Number.isInteger(dimensions) || dimensions < 0)) ||
+    (typeof dimensions === "string" && Number.isNaN(Number(dimensions)))
+  ) {
+    journal.add({
+      method: req.method ?? "POST",
+      path,
+      headers: flattenHeaders(req.headers),
+      body: syntheticReq,
+      response: { status: 400, fixture: null },
+    });
+    writeErrorResponse(
+      res,
+      400,
+      JSON.stringify({
+        error: {
+          message: exceedsFallbackBudget
+            ? `outputDimensionality exceeds the fallback serialization budget of ${MAX_EMBEDDING_DIMENSIONS}`
+            : "outputDimensionality cannot produce a numeric embedding",
+          code: 400,
+          status: "INVALID_ARGUMENT",
+        },
+      }),
+    );
+    return;
+  }
   const embedding = generateDeterministicEmbedding(inputText, dimensions);
 
   logger.warn(

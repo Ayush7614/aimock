@@ -62,6 +62,8 @@ export async function handleEmbeddings(
   defaults: HandlerDefaults,
   setCorsHeaders: (res: http.ServerResponse) => void,
   providerKey: RecordProviderKey = "openai",
+  // Native HTTP dispatch opts in; direct callers and compatible routes retain defaults.
+  requireModel = false,
 ): Promise<void> {
   const { logger } = defaults;
   setCorsHeaders(res);
@@ -131,6 +133,27 @@ export async function handleEmbeddings(
       JSON.stringify({
         error: {
           message: "Missing required parameter: 'input'",
+          type: "invalid_request_error",
+        },
+      }),
+    );
+    return;
+  }
+
+  if (requireModel && embeddingReq.model === undefined) {
+    journal.add({
+      method: req.method ?? "POST",
+      path: req.url ?? "/v1/embeddings",
+      headers: flattenHeaders(req.headers),
+      body: null,
+      response: { status: 400, fixture: null },
+    });
+    writeErrorResponse(
+      res,
+      400,
+      JSON.stringify({
+        error: {
+          message: "Missing required parameter: 'model'",
           type: "invalid_request_error",
         },
       }),

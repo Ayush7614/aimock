@@ -148,7 +148,21 @@ export async function handleImages(
     return;
   }
 
-  if (!prompt) {
+  const promptValue: unknown = prompt;
+  if (
+    !promptValue ||
+    (typeof promptValue !== "string" &&
+      !(
+        Array.isArray(promptValue) &&
+        promptValue.length > 0 &&
+        promptValue.every(
+          (part: unknown) =>
+            isJsonObject(part) &&
+            typeof part.type === "string" &&
+            (part.text === undefined || typeof part.text === "string"),
+        )
+      ))
+  ) {
     journal.add({
       method,
       path,
@@ -160,7 +174,12 @@ export async function handleImages(
       res,
       400,
       JSON.stringify({
-        error: { message: "Missing required parameter: 'prompt'", type: "invalid_request_error" },
+        error: {
+          message: !prompt
+            ? "Missing required parameter: 'prompt'"
+            : "Invalid parameter: 'prompt' must be a string or non-empty content-parts array",
+          type: "invalid_request_error",
+        },
       }),
     );
     return;

@@ -59,7 +59,7 @@ aimock.add_fixture(match={...}, response={"blocks": [
     {"type": "toolCall", "name": "get_weather", "arguments": {"city": "SF"}},
     {"type": "text", "text": "Here is the weather."},
 ]})
-aimock.load_fixtures("path/to/fixtures.json")
+aimock.load_fixtures("path/to/fixtures.json")  # also loads the file's mcpFakes
 
 # Inspect
 aimock.get_journal()       # list of all recorded requests
@@ -75,6 +75,12 @@ aimock.reset()             # full reset: fixtures, journal entries + match-count
 aimock.reset_journal()     # clear only the request journal (fixtures preserved)
 aimock.reset_fixtures()    # alias for reset() — a full reset, despite the name
 ```
+
+## MCP fakes
+
+`load_fixtures` posts a file's `mcpFakes` key (see [MCP scenario fakes](https://aimock.copilotkit.dev/mcp-mock#scenario-fakes)) next to its `fixtures`. A file may hold only `mcpFakes`. `reset()`, `reset_fixtures()` and `clear_fixtures()` also unload the fakes.
+
+When the server rejects a file with HTTP 400, `load_fixtures` raises `requests.HTTPError` with the message `aimock rejected fixtures from <path>: <error>`, followed by one line for each item of `details`. When the file has `mcpFakes` and the aimock server is a release without MCP fakes, `load_fixtures` raises `RuntimeError` (`aimock server too old for mcpFakes: ...`) and adds nothing from the file.
 
 ## CLI Options
 

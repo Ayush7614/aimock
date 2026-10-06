@@ -316,3 +316,182 @@ describe("the 2026-09-05 model-family wave is classified", () => {
     expect(unclassifiedFamilies(["lyria-4"], "gemini")).toEqual(["lyria-4"]);
   });
 });
+
+// ---------------------------------------------------------------------------
+// The 2026-09-23 wave — BEHAVIOURAL coverage of the four classifications made
+// for drift PR #478, in the same shape as the block above.
+//
+// `gpt-6-luna`, `gpt-6-sol` and `claude-opus-5-5` were classified INCLUDE and
+// `antigravity-preview-latest` EXCLUDE in model-registry.ts (rationale beside
+// each entry and in drift-proposals/). Without these assertions, the only thing
+// that would redden if an entry were dropped is a membership CHECKSUM in
+// logic-pin.test.ts.
+//
+// `claude-opus-5-5` is the prefix case: the already-included `claude-opus-5` is
+// a strict PREFIX of it, so it is asserted in both directions.
+//
+// `antigravity-preview-latest` is the rule-gap case: its sibling
+// `antigravity-preview-05` is excluded by PREVIEW_FAMILY, but this id ends in
+// `-latest`, so only the enumerated entry classifies it.
+// ---------------------------------------------------------------------------
+
+describe("the 2026-09-23 model-family wave is classified", () => {
+  it("gpt-6-luna and gpt-6-sol are INCLUDED in a /models-shaped payload", () => {
+    expect(isClassifiedFamily("gpt-6-luna", "openai")).toBe(true);
+    expect(isClassifiedFamily("gpt-6-sol", "openai")).toBe(true);
+    expect(
+      unclassifiedFamilies(
+        [
+          "gpt-5.6-luna", // the previous-generation siblings, already included
+          "gpt-5.6-sol",
+          "gpt-6-astra", // the probe-verified gpt-6 sibling
+          "gpt-6-luna",
+          "gpt-6-luna-2026-09-22", // dated snapshot collapses onto the family
+          "gpt-6-sol",
+          "gpt-6-sol-2026-09-22",
+        ],
+        "openai",
+      ),
+    ).toEqual([]);
+  });
+
+  it("claude-opus-5-5 is INCLUDED in a /models-shaped payload", () => {
+    expect(isClassifiedFamily("claude-opus-5-5", "anthropic")).toBe(true);
+    expect(
+      unclassifiedFamilies(
+        [
+          "claude-opus-5", // the prefix sibling, already included
+          "claude-opus-5-5",
+          "claude-opus-5-5-20260922", // dated snapshot collapses onto the family
+        ],
+        "anthropic",
+      ),
+    ).toEqual([]);
+  });
+
+  it("antigravity-preview-latest is EXCLUDED in a /models-shaped payload", () => {
+    expect(isClassifiedFamily("antigravity-preview-latest", "gemini")).toBe(true);
+    expect(excludeFamilies.gemini.has("antigravity-preview-latest")).toBe(true);
+    expect(
+      unclassifiedFamilies(
+        [
+          "antigravity-preview-05", // sibling preview tier, excluded by pattern
+          "antigravity-preview-latest",
+        ],
+        "gemini",
+      ),
+    ).toEqual([]);
+  });
+
+  it("no key in this wave classifies a neighbouring family", () => {
+    // NEGATIVE CONTROLS: without these, `toEqual([])` above is also what a
+    // neutered `unclassifiedFamilies` would produce.
+    expect(normalizeModelFamily("claude-opus-5-5", "anthropic")).toBe("claude-opus-5-5");
+    expect(unclassifiedFamilies(["claude-opus-5-6"], "anthropic")).toEqual(["claude-opus-5-6"]);
+    expect(unclassifiedFamilies(["gpt-6-terra"], "openai")).toEqual(["gpt-6-terra"]);
+    expect(unclassifiedFamilies(["gpt-6-luna-pro"], "openai")).toEqual(["gpt-6-luna-pro"]);
+    expect(unclassifiedFamilies(["antigravity-latest"], "gemini")).toEqual(["antigravity-latest"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The 2026-09-24..30 wave — BEHAVIOURAL coverage of the four families first
+// listed 2026-09-24 .. 2026-09-30, after the #478 classification PR for the
+// 2026-09-23 wave was opened. Same shape as the block above.
+//
+// `gpt-6.1-sol` and `claude-sonnet-5-5` were classified INCLUDE and
+// `gemini-3.8-flash-tts` / `gemini-3.8-flash-lite-tts` EXCLUDE in
+// model-registry.ts (live-probe evidence beside each entry and in
+// drift-proposals/).
+//
+// `gpt-6.1-sol` is the version-token case: the normalizer keeps `.1`, so it
+// does NOT collapse onto the included `gpt-6-sol` and needs its own entry.
+// `claude-sonnet-5-5` is the prefix case: `claude-sonnet-5` is a strict prefix.
+// ---------------------------------------------------------------------------
+
+describe("the 2026-09-24..30 model-family wave is classified", () => {
+  it("gpt-6.1-sol is INCLUDED in a /models-shaped payload", () => {
+    expect(isClassifiedFamily("gpt-6.1-sol", "openai")).toBe(true);
+    expect(
+      unclassifiedFamilies(
+        [
+          "gpt-6-sol", // the base family, already included
+          "gpt-6.1-sol",
+          "gpt-6.1-sol-2026-09-29", // dated snapshot collapses onto the family
+        ],
+        "openai",
+      ),
+    ).toEqual([]);
+  });
+
+  it("claude-sonnet-5-5 is INCLUDED in a /models-shaped payload", () => {
+    expect(isClassifiedFamily("claude-sonnet-5-5", "anthropic")).toBe(true);
+    expect(
+      unclassifiedFamilies(
+        [
+          "claude-sonnet-5", // the prefix sibling, already included
+          "claude-sonnet-5-5",
+          "claude-sonnet-5-5-20260928", // dated snapshot collapses onto the family
+        ],
+        "anthropic",
+      ),
+    ).toEqual([]);
+  });
+
+  it("gemini-3.8-flash-tts is EXCLUDED in a /models-shaped payload", () => {
+    expect(isClassifiedFamily("gemini-3.8-flash-tts", "gemini")).toBe(true);
+    expect(
+      unclassifiedFamilies(
+        [
+          "gemini-3.8-flash", // the text tier, already included
+          "gemini-3.8-flash-tts",
+          "gemini-3.8-flash-tts-2026-09-24", // dated snapshot collapses onto the family
+        ],
+        "gemini",
+      ),
+    ).toEqual([]);
+  });
+
+  it("gemini-3.8-flash-lite-tts is EXCLUDED in a /models-shaped payload", () => {
+    expect(isClassifiedFamily("gemini-3.8-flash-lite-tts", "gemini")).toBe(true);
+    expect(
+      unclassifiedFamilies(
+        [
+          "gemini-3.8-flash", // the text tier, already included
+          "gemini-3.8-flash-lite-tts",
+          "gemini-3.8-flash-lite-tts-2026-09-24", // dated snapshot collapses onto the family
+        ],
+        "gemini",
+      ),
+    ).toEqual([]);
+  });
+
+  it("the gemini-3.8 tts exclude keys do not classify a prefix or an extension", () => {
+    // Forward direction: `gemini-3.8-flash-lite` is a strict PREFIX of the
+    // excluded `gemini-3.8-flash-lite-tts` and is itself unclassified — it must
+    // stay reported. Reverse direction: a family that merely EXTENDS an
+    // excluded key must not be swallowed either (a `startsWith`-shaped bug).
+    expect(isClassifiedFamily("gemini-3.8-flash-lite", "gemini")).toBe(false);
+    expect(isClassifiedFamily("gemini-3.8-flash-tts-hd", "gemini")).toBe(false);
+    expect(
+      unclassifiedFamilies(
+        ["gemini-3.8-flash-tts", "gemini-3.8-flash-lite-tts", "gemini-3.8-flash-lite"],
+        "gemini",
+      ),
+    ).toEqual(["gemini-3.8-flash-lite"]);
+    expect(unclassifiedFamilies(["gemini-3.8-flash-tts-hd"], "gemini")).toEqual([
+      "gemini-3.8-flash-tts-hd",
+    ]);
+  });
+
+  it("no key in this wave classifies a neighbouring family", () => {
+    // NEGATIVE CONTROLS: without these, `toEqual([])` above is also what a
+    // neutered `unclassifiedFamilies` would produce.
+    expect(normalizeModelFamily("gpt-6.1-sol", "openai")).toBe("gpt-6.1-sol");
+    expect(normalizeModelFamily("claude-sonnet-5-5", "anthropic")).toBe("claude-sonnet-5-5");
+    expect(unclassifiedFamilies(["gpt-6.1-luna"], "openai")).toEqual(["gpt-6.1-luna"]);
+    expect(unclassifiedFamilies(["gpt-6.2-sol"], "openai")).toEqual(["gpt-6.2-sol"]);
+    expect(unclassifiedFamilies(["claude-sonnet-5-6"], "anthropic")).toEqual(["claude-sonnet-5-6"]);
+    expect(unclassifiedFamilies(["gemini-3.8-pro-tts"], "gemini")).toEqual(["gemini-3.8-pro-tts"]);
+  });
+});
