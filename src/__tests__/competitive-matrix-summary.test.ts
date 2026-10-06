@@ -1,276 +1,285 @@
-import { describe, it, expect, afterEach } from "vitest";
-import { readFileSync, writeFileSync, unlinkSync, existsSync } from "node:fs";
-import { join } from "node:path";
+import { describe, it, expect, vi, afterEach } from "vitest";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import {
+  FEATURE_RULES,
+  MATRIX_ROWLESS_RULES,
+  isRowlessRule,
+  formatSummary,
+  writeMatrixUpdate,
+  type DetectedChange,
+  type FetchFailure,
+  type MigrationPageChange,
+  type RowlessDetection,
+} from "../../scripts/update-competitive-matrix.js";
 
-// ── Reimplement the pure formatting logic from writeSummary ─────────────────
-// These functions mirror the writeSummary / parseSummaryArg behavior described
-// in scripts/update-competitive-matrix.ts so we can unit-test the output format
-// without requiring network access or exported symbols.
+// These tests call the exported formatSummary from the script, so a change to
+// the real summary output fails them. They check the sections and their rows;
+// the "formatSummary headline" block also checks the exact headline sentences.
 
-interface DetectedChange {
-  competitor: string;
-  capability: string;
-  from: string;
-  to: string;
+const APPLIED_HEADING = "## Competitive Matrix Changes";
+const MIGRATION_HEADING = "## Migration Page Changes";
+const ROWLESS_HEADING = "## Row-Less Detections (Manual Follow-Up)";
+
+/** Labels of rules that have a homepage row (the only labels a scan can apply). */
+const ROW_LABELS = FEATURE_RULES.map((r) => r.rowLabel).filter((label) => !isRowlessRule(label));
+/** Labels of rules that have no homepage row. */
+const ROWLESS_LABELS = Object.keys(MATRIX_ROWLESS_RULES);
+
+/** Returns the "## " headings of the markdown, in order. */
+function headings(md: string): string[] {
+  return md.split("\n").filter((line) => line.startsWith("## "));
 }
 
-/**
- * Produces the same markdown that writeSummary would write for a given set of
- * detected changes.  Copied verbatim from the script's writeSummary body so
- * that any future divergence between this copy and the real implementation
- * will surface as a failing test when the integration tests are added.
- */
-function formatSummary(changes: DetectedChange[]): string {
-  if (changes.length === 0) {
-    return "No competitive matrix changes detected this week.\n";
-  }
-
-  const lines: string[] = [];
-  lines.push("## Competitive Matrix Changes");
-  lines.push("");
-  lines.push("| Competitor | Capability | Change |");
-  lines.push("| --- | --- | --- |");
-  for (const ch of changes) {
-    lines.push(`| ${ch.competitor} | ${ch.capability} | ${ch.from} -> ${ch.to} |`);
-  }
-  lines.push("");
-
-  // Build mermaid flowchart grouped by competitor
-  const byCompetitor = new Map<string, string[]>();
-  for (const ch of changes) {
-    if (!byCompetitor.has(ch.competitor)) {
-      byCompetitor.set(ch.competitor, []);
-    }
-    byCompetitor.get(ch.competitor)!.push(ch.capability);
-  }
-
-  lines.push("```mermaid");
-  lines.push("flowchart LR");
-  let nodeCounter = 0;
-  for (const [competitor, capabilities] of byCompetitor) {
-    const subId = competitor.replace(/[^a-zA-Z0-9_-]/g, "_");
-    const subLabel = competitor.replace(/"/g, "&quot;");
-    lines.push(`  subgraph ${subId}["${subLabel}"]`);
-    for (const cap of capabilities) {
-      const nodeId = `n${nodeCounter}`;
-      const capLabel = cap.replace(/"/g, "&quot;");
-      lines.push(`    ${nodeId}["${capLabel}"]`);
-      nodeCounter++;
-    }
-    lines.push("  end");
-  }
-  lines.push("```");
-  lines.push("");
-
-  return lines.join("\n");
+/** Returns the lines from a heading up to the next heading (or the end). */
+function section(md: string, heading: string): string[] {
+  const lines = md.split("\n");
+  const start = lines.indexOf(heading);
+  if (start === -1) return [];
+  const rest = lines.slice(start + 1);
+  const end = rest.findIndex((line) => line.startsWith("## "));
+  return end === -1 ? rest : rest.slice(0, end);
 }
 
-function writeSummary(summaryPath: string, changes: DetectedChange[]): void {
-  writeFileSync(summaryPath, formatSummary(changes), "utf-8");
+/** Returns the table data rows of a section (no header or separator rows). */
+function dataRows(lines: string[]): string[] {
+  const rows = lines.filter((line) => line.startsWith("| ") && !line.startsWith("| ---"));
+  return rows.slice(1);
 }
 
-// ── Helpers ─────────────────────────────────────────────────────────────────
+const APPLIED: DetectedChange[] = [
+  { competitor: "VidaiMock", capability: "Chat Completions SSE", from: "No", to: "Yes" },
+  { competitor: "VidaiMock", capability: "Embeddings API", from: "No", to: "Yes" },
+  { competitor: "mock-llm", capability: "Error injection", from: "No", to: "Yes" },
+];
 
-function tmpPath(suffix: string): string {
-  return join(tmpdir(), `aimock-cm-test-${suffix}-${Date.now()}.md`);
-}
+const MIGRATION: MigrationPageChange[] = [
+  { page: "docs/migrate-from-vidaimock/index.html", change: "Embeddings API: No -> Yes" },
+];
 
-const tempFiles: string[] = [];
+const ROWLESS: RowlessDetection[] = [
+  { competitor: "mock-llm", capability: "Helm chart" },
+  { competitor: "VidaiMock", capability: "CLI server" },
+];
 
-afterEach(() => {
-  for (const f of tempFiles) {
-    if (existsSync(f)) unlinkSync(f);
-  }
-  tempFiles.length = 0;
+describe("competitive-matrix summary fixtures", () => {
+  it("use real rule labels", () => {
+    for (const ch of APPLIED) expect(ROW_LABELS).toContain(ch.capability);
+    for (const r of ROWLESS) expect(ROWLESS_LABELS).toContain(r.capability);
+  });
 });
 
-// ── Tests ───────────────────────────────────────────────────────────────────
+describe("formatSummary", () => {
+  // ── Nothing to report ─────────────────────────────────────────────────
 
-describe("competitive-matrix summary formatting", () => {
-  const SAMPLE_CHANGES: DetectedChange[] = [
-    { competitor: "VidaiMock", capability: "Chat Completions SSE", from: "No", to: "Yes" },
-    { competitor: "VidaiMock", capability: "Embeddings API", from: "No", to: "Yes" },
-    { competitor: "mock-llm", capability: "Helm chart", from: "No", to: "Yes" },
-  ];
-
-  // ── No-changes path ─────────────────────────────────────────────────────
-
-  it("produces no-changes message when changes array is empty", () => {
+  it("emits a single headline and no sections when nothing changed", () => {
     const md = formatSummary([]);
-    expect(md).toBe("No competitive matrix changes detected this week.\n");
+    expect(md.trim()).not.toBe("");
+    expect(md.trim().split("\n")).toHaveLength(1);
+    expect(headings(md)).toEqual([]);
+    expect(md).not.toContain("|");
   });
 
-  // ── Markdown table ──────────────────────────────────────────────────────
+  // ── Applied changes ───────────────────────────────────────────────────
 
-  it("summary contains valid markdown table when changes exist", () => {
-    const md = formatSummary(SAMPLE_CHANGES);
+  it("lists applied changes in a table, in order", () => {
+    const md = formatSummary(APPLIED);
+    expect(headings(md)).toEqual([APPLIED_HEADING]);
 
-    expect(md).toContain("## Competitive Matrix Changes");
-    expect(md).toContain("| Competitor | Capability | Change |");
-    expect(md).toContain("| --- | --- | --- |");
-
-    // Each change should appear as a table row
-    for (const ch of SAMPLE_CHANGES) {
-      expect(md).toContain(`| ${ch.competitor} | ${ch.capability} | ${ch.from} -> ${ch.to} |`);
-    }
+    const lines = section(md, APPLIED_HEADING);
+    expect(lines).toContain("| Competitor | Capability | Change |");
+    expect(dataRows(lines)).toEqual(
+      APPLIED.map((ch) => `| ${ch.competitor} | ${ch.capability} | ${ch.from} -> ${ch.to} |`),
+    );
   });
 
-  it("table rows preserve insertion order", () => {
-    const md = formatSummary(SAMPLE_CHANGES);
-    const tableLines = md
-      .split("\n")
-      .filter((line) => line.startsWith("| ") && !line.startsWith("| ---"));
+  it("draws a mermaid flowchart grouped by competitor", () => {
+    const md = formatSummary(APPLIED);
 
-    // First line is the header, remaining are data rows
-    const dataRows = tableLines.slice(1);
-    expect(dataRows).toHaveLength(SAMPLE_CHANGES.length);
-    expect(dataRows[0]).toContain("Chat Completions SSE");
-    expect(dataRows[1]).toContain("Embeddings API");
-    expect(dataRows[2]).toContain("Helm chart");
-  });
+    expect(md).toContain("```mermaid\nflowchart LR");
+    expect((md.match(/```/g) || []).length).toBe(2);
 
-  // ── Mermaid block ───────────────────────────────────────────────────────
-
-  it("summary contains valid mermaid block when changes exist", () => {
-    const md = formatSummary(SAMPLE_CHANGES);
-
-    expect(md).toContain("```mermaid");
-    expect(md).toContain("flowchart LR");
-
-    // Fences must be balanced (one open, one close)
-    const fenceCount = (md.match(/```/g) || []).length;
-    expect(fenceCount).toBe(2);
-  });
-
-  it("mermaid block groups capabilities by competitor", () => {
-    const md = formatSummary(SAMPLE_CHANGES);
-
-    // VidaiMock has 2 capabilities, mock-llm has 1
     expect(md).toContain('subgraph VidaiMock["VidaiMock"]');
     expect(md).toContain('subgraph mock-llm["mock-llm"]');
-
-    // Each subgraph should be closed
     const subgraphCount = (md.match(/subgraph /g) || []).length;
-    const endCount = (md.match(/^\s+end$/gm) || []).length;
-    expect(endCount).toBe(subgraphCount);
+    expect(subgraphCount).toBe(2);
+    expect((md.match(/^\s+end$/gm) || []).length).toBe(subgraphCount);
+
+    expect(md).toContain('n0["Chat Completions SSE"]');
+    expect(md).toContain('n1["Embeddings API"]');
+    expect(md).toContain('n2["Error injection"]');
   });
 
-  it("mermaid sanitizes competitor names with special characters", () => {
-    const changes: DetectedChange[] = [
-      {
-        competitor: "piyook/llm-mock",
-        capability: "Docker image",
-        from: "No",
-        to: "Yes",
-      },
-    ];
-    const md = formatSummary(changes);
-
-    // The subgraph ID should have / replaced with _
-    expect(md).toContain('subgraph piyook_llm-mock["piyook/llm-mock"]');
-  });
-
-  it("mermaid escapes double quotes in capability names", () => {
-    const changes: DetectedChange[] = [
-      {
-        competitor: "TestComp",
-        capability: 'Structured output / JSON "mode"',
-        from: "No",
-        to: "Yes",
-      },
-    ];
-    const md = formatSummary(changes);
-
-    // Quotes inside node labels should be escaped as &quot;
-    expect(md).toContain("&quot;");
-    expect(md).not.toMatch(/\["[^"]*"[^"]*"\]/); // no unescaped inner quotes
-  });
-
-  it("mermaid generates unique node IDs across competitors", () => {
-    const md = formatSummary(SAMPLE_CHANGES);
-    const nodeIdPattern = /^\s{4}(n\d+)\[/gm;
-    const ids: string[] = [];
-    let match: RegExpExecArray | null;
-    while ((match = nodeIdPattern.exec(md)) !== null) {
-      ids.push(match[1]);
-    }
-
-    expect(ids.length).toBe(SAMPLE_CHANGES.length);
+  it("gives every mermaid node a unique ID", () => {
+    const md = formatSummary(APPLIED);
+    const ids = [...md.matchAll(/^\s{4}(n\d+)\[/gm)].map((m) => m[1]);
+    expect(ids).toHaveLength(APPLIED.length);
     expect(new Set(ids).size).toBe(ids.length);
   });
 
-  // ── writeSummary file I/O ───────────────────────────────────────────────
-
-  it("writeSummary writes file to disk with correct content", () => {
-    const outPath = tmpPath("write");
-    tempFiles.push(outPath);
-
-    writeSummary(outPath, SAMPLE_CHANGES);
-
-    expect(existsSync(outPath)).toBe(true);
-    const content = readFileSync(outPath, "utf-8");
-    expect(content).toBe(formatSummary(SAMPLE_CHANGES));
-  });
-
-  it("writeSummary writes no-changes file when array is empty", () => {
-    const outPath = tmpPath("empty");
-    tempFiles.push(outPath);
-
-    writeSummary(outPath, []);
-
-    expect(existsSync(outPath)).toBe(true);
-    const content = readFileSync(outPath, "utf-8");
-    expect(content).toBe("No competitive matrix changes detected this week.\n");
-  });
-
-  it("no summary file when writeSummary is not called", () => {
-    const outPath = tmpPath("absent");
-    tempFiles.push(outPath);
-
-    // Simulate the code path where --summary is absent: parseSummaryArg
-    // returns null, writeSummary is never called
-    const summaryPath: string | null = null;
-    if (summaryPath) writeSummary(summaryPath, []);
-
-    expect(existsSync(outPath)).toBe(false);
-  });
-
-  it("mermaid quotes capability names with parentheses", () => {
-    const changes: DetectedChange[] = [
+  it("sanitizes mermaid subgraph IDs and quotes labels", () => {
+    const md = formatSummary([
       {
-        competitor: "mock-llm",
-        capability: "Error injection (one-shot)",
+        competitor: "piyook/llm-mock",
+        capability: "Structured output / JSON mode",
         from: "No",
         to: "Yes",
       },
-    ];
-    const md = formatSummary(changes);
-
-    // Parentheses must be inside quoted label to avoid mermaid syntax conflict
-    expect(md).toContain('["Error injection (one-shot)"]');
-    // Must NOT have unquoted brackets with parens inside
-    expect(md).not.toMatch(/\[[^"]*\([^)]*\)[^"]*\]/);
+    ]);
+    expect(md).toContain('subgraph piyook_llm-mock["piyook/llm-mock"]');
+    expect(md).toContain('n0["Structured output / JSON mode"]');
   });
 
-  // ── Single change edge case ─────────────────────────────────────────────
+  it("escapes double quotes in mermaid labels", () => {
+    const md = formatSummary([
+      { competitor: 'Comp "X"', capability: 'JSON "mode"', from: "No", to: "Yes" },
+    ]);
+    expect(md).toContain('["Comp &quot;X&quot;"]');
+    expect(md).toContain('n0["JSON &quot;mode&quot;"]');
+  });
 
-  it("handles a single change correctly", () => {
-    const changes: DetectedChange[] = [
-      { competitor: "mock-llm", capability: "WebSocket APIs", from: "No", to: "Yes" },
-    ];
-    const md = formatSummary(changes);
+  // ── Migration page changes ────────────────────────────────────────────
 
-    // Should have exactly one data row
-    const dataRows = md
-      .split("\n")
-      .filter(
-        (line) =>
-          line.startsWith("| ") && !line.startsWith("| ---") && !line.startsWith("| Competitor"),
-      );
-    expect(dataRows).toHaveLength(1);
+  it("lists migration page changes after the homepage table", () => {
+    const md = formatSummary(APPLIED, MIGRATION);
+    expect(headings(md)).toEqual([APPLIED_HEADING, MIGRATION_HEADING]);
 
-    // Should have exactly one subgraph
-    expect((md.match(/subgraph /g) || []).length).toBe(1);
+    const lines = section(md, MIGRATION_HEADING);
+    for (const mc of MIGRATION) expect(lines).toContain(`- \`${mc.page}\`: ${mc.change}`);
+  });
+
+  it("emits only the migration section when only migration pages changed", () => {
+    const md = formatSummary([], MIGRATION);
+    expect(headings(md)).toEqual([MIGRATION_HEADING]);
+    expect(md).not.toContain("```mermaid");
+  });
+
+  // ── Row-less detections ───────────────────────────────────────────────
+
+  it("lists row-less detections last", () => {
+    const md = formatSummary(APPLIED, MIGRATION, ROWLESS);
+    expect(headings(md)).toEqual([APPLIED_HEADING, MIGRATION_HEADING, ROWLESS_HEADING]);
+
+    const lines = section(md, ROWLESS_HEADING);
+    expect(lines).toContain("| Competitor | Capability |");
+    expect(dataRows(lines)).toEqual(ROWLESS.map((r) => `| ${r.competitor} | ${r.capability} |`));
+
+    // Row-less detections never appear in the applied table
+    const applied = section(md, APPLIED_HEADING).join("\n");
+    for (const r of ROWLESS) expect(applied).not.toContain(r.capability);
+  });
+
+  it("reports row-less detections even when nothing else changed", () => {
+    const md = formatSummary([], [], ROWLESS);
+    expect(headings(md)).toEqual([ROWLESS_HEADING]);
+    expect(dataRows(section(md, ROWLESS_HEADING))).toHaveLength(ROWLESS.length);
+  });
+});
+
+describe("no summary reports unplaced changes", () => {
+  // writeMatrixUpdate is the only caller of formatSummary (through
+  // writeSummary). It throws before any summary is written when a computed
+  // change cannot be placed, so the run's error, not the summary, reports
+  // unplaced changes.
+  const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
+  const HOMEPAGE = readFileSync(resolve(REPO_ROOT, "docs/index.html"), "utf-8");
+  const UNPLACEABLE: DetectedChange[] = [
+    { competitor: "Unknown", capability: "Request journal", from: "No", to: "Yes" },
+    { competitor: "mock-llm", capability: "No such row", from: "No", to: "Yes" },
+  ];
+
+  let dir: string | undefined;
+  afterEach(() => {
+    vi.restoreAllMocks();
+    if (dir) rmSync(dir, { recursive: true, force: true });
+    dir = undefined;
+  });
+
+  for (const dryRun of [false, true]) {
+    it(`throws and writes no summary when no change can be placed (dryRun: ${dryRun})`, () => {
+      dir = mkdtempSync(join(tmpdir(), "aimock-cm-summary-"));
+      const docsPath = join(dir, "index.html");
+      const summaryPath = join(dir, "summary.md");
+      writeFileSync(docsPath, HOMEPAGE, "utf-8");
+      vi.spyOn(console, "log").mockImplementation(() => {});
+
+      expect(() =>
+        writeMatrixUpdate({
+          html: HOMEPAGE,
+          changes: UNPLACEABLE,
+          docsPath,
+          summaryPath,
+          dryRun,
+          rowless: [{ competitor: "mock-llm", capability: "Helm chart" }],
+        }),
+      ).toThrow(/2 of 2 computed change\(s\) could not be placed/);
+      expect(existsSync(summaryPath)).toBe(false);
+      expect(readFileSync(docsPath, "utf-8")).toBe(HOMEPAGE);
+    });
+  }
+});
+
+describe("formatSummary headline", () => {
+  // The headline is the first line a reader sees. It must not say that
+  // nothing was detected when a section below needs attention.
+  const NO_CHANGES = "No competitive matrix changes detected this week.";
+  const firstLine = (md: string): string => md.split("\n")[0];
+
+  it("row-less-only input does not claim that nothing was detected", () => {
+    const md = formatSummary([], [], ROWLESS);
+
+    expect(md).not.toContain(NO_CHANGES);
+    expect(firstLine(md)).toBe(
+      "No homepage competitive matrix changes this week. Detections below need a manual check.",
+    );
+    expect(dataRows(section(md, ROWLESS_HEADING))).toHaveLength(ROWLESS.length);
+  });
+
+  it("migration-only input headlines no homepage change, not no change", () => {
+    const md = formatSummary([], MIGRATION, []);
+
+    expect(md).not.toContain(NO_CHANGES);
+    expect(firstLine(md)).toBe("No homepage competitive matrix changes this week.");
+    expect(headings(md)).toEqual([MIGRATION_HEADING]);
+  });
+
+  it("homepage changes headline the change table even with row-less detections", () => {
+    const md = formatSummary(APPLIED, [], ROWLESS);
+
+    expect(md).not.toContain(NO_CHANGES);
+    expect(firstLine(md)).toBe(APPLIED_HEADING);
+  });
+
+  it("uses the no-changes headline only when every input is empty", () => {
+    expect(formatSummary([], [], [])).toBe(`${NO_CHANGES}\n`);
+  });
+
+  // ── Fetch warnings ────────────────────────────────────────────────────
+
+  const WARNINGS: FetchFailure[] = [
+    {
+      competitor: "Mock LLM",
+      repo: "dwmkerr/mock-llm",
+      source: "package.json",
+      reason: "HTTP 500",
+    },
+  ];
+  const INCOMPLETE =
+    'Competitor scan results are incomplete for dwmkerr/mock-llm. See "Fetch Warnings" below.';
+
+  it("names the incomplete repos instead of the no-changes headline", () => {
+    const md = formatSummary([], [], [], WARNINGS);
+    expect(md).not.toContain(NO_CHANGES);
+    expect(md.split("\n")[0]).toBe(INCOMPLETE);
+    expect(headings(md)).toEqual(["## Fetch Warnings"]);
+    expect(md).toContain("- dwmkerr/mock-llm package.json: HTTP 500");
+  });
+
+  it("puts the incomplete headline above applied changes", () => {
+    const md = formatSummary(APPLIED, [], [], WARNINGS);
+    expect(md.split("\n")[0]).toBe(INCOMPLETE);
+    expect(headings(md)).toEqual([APPLIED_HEADING, "## Fetch Warnings"]);
   });
 });
