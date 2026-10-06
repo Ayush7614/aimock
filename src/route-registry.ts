@@ -120,13 +120,11 @@ export const REQUESTS_PATH = "/v1/_requests";
 
 export const FILES_PATH = "/v1/files";
 // Shared with metrics.ts path-label normalization (file ids are random
-// `file-…` values; labels collapse to `{id}`). Content reads before id: the
-// id RE would otherwise swallow the content suffix.
+// `file-…` values; labels collapse to `{id}`).
 export const FILES_CONTENT_RE = /^\/v1\/files\/([^/]+)\/content$/;
 export const FILES_ID_RE = /^\/v1\/files\/([^/]+)$/;
 
-// OpenAI Batches API. Cancel reads before id (the id RE would swallow
-// `/cancel`). Shared with server.ts dispatch and metrics.ts normalization.
+// OpenAI Batches API. Shared with server.ts dispatch and metrics.ts normalization.
 export const BATCHES_PATH = "/v1/batches";
 export const BATCHES_CANCEL_RE = /^\/v1\/batches\/([^/]+)\/cancel$/;
 export const BATCHES_ID_RE = /^\/v1\/batches\/([^/]+)$/;
