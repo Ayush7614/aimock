@@ -1284,18 +1284,6 @@ export async function handleFilesCreate(
 export const FILES_LIST_MAX_LIMIT = 10000;
 export const FILES_LIST_DEFAULT_LIMIT = FILES_LIST_MAX_LIMIT;
 
-/**
- * An unsigned decimal integer literal and nothing else — no sign, no exponent,
- * no radix prefix, no surrounding whitespace. See {@link parseListQuery} for
- * what each of those would otherwise be silently accepted as.
- *
- * A long digit run is still safe to hand to `Number()`: it stays finite and
- * integral, so it fails the range check below rather than the type check.
- * Grammar shared with the fine-tuning and chaos surfaces via
- * {@link parseStrictIntegerText} (helpers.ts) — one digit-run rule, with each
- * surface keeping its own range check and error text.
- */
-
 interface FilesListQuery {
   limit: number;
   order: "asc" | "desc";
