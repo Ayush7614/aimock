@@ -390,6 +390,38 @@ describe("rules match the real migration-page row labels", () => {
     const read = (rel: string) => readFileSync(join(ctx.root, rel), "utf-8");
     const MOCK_LLM = COMPETITOR_MIGRATION_PAGES["mock-llm"];
 
+    it.each([
+      ["qualified cross", '<td style="color: var(--error)">&#10007; partial</td>'],
+      ["plain No", "<td>No</td>"],
+      ["nested negative", '<td><span class="no">&#10007;</span></td>'],
+    ])("preserves a %s migration cell and reports it for a manual check", (_label, cell) => {
+      const ROW = "AWS Bedrock";
+      const html = withMigrationCell(read(MOCK_LLM), "mock-llm", ROW, cell);
+      writeFileSync(join(ctx.root, MOCK_LLM), html);
+
+      runMatrixUpdate({
+        repoRoot: ctx.root,
+        competitorFeatures: new Map([["mock-llm", { [ROW]: true }]]),
+        competitorProviderCounts: new Map(),
+        dryRun: false,
+        summaryPath: join(ctx.root, "summary.md"),
+      });
+
+      expect(migrationCell(read(MOCK_LLM), "mock-llm", ROW)).toBe(cell);
+      expect(read(MOCK_LLM)).toBe(html);
+      const md = read("summary.md");
+      expect(summarySection(md, MIGRATION_HEADING)).toBeUndefined();
+      expect(summarySection(md, MANUAL_HEADING) ?? "").toContain(
+        `| \`${MOCK_LLM}\` | mock-llm | ${ROW} | ${ROW} |`,
+      );
+      expect(ctx.logged).toContain(
+        `  ${MOCK_LLM}: mock-llm / ${ROW}: "${ROW}" (unsupported-no-cell)`,
+      );
+      expect(updateMigrationPage(html, "mock-llm", { [ROW]: true }, 0).outcomes).toEqual([
+        { rule: ROW, row: ROW, combined: false, status: "unsupported-no-cell" },
+      ]);
+    });
+
     it("lists a combined-row detection for a manual check, not as 'no row'", () => {
       const ROW = "Azure OpenAI / Vertex AI / Ollama / Cohere";
       writeFileSync(
