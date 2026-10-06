@@ -50,6 +50,87 @@ describe("OpenAPI route catalog", () => {
   });
 
   it.each([
+    {
+      path: "/__aimock/journal",
+      method: "get",
+      query: "?limit=-1",
+      body: undefined,
+      blankScope: false,
+    },
+    {
+      path: "/__aimock/fixtures",
+      method: "get",
+      query: "?include=invalid",
+      body: undefined,
+      blankScope: false,
+    },
+    {
+      path: "/__aimock/fixtures",
+      method: "post",
+      query: "",
+      body: { fixtures: [{ match: { userMessage: "x" }, response: {} }] },
+      blankScope: false,
+    },
+    {
+      path: "/__aimock/chaos",
+      method: "post",
+      query: "",
+      body: { dropRate: 2 },
+      blankScope: false,
+    },
+    { path: "/__aimock/chaos", method: "get", query: "", body: undefined, blankScope: true },
+    { path: "/__aimock/chaos", method: "delete", query: "", body: undefined, blankScope: true },
+    { path: "/__aimock/error", method: "post", query: "", body: { status: 99 }, blankScope: false },
+  ])(
+    "describes real control validation errors for $method $path",
+    async ({ path, method, query, body: input, blankScope }) => {
+      const doc = await (await fetch(`${mock.url}/__aimock/openapi.json`)).json();
+      const response = await fetch(`${mock.url}${path}${query}`, {
+        method: method.toUpperCase(),
+        headers: { "Content-Type": "application/json", ...(blankScope ? { "X-Test-Id": "" } : {}) },
+        body: input === undefined ? undefined : JSON.stringify(input),
+      });
+      const body = await response.json();
+      expect(response.status).toBe(400);
+      expect(typeof body.error).toBe("string");
+      expect(body.error.length).toBeGreaterThan(0);
+      const ref = doc.paths[path][method].responses["400"].content["application/json"].schema;
+      const schema = doc.components.schemas[ref.$ref.split("/").at(-1)];
+      console.log(JSON.stringify({ method, path, status: response.status, body, schema }));
+      expect.soft(schema.properties.error.type).toBe(typeof body.error);
+      expect.soft(schema.required).toContain("error");
+      if (path === "/__aimock/fixtures" && method === "post") {
+        expect(body.error).toBe("Validation failed");
+        expect(body.details.length).toBeGreaterThan(0);
+        for (const detail of body.details) expect(typeof detail).toBe("object");
+        expect
+          .soft(schema.properties.details)
+          .toMatchObject({ type: "array", items: { type: "object" } });
+      }
+    },
+  );
+
+  it("preserves real provider object errors and their catalog schema", async () => {
+    const doc = await (await fetch(`${mock.url}/__aimock/openapi.json`)).json();
+    const response = await fetch(`${mock.url}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: "test" }),
+    });
+    expect(response.status).toBe(400);
+    const body = await response.json();
+    expect(typeof body.error).toBe("object");
+    expect(typeof body.error.message).toBe("string");
+    const operation = doc.paths["/v1/chat/completions"].post;
+    for (const status of ["400", "404"]) {
+      expect(operation.responses[status].content["application/json"].schema).toEqual({
+        $ref: "#/components/schemas/ErrorResponse",
+      });
+    }
+    expect(doc.components.schemas.ErrorResponse.properties.error.type).toBe("object");
+  });
+
+  it.each([
     { path: "/ready", status: "ready", schemaName: "ReadyResponse" },
     { path: "/health", status: "ok", schemaName: "HealthResponse" },
     { path: "/__aimock/health", status: "ok", schemaName: "HealthResponse" },

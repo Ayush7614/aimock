@@ -1792,6 +1792,23 @@ const COMPONENTS: Record<string, unknown> = {
     type: "object",
     description: "The OpenAPI 3.1 document served by GET /__aimock/openapi.json.",
   },
+  ControlErrorResponse: {
+    type: "object",
+    required: ["error"],
+    properties: { error: { type: "string" } },
+  },
+  FixtureValidationErrorResponse: {
+    type: "object",
+    required: ["error"],
+    properties: {
+      error: { type: "string" },
+      details: {
+        type: "array",
+        description: "Validation issues when fixture or MCP fake validation fails.",
+        items: { type: "object" },
+      },
+    },
+  },
   ErrorResponse: {
     type: "object",
     properties: {
@@ -1827,6 +1844,8 @@ interface OperationSchemas {
   /** Success status + description override (e.g. replayed removals). */
   successStatus?: string;
   successDescription?: string;
+  /** Schema for this operation's 400 response; provider errors remain the default. */
+  invalidRequest?: string;
   query?: QueryParam[];
 }
 
@@ -2076,9 +2095,14 @@ const SCHEMA_REFS: Record<string, OperationSchemas> = {
   },
   // Control API
   "GET /__aimock/health": { response: "HealthResponse" },
-  "GET /__aimock/journal": { response: "JournalEntry", query: JOURNAL_QUERY },
+  "GET /__aimock/journal": {
+    response: "JournalEntry",
+    query: JOURNAL_QUERY,
+    invalidRequest: "ControlErrorResponse",
+  },
   "GET /__aimock/fixtures": {
     response: "FixturesInspectResponse",
+    invalidRequest: "ControlErrorResponse",
     query: [
       {
         name: "include",
@@ -2090,15 +2114,24 @@ const SCHEMA_REFS: Record<string, OperationSchemas> = {
   "POST /__aimock/fixtures": {
     request: "FixturesAddRequest",
     response: "FixturesAddResponse",
+    invalidRequest: "FixtureValidationErrorResponse",
   },
   "DELETE /__aimock/fixtures": { response: "FixturesClearResponse" },
-  "GET /__aimock/chaos": { response: "ChaosEnvelope" },
-  "POST /__aimock/chaos": { request: "ChaosConfig", response: "ChaosEnvelope" },
-  "DELETE /__aimock/chaos": { response: "ChaosEnvelope" },
+  "GET /__aimock/chaos": { response: "ChaosEnvelope", invalidRequest: "ControlErrorResponse" },
+  "POST /__aimock/chaos": {
+    request: "ChaosConfig",
+    response: "ChaosEnvelope",
+    invalidRequest: "ControlErrorResponse",
+  },
+  "DELETE /__aimock/chaos": { response: "ChaosEnvelope", invalidRequest: "ControlErrorResponse" },
   "POST /__aimock/reset": { response: "ResetResponse" },
   "POST /__aimock/reset/journal": { response: "ResetResponse" },
   "POST /__aimock/reset/fixtures": { response: "ResetResponse" },
-  "POST /__aimock/error": { request: "ErrorInjectRequest", response: "ErrorInjectResponse" },
+  "POST /__aimock/error": {
+    request: "ErrorInjectRequest",
+    response: "ErrorInjectResponse",
+    invalidRequest: "ControlErrorResponse",
+  },
   "GET /__aimock/openapi.json": { response: "OpenApiDocument" },
   "GET /__aimock/routes": { response: "RoutesListResponse" },
 };
@@ -2180,7 +2213,9 @@ function operationFor(
           "400": {
             description: "Invalid request",
             content: {
-              [JSON]: { schema: { $ref: "#/components/schemas/ErrorResponse" } },
+              [JSON]: {
+                schema: { $ref: `#/components/schemas/${refs?.invalidRequest ?? "ErrorResponse"}` },
+              },
             },
           },
           "404": {
