@@ -38,6 +38,34 @@ function sseDataFrames(text: string) {
     });
 }
 
+// Walk the entire emitted catalog, including references nested in component schemas.
+function expectCatalogReferencesResolve(doc: unknown): void {
+  const refs = new Set<string>();
+  const collect = (node: unknown): void => {
+    if (node !== null && typeof node === "object") {
+      for (const [key, entry] of Object.entries(node)) {
+        if (key === "$ref" && typeof entry === "string") refs.add(entry);
+        else collect(entry);
+      }
+    }
+  };
+  collect(doc);
+  expect(refs.size).toBeGreaterThan(20);
+  for (const ref of refs) {
+    // The catalog uses local JSON pointers; resolve against the same document.
+    expect(ref.startsWith("#/"), `non-local $ref ${ref}`).toBe(true);
+    let target: unknown = doc;
+    for (const token of ref.slice(2).split("/")) {
+      const key = token.replace(/~1/g, "/").replace(/~0/g, "~");
+      target =
+        target !== null && typeof target === "object"
+          ? Object.entries(target).find(([name]) => name === key)?.[1]
+          : undefined;
+    }
+    expect(target !== undefined, `unresolved $ref ${ref}`).toBe(true);
+  }
+}
+
 describe("OpenAPI route catalog", () => {
   let mock: LLMock;
   beforeEach(async () => {
@@ -1058,6 +1086,24 @@ describe("OpenAPI route catalog", () => {
     }
   });
 
+  it("detects a dangling reference nested in a real catalog component", async () => {
+    const res = await fetch(`${mock.url}/__aimock/openapi.json`);
+    expect(res.status).toBe(200);
+    const doc: { components: { schemas: { [name: string]: unknown } } } = await res.json();
+    expectCatalogReferencesResolve(doc);
+
+    const mutated = structuredClone(doc);
+    expect(mutated.components.schemas.FineTuningJobEvent).toBeDefined();
+    expect(mutated.components.schemas.FineTuningJobEventListResponse).toMatchObject({
+      properties: { data: { items: { $ref: "#/components/schemas/FineTuningJobEvent" } } },
+    });
+    delete mutated.components.schemas.FineTuningJobEvent;
+    expect(() => expectCatalogReferencesResolve(mutated)).toThrow(
+      "unresolved $ref #/components/schemas/FineTuningJobEvent",
+    );
+    expectCatalogReferencesResolve(doc);
+  });
+
   it("every catalog operation carries a real schema (no bare paths)", async () => {
     const res = await fetch(`${mock.url}/__aimock/openapi.json`);
     expect(res.status).toBe(200);
@@ -1065,28 +1111,7 @@ describe("OpenAPI route catalog", () => {
       components: { schemas: Record<string, unknown> };
       paths: Record<string, Record<string, Record<string, unknown>>>;
     };
-    const schemas = doc.components.schemas;
-
-    // Every $ref in the document resolves.
-    const refs = new Set<string>();
-    const collect = (node: unknown): void => {
-      if (Array.isArray(node)) {
-        for (const item of node) collect(item);
-        return;
-      }
-      if (node !== null && typeof node === "object") {
-        for (const [key, entry] of Object.entries(node as Record<string, unknown>)) {
-          if (key === "$ref" && typeof entry === "string") refs.add(entry);
-          else collect(entry);
-        }
-      }
-    };
-    collect(doc.paths);
-    expect(refs.size).toBeGreaterThan(20);
-    for (const ref of refs) {
-      const name = ref.replace("#/components/schemas/", "");
-      expect(schemas[name] !== undefined, `unresolved $ref ${ref}`).toBe(true);
-    }
+    expectCatalogReferencesResolve(doc);
 
     // No operation is a bare path: each has a requestBody, a success body, or
     // an explicit non-200 success status (replayed removals, 204 clears).
