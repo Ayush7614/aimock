@@ -20,6 +20,7 @@
 
 ### Changed
 
+- Expand the landing-page comparisons, qualify WireMock fault support, and label MCP scenario fakes as preview-only with a pinned preview installation (#494).
 - `GET` on an MCP mount, and on any path of a standalone `MCPMock`, now answers 405 with `Allow: POST, DELETE` instead of falling through to the LLM routes or the JSON-RPC handler
 - MCP `tools/call` journal entries now carry the request `body` (was `null`), and `response.mcpFake` (`id`, `outcome`) when a fake answered or failed
 - MCP journal entries carry `testId` and `context`. `GET /__aimock/journal?testId=` lists an MCP request under the test id bound at `initialize`, or under the decoded header value, instead of `"__default__"` or the encoded string
