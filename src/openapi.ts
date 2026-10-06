@@ -170,12 +170,66 @@ const COMPONENTS: Record<string, unknown> = {
       stop: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" } }] },
     },
   },
+  ChatCompletionEventStream: {
+    type: "string",
+    description:
+      "When stream:true, SSE frames contain data: followed by a JSON ChatCompletionChunk and a blank line. The final frame is data: [DONE] followed by a blank line. x-sse-data-schema describes each JSON data payload, not the complete stream.",
+    "x-sse-data-schema": { $ref: "#/components/schemas/ChatCompletionChunk" },
+  },
+  ChatCompletionChunk: {
+    type: "object",
+    required: ["id", "object", "created", "model", "choices"],
+    properties: {
+      id: { type: "string" },
+      object: { type: "string", enum: ["chat.completion.chunk"] },
+      created: { type: "integer" },
+      model: { type: "string" },
+      choices: {
+        type: "array",
+        items: {
+          type: "object",
+          required: ["index", "delta", "finish_reason"],
+          properties: {
+            index: { type: "integer" },
+            delta: {
+              type: "object",
+              properties: {
+                role: { type: "string" },
+                content: { type: ["string", "null"] },
+                reasoning_content: { type: "string" },
+                tool_calls: {
+                  type: "array",
+                  items: {
+                    type: "object",
+                    required: ["index"],
+                    properties: {
+                      index: { type: "integer" },
+                      id: { type: "string" },
+                      type: { type: "string", enum: ["function"] },
+                      function: {
+                        type: "object",
+                        properties: {
+                          name: { type: "string" },
+                          arguments: { type: "string" },
+                        },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+            finish_reason: { type: ["string", "null"] },
+          },
+        },
+      },
+    },
+  },
   ChatCompletionResponse: {
     type: "object",
     required: ["id", "object", "created", "model", "choices"],
     properties: {
       id: { type: "string" },
-      object: { type: "string", enum: ["chat.completion", "chat.completion.chunk"] },
+      object: { type: "string", enum: ["chat.completion"] },
       created: { type: "integer" },
       model: { type: "string" },
       choices: {
@@ -870,6 +924,12 @@ const COMPONENTS: Record<string, unknown> = {
       safetySettings: { type: "array", items: { type: "object" } },
       tools: { type: "array", items: { type: "object" } },
     },
+  },
+  GeminiGenerateEventStream: {
+    type: "string",
+    description:
+      "SSE frames contain data: followed by a JSON GeminiGenerateResponse and a blank line. Each payload carries candidates with content.parts; the final payload carries finishReason and usageMetadata. The stream ends at EOF without a [DONE] frame. x-sse-data-schema describes each JSON data payload, not the complete stream.",
+    "x-sse-data-schema": { $ref: "#/components/schemas/GeminiGenerateResponse" },
   },
   GeminiGenerateResponse: {
     type: "object",
@@ -1706,6 +1766,8 @@ interface OperationSchemas {
   reqContent?: string;
   /** Success response media type. Defaults to `application/json`. */
   respContent?: string;
+  /** Additional SSE representation; names a string schema for the entire framed stream. */
+  streamResponse?: string;
   /** Success status + description override (e.g. replayed removals). */
   successStatus?: string;
   successDescription?: string;
@@ -1736,6 +1798,7 @@ const SCHEMA_REFS: Record<string, OperationSchemas> = {
   [`POST ${COMPLETIONS_PATH}`]: {
     request: "ChatCompletionRequest",
     response: "ChatCompletionResponse",
+    streamResponse: "ChatCompletionEventStream",
   },
   [`POST ${RESPONSES_PATH}`]: { request: "ResponsesRequest", response: "ResponsesResponse" },
   [`POST ${MESSAGES_PATH}`]: { request: "MessagesRequest", response: "MessagesResponse" },
@@ -1777,6 +1840,7 @@ const SCHEMA_REFS: Record<string, OperationSchemas> = {
   "POST /openai/deployments/{deploymentId}/chat/completions": {
     request: "ChatCompletionRequest",
     response: "ChatCompletionResponse",
+    streamResponse: "ChatCompletionEventStream",
   },
   "POST /openai/deployments/{deploymentId}/embeddings": {
     request: "EmbeddingRequest",
@@ -1855,7 +1919,8 @@ const SCHEMA_REFS: Record<string, OperationSchemas> = {
   },
   "POST /v1beta/models/{model}:streamGenerateContent": {
     request: "GeminiGenerateRequest",
-    response: "GeminiGenerateResponse",
+    response: "GeminiGenerateEventStream",
+    respContent: "text/event-stream",
   },
   // Vertex AI (same shapes over the full resource path)
   "POST /v1/projects/{project}/locations/{location}/publishers/google/models/{model}:generateContent":
@@ -1866,7 +1931,8 @@ const SCHEMA_REFS: Record<string, OperationSchemas> = {
   "POST /v1/projects/{project}/locations/{location}/publishers/google/models/{model}:streamGenerateContent":
     {
       request: "GeminiGenerateRequest",
-      response: "GeminiGenerateResponse",
+      response: "GeminiGenerateEventStream",
+      respContent: "text/event-stream",
     },
   // Bedrock
   "POST /model/{modelId}/invoke": {
@@ -2035,7 +2101,20 @@ function operationFor(
   operation.responses = {
     [successStatus]: {
       description: successDescription,
-      ...(successContent ? { content: successContent } : undefined),
+      ...(successContent || refs?.streamResponse
+        ? {
+            content: {
+              ...successContent,
+              ...(refs?.streamResponse
+                ? {
+                    "text/event-stream": {
+                      schema: { $ref: `#/components/schemas/${refs.streamResponse}` },
+                    },
+                  }
+                : undefined),
+            },
+          }
+        : undefined),
     },
     ...(successStatus === "200"
       ? {

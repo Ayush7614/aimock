@@ -1,8 +1,42 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import type { SSEChunk, ChatCompletion } from "../types.js";
 import { LLMock } from "../llmock.js";
 import { CATALOG_ROUTES, buildOpenApiDocument } from "../openapi.js";
 import { ROUTE_DEFINITIONS, matchRouteDefinition, templateToRegExp } from "../route-registry.js";
 import * as registry from "../route-registry.js";
+
+// Only the catalog fields used by the live streaming contract probes.
+interface StreamCatalogSchema {
+  type?: string;
+  description?: string;
+  required?: string[];
+  enum?: string[];
+  properties?: { [name: string]: StreamCatalogSchema };
+  items?: StreamCatalogSchema;
+  "x-sse-data-schema"?: { $ref: string };
+}
+interface StreamCatalog {
+  components: { schemas: { [name: string]: StreamCatalogSchema } };
+  paths: {
+    [path: string]: {
+      post: {
+        responses: { "200": { content: { [media: string]: { schema: { $ref: string } } } } };
+      };
+    };
+  };
+}
+
+// Keep framing separate from JSON decoding: [DONE] is not a JSON value.
+function sseDataFrames(text: string) {
+  expect(text.endsWith("\n\n")).toBe(true);
+  return text
+    .trimEnd()
+    .split("\n\n")
+    .map((frame) => {
+      expect(frame.startsWith("data: ")).toBe(true);
+      return frame.slice(6);
+    });
+}
 
 describe("OpenAPI route catalog", () => {
   let mock: LLMock;
@@ -123,6 +157,151 @@ describe("OpenAPI route catalog", () => {
     expect(doc.components.schemas.ChatCompletionResponse).toBeDefined();
     expect(doc.components.schemas.EmbeddingRequest).toBeDefined();
   });
+
+  const streamRoutes = [
+    { family: "chat", path: "/v1/chat/completions", actual: "/v1/chat/completions" },
+    {
+      family: "chat",
+      path: "/openai/deployments/{deploymentId}/chat/completions",
+      actual: "/openai/deployments/test/chat/completions",
+    },
+    {
+      family: "gemini",
+      path: "/v1beta/models/{model}:streamGenerateContent",
+      actual: "/v1beta/models/gemini-test:streamGenerateContent",
+    },
+    {
+      family: "gemini",
+      path: "/v1/projects/{project}/locations/{location}/publishers/google/models/{model}:streamGenerateContent",
+      actual:
+        "/v1/projects/test/locations/us/publishers/google/models/gemini-test:streamGenerateContent",
+    },
+  ] as const;
+
+  it.each(streamRoutes)(
+    "advertises live SSE framing and chunks for $path",
+    async ({ family, path, actual }) => {
+      mock.addFixture({
+        match: { userMessage: "catalog stream" },
+        response: { content: "hello stream" },
+        chunkSize: 3,
+      });
+      const doc: StreamCatalog = await (await fetch(`${mock.url}/__aimock/openapi.json`)).json();
+      const response = await fetch(`${mock.url}${actual}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(
+          family === "chat"
+            ? {
+                model: "test",
+                messages: [{ role: "user", content: "catalog stream" }],
+                stream: true,
+              }
+            : { contents: [{ role: "user", parts: [{ text: "catalog stream" }] }] },
+        ),
+      });
+      const wire = await response.text();
+      expect(response.status).toBe(200);
+      expect(response.headers.get("content-type")).toContain("text/event-stream");
+      const frames = sseDataFrames(wire);
+      const content = doc.paths[path].post.responses["200"].content;
+      console.log(
+        JSON.stringify({
+          path,
+          observedMedia: response.headers.get("content-type"),
+          advertisedMedia: Object.keys(content),
+          wire,
+        }),
+      );
+      expect(content["text/event-stream"]).toBeDefined();
+      const schema =
+        doc.components.schemas[content["text/event-stream"].schema.$ref.split("/").at(-1)!];
+      expect(schema.type).toBe("string");
+      expect(schema.description).toContain("data:");
+      expect(schema.description).toContain("blank line");
+      const chunkRef = schema["x-sse-data-schema"]?.$ref;
+      expect(chunkRef).toBeDefined();
+      const chunkSchema = doc.components.schemas[chunkRef!.split("/").at(-1)!];
+      expect(chunkSchema.type).toBe("object");
+      if (family === "chat") {
+        expect(content["application/json"].schema.$ref).toBe(
+          "#/components/schemas/ChatCompletionResponse",
+        );
+        expect(schema.description).toContain("[DONE]");
+        expect(frames.pop()).toBe("[DONE]");
+        const chunks: SSEChunk[] = frames.map((frame) => JSON.parse(frame));
+        expect(chunks.length).toBeGreaterThan(1);
+        for (const chunk of chunks) {
+          expect(chunk.object).toBe("chat.completion.chunk");
+          expect(chunk.choices[0].delta).toBeDefined();
+          expect(chunk.choices[0]).not.toHaveProperty("message");
+        }
+        expect(chunks.map((chunk) => chunk.choices[0].delta.content ?? "").join("")).toBe(
+          "hello stream",
+        );
+        expect(chunkSchema.properties?.object.enum).toEqual(["chat.completion.chunk"]);
+        expect(chunkSchema.properties?.choices.items?.required).toContain("delta");
+        expect(chunkSchema.properties?.choices.items?.required).not.toContain("message");
+      } else {
+        expect(content["application/json"]).toBeUndefined();
+        expect(frames).not.toContain("[DONE]");
+        expect(chunkRef).toBe("#/components/schemas/GeminiGenerateResponse");
+        const chunks: {
+          candidates: { content: { parts: { text: string }[] }; finishReason?: string }[];
+        }[] = frames.map((frame) => JSON.parse(frame));
+        expect(chunks.map((chunk) => chunk.candidates[0].content.parts[0].text).join("")).toBe(
+          "hello stream",
+        );
+        expect(chunks.at(-1)?.candidates[0].finishReason).toBe("STOP");
+        expect(
+          chunkSchema.properties?.candidates.items?.properties?.content.properties?.parts.type,
+        ).toBe("array");
+      }
+    },
+  );
+
+  it.each(streamRoutes)(
+    "preserves nonstreaming JSON for $path",
+    async ({ family, path, actual }) => {
+      mock.addFixture({
+        match: { userMessage: "catalog json" },
+        response: { content: "hello json" },
+      });
+      const doc: StreamCatalog = await (await fetch(`${mock.url}/__aimock/openapi.json`)).json();
+      const jsonPath = path.replace("streamGenerateContent", "generateContent");
+      const response = await fetch(
+        `${mock.url}${actual.replace("streamGenerateContent", "generateContent")}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(
+            family === "chat"
+              ? {
+                  model: "test",
+                  messages: [{ role: "user", content: "catalog json" }],
+                  stream: false,
+                }
+              : { contents: [{ role: "user", parts: [{ text: "catalog json" }] }] },
+          ),
+        },
+      );
+      expect(response.status).toBe(200);
+      expect(response.headers.get("content-type")).toContain("application/json");
+      expect(
+        doc.paths[jsonPath].post.responses["200"].content["application/json"].schema.$ref,
+      ).toBe(
+        `#/components/schemas/${family === "chat" ? "ChatCompletionResponse" : "GeminiGenerateResponse"}`,
+      );
+      if (family === "chat") {
+        const body: ChatCompletion = await response.json();
+        expect(body.object).toBe("chat.completion");
+        expect(body.choices[0].message.content).toBe("hello json");
+      } else {
+        const body = await response.json();
+        expect(body.candidates[0].content.parts[0].text).toBe("hello json");
+      }
+    },
+  );
 
   it("serves /__aimock/openapi.json and /__aimock/routes consistently", async () => {
     const openapi = await fetch(`${mock.url}/__aimock/openapi.json`);
