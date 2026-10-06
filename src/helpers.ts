@@ -63,6 +63,8 @@ export function resolveStrictMode(
   return serverDefault ?? false;
 }
 
+const STRICT_INTEGER_RE = /^\d+$/;
+
 /**
  * Strict decimal-integer grammar shared by the query/list parsers that grew
  * their own local copy on separate branches (files `limit`, fine-tuning
@@ -76,8 +78,6 @@ export function resolveStrictMode(
  * messages stay with the callers — this is the grammar gate only, so sharing
  * it cannot change any surface's accepted range or its 400 text.
  */
-const STRICT_INTEGER_RE = /^\d+$/;
-
 export function parseStrictIntegerText(text: string): number | null {
   if (!STRICT_INTEGER_RE.test(text)) return null;
   const n = Number(text);
