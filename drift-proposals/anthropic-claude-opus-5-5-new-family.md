@@ -39,11 +39,14 @@ Rationale: Claude Opus 5.5, a point release of the already-included
 line on `/v1/models`: every Claude family in the registry is text chat on
 `/v1/messages`, and the only anthropic excludes are retired ids.
 
-EVIDENCE LIMIT, stated plainly: no live `/v1/messages` probe was run for this
-one (no Anthropic key was available), and Anthropic's `/v1/models` carries no
-capability field (`id` / `display_name` / `created_at` only). The argument is
-the one used for `claude-opus-5` (72f85f8) and `claude-fable-5-1`: the family is
-on the live listing (drift run 35827604040), its base `claude-opus-5` is
-already included, and the canary reported exactly ONE unclassified anthropic
-family that run, so every other live id already normalized into
-`includeFamilies`.
+First classified by lineage on 2026-09-23: no probe was run then.
+
+Evidence (live, 2026-10-05), which confirms the lineage call:
+`GET /v1/models/claude-opus-5-5` returned 200 with `type: "model"`,
+`display_name: "Claude Opus 5.5"`, `line: "opus"`,
+`created_at: 2026-09-21T16:24:00Z`, `max_input_tokens: 1000000`,
+`max_tokens: 128000`, and a `capabilities` object declaring batch, citations,
+code_execution, context_management, effort, image_input, pdf_input,
+structured_outputs and thinking (adaptive) as supported. A minimal
+`POST /v1/messages` (`max_tokens: 16`, one user turn) returned 200,
+`type: "message"`, `stop_reason: "end_turn"`, and one text content block.

@@ -174,13 +174,37 @@
           </li>
           <li>
             <strong><code>beforeEach</code></strong> &mdash; resets match counts (sequential fixture
-            counters return to zero, but fixtures themselves are preserved)
+            counters return to zero, but fixtures themselves are preserved) and marks every MCP fake
+            entry as unused
           </li>
           <li>
             <strong><code>afterAll</code></strong> &mdash; stops the server and restores the
             original environment variables
           </li>
         </ol>
+
+        <h3 id="mcp-fakes">MCP fakes</h3>
+        <p>
+          The <code>fixtures</code> path is loaded with <code>LLMock.loadFixtureFile()</code> or
+          <code>loadFixtureDir()</code>, so a file&rsquo;s
+          <a href="/mcp-mock#scenario-fakes"><code>mcpFakes</code></a> load too, and aimock mounts
+          an <code>MCPMock</code> at each block&rsquo;s <code>mount</code> path. A bad
+          <code>mcpFakes</code> block fails <code>beforeAll</code> with a
+          <code>FixtureLoadError</code>. Other load failures still only print a warning, as before.
+          Because <code>beforeEach</code> marks the fake entries as unused, each test starts with
+          its full list of answers.
+        </p>
+        <p>
+          With <code>aimock-pytest</code>, <code>aimock.load_fixtures(path)</code> posts a
+          file&rsquo;s <code>mcpFakes</code> to the control API with its fixtures. A file may hold
+          only <code>mcpFakes</code>. When the server rejects the file with HTTP 400, the
+          <code>requests.HTTPError</code> message is
+          <code>aimock rejected fixtures from &lt;path&gt;: &lt;error&gt;</code>, followed by one
+          line for each item of <code>details</code>. When the file has <code>mcpFakes</code> and
+          the aimock server is a release without MCP fakes, <code>load_fixtures</code> raises
+          <code>RuntimeError</code> (<code>aimock server too old for mcpFakes: ...</code>) and adds
+          nothing from the file.
+        </p>
 
         <h2>Without Plugins (Manual)</h2>
         <p>
