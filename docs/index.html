@@ -594,7 +594,9 @@
       }
       .record-grid {
         display: grid;
-        grid-template-columns: 1fr 1.2fr;
+        /* minmax(0, …): the terminal's long command line scrolls inside
+           .demo-body instead of widening the grid past the viewport. */
+        grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr);
         gap: 4rem;
         align-items: start;
       }
@@ -1185,17 +1187,19 @@
       .comparison-wrap {
         -webkit-overflow-scrolling: touch;
       }
-      .comparison-table {
+      .comparison-table,
+      .agent-tools-table {
         width: 100%;
         border-collapse: separate;
         border-spacing: 0;
         font-size: 0.85rem;
       }
-      .comparison-table thead th {
+      .comparison-table thead th,
+      .agent-tools-table thead th {
         position: sticky;
         top: var(--nav-h);
         z-index: 10;
-        padding: 1rem;
+        padding: 1rem 0.6rem;
         background: var(--bg-deep);
         border-bottom: 1px solid var(--border);
         border-right: 1px solid var(--border);
@@ -1205,41 +1209,59 @@
         font-size: 0.8rem;
         white-space: nowrap;
       }
-      .comparison-table thead th:first-child {
+      .comparison-table thead th:first-child,
+      .agent-tools-table thead th:first-child {
+        padding-left: 1rem;
         text-align: left;
       }
-      .comparison-table thead th.col-aimock {
+      .comparison-table thead th.col-aimock,
+      .agent-tools-table thead th.col-aimock {
         background: var(--accent);
         color: var(--bg-deep);
         border-left: 2px solid var(--accent);
         border-right: 2px solid var(--accent);
       }
-      .comparison-table tbody td {
-        padding: 0.75rem 1rem;
+      /* The link would otherwise take the accent colour of its accent background. */
+      .comparison-table thead th.col-aimock a,
+      .agent-tools-table thead th.col-aimock a {
+        color: inherit;
+      }
+      .comparison-table tbody td,
+      .agent-tools-table tbody td {
+        padding: 0.75rem 0.6rem;
         border: 1px solid var(--border);
         text-align: center;
         color: var(--text-secondary);
       }
-      .comparison-table tbody th {
+      .comparison-table tbody th,
+      .agent-tools-table tbody th {
         padding: 0.75rem 1rem;
         border: 1px solid var(--border);
         text-align: left;
         color: var(--text-primary);
         font-weight: 500;
       }
-      .comparison-table tbody td.col-aimock {
+      .comparison-table tbody td.col-aimock,
+      .agent-tools-table tbody td.col-aimock {
         border-left: 2px solid var(--accent);
         border-right: 2px solid var(--accent);
         background: rgba(0, 255, 136, 0.03);
       }
-      .comparison-table tbody tr:hover td {
+      .comparison-table tbody tr:hover td,
+      .agent-tools-table tbody tr:hover td {
         background: var(--bg-card-hover);
       }
-      .comparison-table tbody tr:hover td.col-aimock {
+      .comparison-table tbody tr:hover td.col-aimock,
+      .agent-tools-table tbody tr:hover td.col-aimock {
         background: rgba(0, 255, 136, 0.06);
       }
-      .comparison-table tbody td.col-aimock:last-child {
+      .comparison-table tbody td.col-aimock:last-child,
+      .agent-tools-table tbody td.col-aimock:last-child {
         border-right: 2px solid var(--accent);
+      }
+      .agent-tools-title {
+        margin: 3rem 0 1rem;
+        font-size: 1.25rem;
       }
       .yes {
         color: var(--accent);
@@ -1348,6 +1370,31 @@
         flex-shrink: 0;
       }
 
+      /* Below 1140px the tables scroll sideways inside their wrapper, not the
+         page: the 9-column matrix needs 1045px and only fits the content
+         column from a 1109px viewport (1140px leaves room for a classic
+         scrollbar). A scroll container would make the sticky header offset
+         by the nav height inside it, so the header is static here and the
+         row labels stay pinned on the left instead. At 1140px and up the
+         header stays sticky below the nav. */
+      @media (max-width: 1139px) {
+        .comparison-wrap {
+          overflow-x: auto;
+        }
+        .comparison-table thead th,
+        .agent-tools-table thead th {
+          position: static;
+        }
+        .comparison-table th:first-child,
+        .agent-tools-table th:first-child {
+          position: sticky;
+          top: auto;
+          left: 0;
+          z-index: 1;
+          background: var(--bg-deep);
+        }
+      }
+
       /* ─── Mobile ──────────────────────────────────────────────────── */
       @media (max-width: 768px) {
         /* The five section anchors used to be display:none below 768px, which
@@ -1384,7 +1431,7 @@
           grid-template-columns: 1fr;
         }
         .record-grid {
-          grid-template-columns: 1fr;
+          grid-template-columns: minmax(0, 1fr);
           gap: 2.5rem;
         }
         .service-strip {
@@ -1397,8 +1444,13 @@
         .feature-grid {
           grid-template-columns: 1fr;
         }
-        .comparison-table {
+        .comparison-table,
+        .agent-tools-table {
           font-size: 0.78rem;
+        }
+        .comparison-table th:first-child,
+        .agent-tools-table th:first-child {
+          min-width: 8.5rem;
         }
         .install-box {
           flex-wrap: wrap;
@@ -2979,6 +3031,10 @@
                 <th scope="col">
                   <a href="https://github.com/mokksy/ai-mocks">mokksy/ai-mocks</a>
                 </th>
+                <th scope="col">
+                  <a href="https://github.com/mock-server/mockserver-monorepo">MockServer</a>
+                </th>
+                <th scope="col"><a href="https://github.com/wiremock/wiremock">WireMock</a></th>
               </tr>
             </thead>
             <tbody>
@@ -2990,6 +3046,8 @@
                 <td><span class="yes" role="img" aria-label="Yes">&#10003;</span> (Docker)</td>
                 <td><span class="yes" role="img" aria-label="Yes">&#10003;</span></td>
                 <td><span class="yes" role="img" aria-label="Yes">&#10003;</span> (Ktor)</td>
+                <td><span class="yes" role="img" aria-label="Yes">&#10003;</span></td>
+                <td><span class="yes" role="img" aria-label="Yes">&#10003;</span></td>
               </tr>
               <tr>
                 <th scope="row">Chat Completions SSE</th>
@@ -2999,6 +3057,8 @@
                 <td><span class="yes" role="img" aria-label="Yes">&#10003;</span></td>
                 <td><span class="yes" role="img" aria-label="Yes">&#10003;</span></td>
                 <td><span class="yes" role="img" aria-label="Yes">&#10003;</span></td>
+                <td><span class="yes" role="img" aria-label="Yes">&#10003;</span></td>
+                <td>Not documented</td>
               </tr>
               <tr>
                 <th scope="row">Responses API SSE</th>
@@ -3008,6 +3068,8 @@
                 <td><span class="no" role="img" aria-label="No">&#10007;</span></td>
                 <td><span class="no" role="img" aria-label="No">&#10007;</span></td>
                 <td><span class="yes" role="img" aria-label="Yes">&#10003;</span></td>
+                <td><span class="yes" role="img" aria-label="Yes">&#10003;</span></td>
+                <td>Not documented</td>
               </tr>
               <tr>
                 <th scope="row">Claude Messages API</th>
@@ -3017,6 +3079,8 @@
                 <td><span class="no" role="img" aria-label="No">&#10007;</span></td>
                 <td><span class="yes" role="img" aria-label="Yes">&#10003;</span></td>
                 <td><span class="yes" role="img" aria-label="Yes">&#10003;</span></td>
+                <td><span class="yes" role="img" aria-label="Yes">&#10003;</span></td>
+                <td>Not documented</td>
               </tr>
               <tr>
                 <th scope="row">Gemini streaming</th>
@@ -3026,6 +3090,8 @@
                 <td><span class="no" role="img" aria-label="No">&#10007;</span></td>
                 <td><span class="yes" role="img" aria-label="Yes">&#10003;</span></td>
                 <td><span class="yes" role="img" aria-label="Yes">&#10003;</span></td>
+                <td><span class="yes" role="img" aria-label="Yes">&#10003;</span></td>
+                <td>Not documented</td>
               </tr>
               <tr>
                 <th scope="row">Multi-provider support</th>
@@ -3037,6 +3103,8 @@
                 <td>OpenAI only</td>
                 <td>OpenAI only</td>
                 <td>5 providers</td>
+                <td><span class="yes" role="img" aria-label="Yes">&#10003;</span></td>
+                <td>Not documented</td>
               </tr>
               <tr>
                 <th scope="row">OpenRouter router / fallback simulation</th>
@@ -3046,6 +3114,8 @@
                 <td><span class="no" role="img" aria-label="No">&#10007;</span></td>
                 <td><span class="no" role="img" aria-label="No">&#10007;</span></td>
                 <td><span class="no" role="img" aria-label="No">&#10007;</span></td>
+                <td><span class="partial">partial</span></td>
+                <td>Not documented</td>
               </tr>
               <tr>
                 <th scope="row">WebSocket APIs</th>
@@ -3055,6 +3125,8 @@
                 <td><span class="no" role="img" aria-label="No">&#10007;</span></td>
                 <td><span class="no" role="img" aria-label="No">&#10007;</span></td>
                 <td><span class="no" role="img" aria-label="No">&#10007;</span></td>
+                <td><span class="partial">partial</span></td>
+                <td><span class="partial">partial</span></td>
               </tr>
               <tr>
                 <th scope="row">Embeddings API</th>
@@ -3064,6 +3136,8 @@
                 <td><span class="no" role="img" aria-label="No">&#10007;</span></td>
                 <td><span class="yes" role="img" aria-label="Yes">&#10003;</span></td>
                 <td><span class="yes" role="img" aria-label="Yes">&#10003;</span></td>
+                <td><span class="yes" role="img" aria-label="Yes">&#10003;</span></td>
+                <td>Not documented</td>
               </tr>
               <tr>
                 <th scope="row">Image generation</th>
@@ -3073,6 +3147,8 @@
                 <td><span class="no" role="img" aria-label="No">&#10007;</span></td>
                 <td><span class="no" role="img" aria-label="No">&#10007;</span></td>
                 <td><span class="no" role="img" aria-label="No">&#10007;</span></td>
+                <td><span class="no" role="img" aria-label="No">&#10007;</span></td>
+                <td>Not documented</td>
               </tr>
               <tr>
                 <th scope="row">Image editing</th>
@@ -3082,6 +3158,8 @@
                 <td><span class="no" role="img" aria-label="No">&#10007;</span></td>
                 <td><span class="no" role="img" aria-label="No">&#10007;</span></td>
                 <td><span class="no" role="img" aria-label="No">&#10007;</span></td>
+                <td><span class="no" role="img" aria-label="No">&#10007;</span></td>
+                <td>Not documented</td>
               </tr>
               <tr>
                 <th scope="row">Text-to-Speech</th>
@@ -3091,6 +3169,8 @@
                 <td><span class="no" role="img" aria-label="No">&#10007;</span></td>
                 <td><span class="no" role="img" aria-label="No">&#10007;</span></td>
                 <td><span class="no" role="img" aria-label="No">&#10007;</span></td>
+                <td><span class="no" role="img" aria-label="No">&#10007;</span></td>
+                <td>Not documented</td>
               </tr>
               <tr>
                 <th scope="row">Audio transcription</th>
@@ -3100,6 +3180,8 @@
                 <td><span class="no" role="img" aria-label="No">&#10007;</span></td>
                 <td><span class="no" role="img" aria-label="No">&#10007;</span></td>
                 <td><span class="no" role="img" aria-label="No">&#10007;</span></td>
+                <td>Not documented</td>
+                <td>Not documented</td>
               </tr>
               <tr>
                 <th scope="row">Audio translation</th>
@@ -3109,6 +3191,8 @@
                 <td><span class="no" role="img" aria-label="No">&#10007;</span></td>
                 <td><span class="no" role="img" aria-label="No">&#10007;</span></td>
                 <td><span class="no" role="img" aria-label="No">&#10007;</span></td>
+                <td>Not documented</td>
+                <td>Not documented</td>
               </tr>
               <tr>
                 <th scope="row">Non-speech audio</th>
@@ -3118,6 +3202,8 @@
                 <td><span class="no" role="img" aria-label="No">&#10007;</span></td>
                 <td><span class="no" role="img" aria-label="No">&#10007;</span></td>
                 <td><span class="no" role="img" aria-label="No">&#10007;</span></td>
+                <td><span class="no" role="img" aria-label="No">&#10007;</span></td>
+                <td>Not documented</td>
               </tr>
               <tr>
                 <th scope="row">Video generation</th>
@@ -3127,6 +3213,8 @@
                 <td><span class="no" role="img" aria-label="No">&#10007;</span></td>
                 <td><span class="no" role="img" aria-label="No">&#10007;</span></td>
                 <td><span class="no" role="img" aria-label="No">&#10007;</span></td>
+                <td>Not documented</td>
+                <td>Not documented</td>
               </tr>
               <tr>
                 <th scope="row">AG-UI event mocking</th>
@@ -3136,6 +3224,8 @@
                 <td><span class="no" role="img" aria-label="No">&#10007;</span></td>
                 <td><span class="no" role="img" aria-label="No">&#10007;</span></td>
                 <td><span class="no" role="img" aria-label="No">&#10007;</span></td>
+                <td>Not documented</td>
+                <td>Not documented</td>
               </tr>
               <tr>
                 <th scope="row">MCP tool mocking</th>
@@ -3145,6 +3235,30 @@
                 <td><span class="no" role="img" aria-label="No">&#10007;</span></td>
                 <td><span class="no" role="img" aria-label="No">&#10007;</span></td>
                 <td><span class="no" role="img" aria-label="No">&#10007;</span></td>
+                <td><span class="yes" role="img" aria-label="Yes">&#10003;</span></td>
+                <td>Not documented</td>
+              </tr>
+              <tr>
+                <th scope="row">Scenario-scoped MCP tool fakes</th>
+                <td class="col-aimock"><a href="#mcp-fakes-preview">Preview &#10003;</a></td>
+                <td><span class="no" role="img" aria-label="No">&#10007;</span></td>
+                <td><span class="no" role="img" aria-label="No">&#10007;</span></td>
+                <td><span class="no" role="img" aria-label="No">&#10007;</span></td>
+                <td><span class="no" role="img" aria-label="No">&#10007;</span></td>
+                <td><span class="no" role="img" aria-label="No">&#10007;</span></td>
+                <td>Not documented</td>
+                <td>Not documented</td>
+              </tr>
+              <tr>
+                <th scope="row">Fail on undeclared MCP tool</th>
+                <td class="col-aimock"><a href="#mcp-fakes-preview">Preview &#10003;</a></td>
+                <td><span class="no" role="img" aria-label="No">&#10007;</span></td>
+                <td><span class="no" role="img" aria-label="No">&#10007;</span></td>
+                <td><span class="no" role="img" aria-label="No">&#10007;</span></td>
+                <td><span class="no" role="img" aria-label="No">&#10007;</span></td>
+                <td><span class="no" role="img" aria-label="No">&#10007;</span></td>
+                <td>Not documented</td>
+                <td>Not documented</td>
               </tr>
               <tr>
                 <th scope="row">A2A agent mocking</th>
@@ -3154,6 +3268,8 @@
                 <td><span class="no" role="img" aria-label="No">&#10007;</span></td>
                 <td><span class="no" role="img" aria-label="No">&#10007;</span></td>
                 <td><span class="yes" role="img" aria-label="Yes">&#10003;</span></td>
+                <td><span class="yes" role="img" aria-label="Yes">&#10003;</span></td>
+                <td>Not documented</td>
               </tr>
               <tr>
                 <th scope="row">Vector DB mocking</th>
@@ -3163,6 +3279,8 @@
                 <td><span class="no" role="img" aria-label="No">&#10007;</span></td>
                 <td><span class="no" role="img" aria-label="No">&#10007;</span></td>
                 <td><span class="no" role="img" aria-label="No">&#10007;</span></td>
+                <td>Not documented</td>
+                <td>Not documented</td>
               </tr>
               <tr>
                 <th scope="row">Search &amp; rerank</th>
@@ -3172,6 +3290,8 @@
                 <td><span class="no" role="img" aria-label="No">&#10007;</span></td>
                 <td><span class="no" role="img" aria-label="No">&#10007;</span></td>
                 <td><span class="no" role="img" aria-label="No">&#10007;</span></td>
+                <td><span class="partial">partial</span></td>
+                <td>Not documented</td>
               </tr>
               <tr>
                 <th scope="row">Record &amp; replay</th>
@@ -3181,6 +3301,8 @@
                 <td><span class="no" role="img" aria-label="No">&#10007;</span></td>
                 <td><span class="no" role="img" aria-label="No">&#10007;</span></td>
                 <td><span class="no" role="img" aria-label="No">&#10007;</span></td>
+                <td><span class="yes" role="img" aria-label="Yes">&#10003;</span></td>
+                <td><span class="yes" role="img" aria-label="Yes">&#10003;</span> (HTTP)</td>
               </tr>
               <tr>
                 <th scope="row">Drift detection</th>
@@ -3192,6 +3314,8 @@
                 <td><span class="no" role="img" aria-label="No">&#10007;</span></td>
                 <td><span class="no" role="img" aria-label="No">&#10007;</span></td>
                 <td><span class="no" role="img" aria-label="No">&#10007;</span></td>
+                <td><span class="partial">partial</span></td>
+                <td><span class="no" role="img" aria-label="No">&#10007;</span></td>
               </tr>
               <tr>
                 <th scope="row">Sequential / stateful responses</th>
@@ -3201,6 +3325,8 @@
                 <td><span class="yes" role="img" aria-label="Yes">&#10003;</span></td>
                 <td><span class="no" role="img" aria-label="No">&#10007;</span></td>
                 <td><span class="no" role="img" aria-label="No">&#10007;</span></td>
+                <td><span class="yes" role="img" aria-label="Yes">&#10003;</span></td>
+                <td><span class="yes" role="img" aria-label="Yes">&#10003;</span> (HTTP)</td>
               </tr>
               <tr>
                 <th scope="row">Request journal</th>
@@ -3212,6 +3338,8 @@
                 <td><span class="no" role="img" aria-label="No">&#10007;</span></td>
                 <td><span class="yes" role="img" aria-label="Yes">&#10003;</span></td>
                 <td><span class="no" role="img" aria-label="No">&#10007;</span></td>
+                <td><span class="yes" role="img" aria-label="Yes">&#10003;</span></td>
+                <td><span class="yes" role="img" aria-label="Yes">&#10003;</span></td>
               </tr>
               <tr>
                 <th scope="row">Error injection</th>
@@ -3223,6 +3351,8 @@
                 <td><span class="no" role="img" aria-label="No">&#10007;</span></td>
                 <td><span class="no" role="img" aria-label="No">&#10007;</span></td>
                 <td><span class="no" role="img" aria-label="No">&#10007;</span></td>
+                <td><span class="yes" role="img" aria-label="Yes">&#10003;</span></td>
+                <td><span class="yes" role="img" aria-label="Yes">&#10003;</span> (HTTP)</td>
               </tr>
               <tr>
                 <th scope="row">Chaos testing</th>
@@ -3232,6 +3362,12 @@
                 <td><span class="no" role="img" aria-label="No">&#10007;</span></td>
                 <td><span class="no" role="img" aria-label="No">&#10007;</span></td>
                 <td><span class="no" role="img" aria-label="No">&#10007;</span></td>
+                <td><span class="yes" role="img" aria-label="Yes">&#10003;</span></td>
+                <td>
+                  <a href="https://wiremock.org/docs/simulating-faults/#bad-responses"
+                    >HTTP faults and delays</a
+                  >
+                </td>
               </tr>
               <tr>
                 <th scope="row">Streaming physics</th>
@@ -3241,6 +3377,8 @@
                 <td><span class="no" role="img" aria-label="No">&#10007;</span></td>
                 <td><span class="no" role="img" aria-label="No">&#10007;</span></td>
                 <td><span class="no" role="img" aria-label="No">&#10007;</span></td>
+                <td><span class="yes" role="img" aria-label="Yes">&#10003;</span></td>
+                <td><span class="partial">partial</span></td>
               </tr>
               <tr>
                 <th scope="row">Structured output / JSON mode</th>
@@ -3250,6 +3388,8 @@
                 <td><span class="no" role="img" aria-label="No">&#10007;</span></td>
                 <td><span class="no" role="img" aria-label="No">&#10007;</span></td>
                 <td><span class="no" role="img" aria-label="No">&#10007;</span></td>
+                <td><span class="yes" role="img" aria-label="Yes">&#10003;</span></td>
+                <td>Not documented</td>
               </tr>
               <tr>
                 <th scope="row">Programmatic API</th>
@@ -3263,6 +3403,8 @@
                 <td><span class="no" role="img" aria-label="No">&#10007;</span></td>
                 <td><span class="no" role="img" aria-label="No">&#10007;</span></td>
                 <td><span class="yes" role="img" aria-label="Yes">&#10003;</span> (Kotlin/JVM)</td>
+                <td><span class="yes" role="img" aria-label="Yes">&#10003;</span> (8 languages)</td>
+                <td><span class="yes" role="img" aria-label="Yes">&#10003;</span> (Java/JVM)</td>
               </tr>
               <tr>
                 <th scope="row">Fixture files</th>
@@ -3272,6 +3414,8 @@
                 <td>YAML config</td>
                 <td>JSON templates</td>
                 <td><span class="no" role="img" aria-label="No">&#10007;</span></td>
+                <td><span class="yes" role="img" aria-label="Yes">&#10003;</span> (JSON)</td>
+                <td><span class="yes" role="img" aria-label="Yes">&#10003;</span> (JSON)</td>
               </tr>
               <tr>
                 <th scope="row">GitHub Action</th>
@@ -3281,6 +3425,8 @@
                 <td><span class="no" role="img" aria-label="No">&#10007;</span></td>
                 <td><span class="yes" role="img" aria-label="Yes">&#10003;</span></td>
                 <td><span class="yes" role="img" aria-label="Yes">&#10003;</span></td>
+                <td><span class="yes" role="img" aria-label="Yes">&#10003;</span></td>
+                <td>Not documented</td>
               </tr>
               <tr>
                 <th scope="row">Vitest / Jest plugins</th>
@@ -3290,6 +3436,8 @@
                 <td><span class="no" role="img" aria-label="No">&#10007;</span></td>
                 <td><span class="no" role="img" aria-label="No">&#10007;</span></td>
                 <td><span class="no" role="img" aria-label="No">&#10007;</span></td>
+                <td><span class="partial">partial</span></td>
+                <td>Not documented</td>
               </tr>
               <tr>
                 <th scope="row">Docker + Helm</th>
@@ -3299,6 +3447,10 @@
                 <td><span class="yes" role="img" aria-label="Yes">&#10003;</span> (Both)</td>
                 <td>Docker only</td>
                 <td><span class="no" role="img" aria-label="No">&#10007;</span></td>
+                <td><span class="yes" role="img" aria-label="Yes">&#10003;</span></td>
+                <td>
+                  <span class="yes" role="img" aria-label="Yes">&#10003;</span> (Helm experimental)
+                </td>
               </tr>
               <tr>
                 <th scope="row">Prometheus metrics</th>
@@ -3308,6 +3460,8 @@
                 <td><span class="no" role="img" aria-label="No">&#10007;</span></td>
                 <td><span class="no" role="img" aria-label="No">&#10007;</span></td>
                 <td><span class="no" role="img" aria-label="No">&#10007;</span></td>
+                <td><span class="yes" role="img" aria-label="Yes">&#10003;</span></td>
+                <td><span class="partial">partial</span></td>
               </tr>
               <tr>
                 <th scope="row">Streaming usage chunks</th>
@@ -3317,6 +3471,8 @@
                 <td><span class="no" role="img" aria-label="No">&#10007;</span></td>
                 <td><span class="no" role="img" aria-label="No">&#10007;</span></td>
                 <td><span class="no" role="img" aria-label="No">&#10007;</span></td>
+                <td><span class="partial">partial</span></td>
+                <td>Not documented</td>
               </tr>
               <tr>
                 <th scope="row">Rate limiting headers</th>
@@ -3326,6 +3482,8 @@
                 <td><span class="no" role="img" aria-label="No">&#10007;</span></td>
                 <td><span class="no" role="img" aria-label="No">&#10007;</span></td>
                 <td><span class="no" role="img" aria-label="No">&#10007;</span></td>
+                <td><span class="partial">partial</span></td>
+                <td>Not documented</td>
               </tr>
               <tr>
                 <th scope="row">Dependencies</th>
@@ -3335,6 +3493,151 @@
                 <td>Node+Express</td>
                 <td>Minimal</td>
                 <td>JVM (Kotlin)</td>
+                <td>JVM, or JVM-less binary</td>
+                <td>JVM</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h3 class="agent-tools-title fade-in">Agent tool mocking</h3>
+        <p
+          id="mcp-fakes-preview"
+          class="fade-in"
+          style="scroll-margin-top: calc(var(--nav-h) + 3rem)"
+        >
+          MCP fakes require a preview package; they are not included in npm release 1.43.0. To try
+          the <a href="/mcp-mock#scenario-fakes">MCP fakes examples</a>, install the verified
+          preview:
+          <code style="overflow-wrap: anywhere"
+            >npm install https://pkg.pr.new/@copilotkit/aimock@d0398c0</code
+          >.
+        </p>
+        <div class="comparison-wrap fade-in" style="transition-delay: 0.1s">
+          <table class="agent-tools-table">
+            <thead>
+              <tr>
+                <th scope="col">Capability</th>
+                <th scope="col" class="col-aimock">
+                  <a href="/mcp-mock">aimock MCP fakes (preview)</a>
+                </th>
+                <th scope="col">
+                  <a href="https://mastra.ai/docs/evals/experiments"
+                    >Mastra Experiment Tool Mocks</a
+                  >
+                </th>
+                <th scope="col">
+                  <a href="https://www.mock-server.com/mock_server/ai_protocol_mocking.html"
+                    >MockServer MCP mocking</a
+                  >
+                </th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <th scope="row">Works with any agent framework</th>
+                <td class="col-aimock">
+                  <span class="yes" role="img" aria-label="Yes">&#10003;</span> (over MCP HTTP)
+                </td>
+                <td><span class="no" role="img" aria-label="No">&#10007;</span></td>
+                <td>
+                  <span class="yes" role="img" aria-label="Yes">&#10003;</span> (over MCP HTTP)
+                </td>
+              </tr>
+              <tr>
+                <th scope="row">MCP tools</th>
+                <td class="col-aimock">
+                  <span class="yes" role="img" aria-label="Yes">&#10003;</span>
+                </td>
+                <td>Not documented</td>
+                <td><span class="yes" role="img" aria-label="Yes">&#10003;</span></td>
+              </tr>
+              <tr>
+                <th scope="row">In-process (non-network) tools</th>
+                <td class="col-aimock">
+                  <span class="no" role="img" aria-label="No">&#10007;</span>
+                </td>
+                <td><span class="yes" role="img" aria-label="Yes">&#10003;</span></td>
+                <td>n/a</td>
+              </tr>
+              <tr>
+                <th scope="row">Ordered answers per tool</th>
+                <td class="col-aimock">
+                  <span class="yes" role="img" aria-label="Yes">&#10003;</span>
+                </td>
+                <td><span class="yes" role="img" aria-label="Yes">&#10003;</span></td>
+                <td>Not documented</td>
+              </tr>
+              <tr>
+                <th scope="row">Exact-argument matching</th>
+                <td class="col-aimock">
+                  <span class="yes" role="img" aria-label="Yes">&#10003;</span>
+                </td>
+                <td><span class="yes" role="img" aria-label="Yes">&#10003;</span></td>
+                <td>Not documented</td>
+              </tr>
+              <tr>
+                <th scope="row">Any-argument matching</th>
+                <td class="col-aimock">
+                  <span class="yes" role="img" aria-label="Yes">&#10003;</span>
+                </td>
+                <td><span class="yes" role="img" aria-label="Yes">&#10003;</span></td>
+                <td>
+                  <span class="yes" role="img" aria-label="Yes">&#10003;</span> (one answer for
+                  every call)
+                </td>
+              </tr>
+              <tr>
+                <th scope="row">Fail on undeclared tool</th>
+                <td class="col-aimock">
+                  <span class="yes" role="img" aria-label="Yes">&#10003;</span>
+                </td>
+                <td><span class="yes" role="img" aria-label="Yes">&#10003;</span></td>
+                <td>Not documented</td>
+              </tr>
+              <tr>
+                <th scope="row">Scripted tool errors</th>
+                <td class="col-aimock">
+                  <span class="yes" role="img" aria-label="Yes">&#10003;</span>
+                </td>
+                <td>Not documented</td>
+                <td><span class="yes" role="img" aria-label="Yes">&#10003;</span></td>
+              </tr>
+              <tr>
+                <th scope="row">Per-test state and reset</th>
+                <td class="col-aimock">
+                  <span class="yes" role="img" aria-label="Yes">&#10003;</span>
+                </td>
+                <td><span class="yes" role="img" aria-label="Yes">&#10003;</span></td>
+                <td>Not documented</td>
+              </tr>
+              <tr>
+                <th scope="row">LLM responses mocked in the same scenario</th>
+                <td class="col-aimock">
+                  <span class="yes" role="img" aria-label="Yes">&#10003;</span>
+                </td>
+                <td>Not documented</td>
+                <td><span class="partial">partial</span></td>
+              </tr>
+              <tr>
+                <th scope="row">Create fakes from recorded runs</th>
+                <td class="col-aimock">Planned</td>
+                <td><span class="partial">partial</span></td>
+                <td><span class="yes" role="img" aria-label="Yes">&#10003;</span></td>
+              </tr>
+              <tr>
+                <th scope="row">Report unused mocks</th>
+                <td class="col-aimock">
+                  <span class="partial">partial</span> (inspect consumed state)
+                </td>
+                <td><span class="yes" role="img" aria-label="Yes">&#10003;</span></td>
+                <td>Not documented</td>
+              </tr>
+              <tr>
+                <th scope="row">Workflows</th>
+                <td class="col-aimock">n/a</td>
+                <td>Planned</td>
+                <td>n/a</td>
               </tr>
             </tbody>
           </table>
@@ -3350,7 +3653,7 @@
           class="fade-in"
           style="color: var(--text-secondary); margin: 1rem auto 1.5rem; max-width: 500px"
         >
-          Step-by-step migration guides for every major mock tool.
+          Step-by-step migration guides for the mock tools below.
         </p>
         <div
           class="fade-in"
@@ -3474,8 +3777,9 @@
       }
 
       // Publish the nav's rendered height as --nav-h so anything sticking below
-      // it (the comparison table's sticky header) offsets from the real number
-      // rather than a hard-coded guess that silently rots when the nav changes.
+      // it (the comparison tables' sticky headers, 1140px and up) offsets from
+      // the real number rather than a hard-coded guess that silently rots when
+      // the nav changes.
       (function () {
         try {
           var nav = document.querySelector("nav");
