@@ -306,6 +306,7 @@ export interface AdopterDisplay {
  */
 export const ADOPTER_DISPLAY: Record<string, AdopterDisplay> = {
   "openclaw/openclaw": { name: "OpenClaw", url: "https://openclaw.ai" },
+  "botiverse/oar": { name: "botiverse", url: "https://github.com/botiverse/oar" },
   "mattermost/mattermost-plugin-agents": {
     name: "Mattermost",
     url: "https://mattermost.com/copilot",
