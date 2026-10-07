@@ -22,6 +22,7 @@
 
 ### Changed
 
+- Update the adoption wall to retain supported Botiverse attribution and omit unsupported Alpic/Skybridge attribution; keep its curated Botiverse mapping and 29-tile animation duration consistent with the generator (#495).
 - Expand the landing-page comparisons, qualify WireMock fault support, and label MCP scenario fakes as preview-only with a pinned preview installation (#494).
 - Share internal strict decimal-integer parsing across files pagination, fine-tuning pagination and chaos configuration while preserving each caller’s accepted inputs, bounds and error messages (#479).
 - `GET` on an MCP mount, and on any path of a standalone `MCPMock`, now answers 405 with `Allow: POST, DELETE` instead of falling through to the LLM routes or the JSON-RPC handler
@@ -42,6 +43,7 @@
 
 ### Fixed
 
+- Classify `gemini-nano-banana-2.1` under the existing image-generation drift exclusions. The model outputs Image and Text; its appearance in the provider listing no longer raises an unclassified text-family alert.
 - Return HTTP 202 from OpenRouter video submission on fixture replay and successful record/proxy paths, with matching journal status; polling and downloads remain HTTP 200 (#492).
 - Fix the competitive-matrix updater to apply detected capabilities to migration pages even when homepage cells are unchanged or no homepage row exists. Report migration outcomes and flag ambiguous or unsupported cells for manual review without changing them (#488)
 - Allow PUT in CORS preflight responses so browsers can call the existing `/fal/queue/requests/{requestId}` route (#480).
