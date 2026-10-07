@@ -50,11 +50,19 @@
       <main class="docs-content">
         <h1>Vector Stores</h1>
         <p class="lead">
-          aimock implements OpenAI's Vector Stores surface in memory, so an SDK that uploads a file,
-          attaches it to a store, polls it to <code>completed</code> and runs a
-          <code>file_search</code> query gets a complete RAG lifecycle without touching
-          <code>api.openai.com</code>. Progression is deterministic and driven by retrieves, not by
-          wall-clock time, so tests never sleep.
+          aimock implements the 14 OpenAI Vector Stores endpoints listed below in memory. An SDK can
+          upload a file, attach it to a store, poll it to <code>completed</code>, and call
+          <code>POST /v1/vector_stores/{id}/search</code> directly without touching
+          <code>api.openai.com</code>. Progression is deterministic and driven by retrieves.
+        </p>
+        <p>
+          This mock does not execute the hosted <code>file_search</code> tool in Responses or
+          Assistants. Vector-store contents do not automatically produce model responses. Responses
+          requests need separate matching fixtures for local mock responses. In default mock mode,
+          an unmatched Responses request returns <code>404</code> with
+          <code>no_fixture_match</code>. Strict mode returns <code>503</code> instead, even when an
+          upstream is configured. With strict mode disabled, record/proxy mode forwards unmatched
+          requests to the configured upstream.
         </p>
 
         <h2>Endpoints</h2>
@@ -206,18 +214,41 @@ cancel    -> cancelling -> cancelled          (400 once terminal)</code></pre>
           Search is deterministic, not semantic: only <code>completed</code> files are searched,
           ranking is a stable hash of <code>query + file_id</code> so the same query always orders
           the same way, and every hit carries its file id plus a canned text snippet quoting the
-          query. <code>max_num_results</code> is an integer in <code>1</code>&ndash;<code>50</code>
+          query. <code>query</code> accepts a non-empty string or a non-empty array of non-empty
+          strings. Array entries are joined with a newline in request order for ranking and
+          snippets; a single-entry array ranks identically to its string. The response
+          <code>search_query</code> echoes the original string or array.
+          <code>max_num_results</code> is an integer in <code>1</code>&ndash;<code>50</code>
           (default <code>10</code>); <code>ranking_options.score_threshold</code> is a number in
           <code>0</code>&ndash;<code>1</code>. An empty store answers <code>200</code> with
-          <code>data: []</code>. It exists so <code>file_search</code> plumbing (top-k, thresholds,
-          empty results) is testable, not so relevance itself can be asserted.
+          <code>data: []</code>. Direct search supports tests of top-k, thresholds, and empty
+          results. It does not measure semantic relevance.
+        </p>
+
+        <p>
+          File attachment and batch creation accept <code>attributes</code>: up to 16 pairs with
+          keys of at most 64 characters and string values of at most 512 characters, numbers, or
+          booleans. Batch attributes apply to each newly attached file. Omitted or null attributes
+          are returned as <code>null</code>; an empty object stays empty. Search results include the
+          file's attributes.
+        </p>
+        <p>
+          Search <code>filters</code> accept comparisons
+          <code>{ type: "eq", key: "category", value: "guide" }</code> using <code>eq</code>,
+          <code>ne</code>, <code>gt</code>, <code>gte</code>, <code>lt</code>, or <code>lte</code>,
+          and nested groups <code>{ type: "and", filters: [...] }</code> or
+          <code>{ type: "or", filters: [...] }</code>. Filters run before ranking and result limits.
+          Comparisons require an existing key and matching value types; missing keys do not match,
+          including with <code>ne</code>. Ordering uses numeric, lexicographic string, or
+          false-before-true boolean order. Malformed attributes or filters return <code>400</code>.
         </p>
 
         <h2>Validation</h2>
         <ul>
           <li>
             A body that is not a JSON object is a <code>400</code>; <code>name</code> must be a
-            string when present
+            string when present on create. On modify, <code>name: null</code> resets the name to an
+            empty string; omitting <code>name</code> preserves it
           </li>
           <li>
             <code>metadata</code> follows the shared platform rule: at most 16 string pairs, keys up
@@ -234,7 +265,7 @@ cancel    -> cancelling -> cancelled          (400 once terminal)</code></pre>
               >{ type: "static", static: { max_chunk_size_tokens: 100&ndash;4096,
               chunk_overlap_tokens: 0&ndash;2048 } }</code
             >
-            with overlap below half the chunk size
+            with overlap at most half the chunk size
           </li>
           <li>
             <code>file_ids</code> is an array of up to 2000 non-empty strings; attaching the same
