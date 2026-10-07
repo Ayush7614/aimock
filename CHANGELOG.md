@@ -4,6 +4,7 @@
 
 ### Added
 
+- Add `GET /__aimock/openapi.json` (OpenAPI 3.1) and `GET /__aimock/routes` (`{ count, routes }`) for HTTP route discovery, plus package exports for the catalog and route definitions (#451).
 - MCP scenario fakes: a fixture file's `mcpFakes` key scripts MCP tool answers per test id or context, with ordered answers, exact or any-argument matching, scripted tool errors and an optional closed world (`undeclaredTools: "deny"`). A mismatch, an exhausted tool or an undeclared tool under `deny` fails loud with a JSON-RPC error keyed by `error.data.aimock.code`
 - `POST /__aimock/fixtures` accepts an `mcpFakes` key; `fixtures` is optional when it is sent, and the response adds `mcpFakesAdded`. Callers that do not send `mcpFakes` get `{"added": n}` as before
 - `GET /__aimock/mcp/fakes` lists the fakes that apply to a test id and context, with each entry's consumed state
@@ -21,6 +22,8 @@
 ### Changed
 
 - Update the adoption wall to retain supported Botiverse attribution and omit unsupported Alpic/Skybridge attribution; keep its curated Botiverse mapping and 29-tile animation duration consistent with the generator (#495).
+- Expand the landing-page comparisons, qualify WireMock fault support, and label MCP scenario fakes as preview-only with a pinned preview installation (#494).
+- Share internal strict decimal-integer parsing across files pagination, fine-tuning pagination and chaos configuration while preserving each caller’s accepted inputs, bounds and error messages (#479).
 - `GET` on an MCP mount, and on any path of a standalone `MCPMock`, now answers 405 with `Allow: POST, DELETE` instead of falling through to the LLM routes or the JSON-RPC handler
 - MCP `tools/call` journal entries now carry the request `body` (was `null`), and `response.mcpFake` (`id`, `outcome`) when a fake answered or failed
 - MCP journal entries carry `testId` and `context`. `GET /__aimock/journal?testId=` lists an MCP request under the test id bound at `initialize`, or under the decoded header value, instead of `"__default__"` or the encoded string
@@ -39,6 +42,9 @@
 
 ### Fixed
 
+- Return HTTP 202 from OpenRouter video submission on fixture replay and successful record/proxy paths, with matching journal status; polling and downloads remain HTTP 200 (#492).
+- Fix the competitive-matrix updater to apply detected capabilities to migration pages even when homepage cells are unchanged or no homepage row exists. Report migration outcomes and flag ambiguous or unsupported cells for manual review without changing them (#488)
+- Allow PUT in CORS preflight responses so browsers can call the existing `/fal/queue/requests/{requestId}` route (#480).
 - Fix internal errors for specific malformed provider fields and control fixture inputs, while preserving supported input forms and defaults. `toolName` matching safely skips malformed tools, and `addFixturesFromJSON` explains its array requirement. Multipart parsing distinguishes `name` from `filename`. Invalid HTTP and WebSocket request targets return 400 while retaining existing diagnostics and HTTP journal/CORS behavior (#474)
 - Reject missing Ollama tool functions and malformed Anthropic message collections before fixture matching. Reject numeric user/assistant content in Anthropic requests and numeric Gemini Interactions input (#474)
 - Validate malformed tool shapes on native `/v1/chat/completions` before fixture matching or proxy forwarding, while preserving supported shorthand. Compatible routes skip `toolName` matches for non-array tools without changing the request or proxy payload (#474)
