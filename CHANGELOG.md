@@ -22,6 +22,7 @@
 
 ### Changed
 
+- Expand the landing-page comparisons, qualify WireMock fault support, and label MCP scenario fakes as preview-only with a pinned preview installation (#494).
 - Share internal strict decimal-integer parsing across files pagination, fine-tuning pagination and chaos configuration while preserving each caller’s accepted inputs, bounds and error messages (#479).
 - `GET` on an MCP mount, and on any path of a standalone `MCPMock`, now answers 405 with `Allow: POST, DELETE` instead of falling through to the LLM routes or the JSON-RPC handler
 - MCP `tools/call` journal entries now carry the request `body` (was `null`), and `response.mcpFake` (`id`, `outcome`) when a fake answered or failed
