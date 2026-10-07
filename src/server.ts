@@ -364,7 +364,10 @@ const DEFAULT_MODELS = [
 
 const CORS_HEADERS: Record<string, string> = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
+  // Every method the dispatcher serves: PUT is dispatched for
+  // `/fal/queue/requests/{requestId}` (status/cancel/result), so a preflight
+  // that omits it makes browsers refuse that call.
+  "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
   "Access-Control-Allow-Headers": "*",
   // Response headers are invisible to cross-origin JS unless exposed. The
   // journal's pagination total is a response header (the body stays a bare
@@ -3214,7 +3217,7 @@ async function startServer(
       return;
     }
 
-    // POST /api/v1/videos — submit a video generation job
+    // POST /api/v1/videos — submit a video generation job (202 Accepted)
     if (pathname === OPENROUTER_VIDEOS_PATH && req.method === "POST") {
       // CORS headers before the body is read: a readBody throw (e.g. the
       // body-size cap) lands in the catch below, which must not write a 500
