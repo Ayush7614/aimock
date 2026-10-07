@@ -59,7 +59,7 @@
 
 import { createHash } from "node:crypto";
 import type * as http from "node:http";
-import { flattenHeaders, generateId, isJsonObject } from "./helpers.js";
+import { flattenHeaders, generateId, isJsonObject, parseStrictIntegerText } from "./helpers.js";
 import { applyChaosAsync } from "./chaos.js";
 import type { ChaosDefaults, ChatCompletionRequest, JournalBody } from "./types.js";
 import type { Journal } from "./journal.js";
@@ -1284,18 +1284,6 @@ export async function handleFilesCreate(
 export const FILES_LIST_MAX_LIMIT = 10000;
 export const FILES_LIST_DEFAULT_LIMIT = FILES_LIST_MAX_LIMIT;
 
-/**
- * An unsigned decimal integer literal and nothing else — no sign, no exponent,
- * no radix prefix, no surrounding whitespace. See {@link parseListQuery} for
- * what each of those would otherwise be silently accepted as.
- *
- * A long digit run is still safe to hand to `Number()`: it stays finite and
- * integral, so it fails the range check below rather than the type check.
- */
-// TODO(integration): dedupe strict integer parsers — the fine-tuning and chaos
-// surfaces each grew their own local copy of this on separate branches.
-const DECIMAL_INTEGER_RE = /^[0-9]+$/;
-
 interface FilesListQuery {
   limit: number;
   order: "asc" | "desc";
@@ -1400,8 +1388,8 @@ function parseListQuery(rawUrl: string): FilesListQuery | { error: string } {
     // a different size. (`?limit=` no longer reaches here — the empty value is
     // already a 400 in singleParam, with the same message every parameter
     // gets.)
-    const parsed = DECIMAL_INTEGER_RE.test(rawLimit.value) ? Number(rawLimit.value) : Number.NaN;
-    if (!Number.isInteger(parsed) || parsed < 1 || parsed > FILES_LIST_MAX_LIMIT) {
+    const parsed = parseStrictIntegerText(rawLimit.value);
+    if (parsed === null || parsed < 1 || parsed > FILES_LIST_MAX_LIMIT) {
       return {
         error: `Invalid parameter: 'limit' must be an integer between 1 and ${FILES_LIST_MAX_LIMIT}`,
       };
