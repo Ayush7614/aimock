@@ -396,11 +396,14 @@ export const excludeFamilies: Record<Provider, Set<string>> = {
     "text-embedding-004",
     "gemini-embedding",
     "gemini-embedding-2",
-    // Image models (non-text)
+    // Image-generation models (outside text-generation drift scope)
     "gemini-2.5-flash-image",
     "gemini-3-pro-image",
     "gemini-3.1-flash-image",
     "gemini-3.1-flash-lite-image",
+    // Flash Image successor; outputs Image AND Text (provider card, 2026-10-06).
+    // https://ai.google.dev/gemini-api/docs/models/gemini-nano-banana-2.1
+    "gemini-nano-banana-2.1",
     "imagen-4.0-fast-generate",
     "imagen-4.0-generate",
     "imagen-4.0-ultra-generate",

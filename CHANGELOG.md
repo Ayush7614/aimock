@@ -42,6 +42,7 @@
 
 ### Fixed
 
+- Classify `gemini-nano-banana-2.1` under the existing image-generation drift exclusions. The model outputs Image and Text; its appearance in the provider listing no longer raises an unclassified text-family alert.
 - Return HTTP 202 from OpenRouter video submission on fixture replay and successful record/proxy paths, with matching journal status; polling and downloads remain HTTP 200 (#492).
 - Fix the competitive-matrix updater to apply detected capabilities to migration pages even when homepage cells are unchanged or no homepage row exists. Report migration outcomes and flag ambiguous or unsupported cells for manual review without changing them (#488)
 - Allow PUT in CORS preflight responses so browsers can call the existing `/fal/queue/requests/{requestId}` route (#480).

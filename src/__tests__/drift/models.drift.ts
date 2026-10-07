@@ -36,7 +36,7 @@
 
 import { describe, it, expect } from "vitest";
 import { InfraError, isInfraSkip } from "./providers.js";
-import { includeFamilies } from "./model-registry.js";
+import { includeFamilies, excludeFamilies } from "./model-registry.js";
 import { isFamilyStillReferenced } from "./deprecation-detector.js";
 import {
   unclassifiedFamilies,
@@ -435,6 +435,7 @@ describe("recorded /models family waves are classified", () => {
       "gemini-3.1-flash-image",
       "gemini-3.1-flash-image-preview", // pattern
       "gemini-3.1-flash-lite-image",
+      "gemini-nano-banana-2.1", // image-generation successor, recorded 2026-10-07
       "gemini-3.1-flash-tts-preview", // pattern
       "gemini-3.8-flash-tts", // explicit exclude (non-preview -tts, 2026-09-24..30 wave)
       "gemini-3.8-flash-lite-tts", // explicit exclude (non-preview -tts, 2026-09-24..30 wave)
@@ -461,6 +462,8 @@ describe("recorded /models family waves are classified", () => {
       "gemini-pro-latest",
     ];
     expect(unclassifiedFamilies(geminiLive, "gemini")).toEqual([]);
+    expect(excludeFamilies.gemini.has("gemini-nano-banana-2.1")).toBe(true);
+    expect(includeFamilies.gemini.has("gemini-nano-banana-2.1")).toBe(false);
   });
 });
 
