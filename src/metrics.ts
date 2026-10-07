@@ -277,6 +277,14 @@ export const BATCHES_CANCEL_RE = /^\/v1\/batches\/([^/]+)\/cancel$/;
 export const BATCHES_ID_RE = /^\/v1\/batches\/([^/]+)$/;
 export const FILES_CONTENT_RE = /^\/v1\/files\/([^/]+)\/content$/;
 export const FILES_ID_RE = /^\/v1\/files\/([^/]+)$/;
+export const VECTOR_STORES_SEARCH_RE = /^\/v1\/vector_stores\/([^/]+)\/search$/;
+export const VECTOR_STORES_BATCH_FILES_RE =
+  /^\/v1\/vector_stores\/([^/]+)\/file_batches\/([^/]+)\/files$/;
+export const VECTOR_STORES_BATCH_CANCEL_RE =
+  /^\/v1\/vector_stores\/([^/]+)\/file_batches\/([^/]+)\/cancel$/;
+export const VECTOR_STORES_BATCH_RE = /^\/v1\/vector_stores\/([^/]+)\/file_batches\/([^/]+)$/;
+export const VECTOR_STORES_FILE_RE = /^\/v1\/vector_stores\/([^/]+)\/files\/([^/]+)$/;
+export const VECTOR_STORES_ID_RE = /^\/v1\/vector_stores\/([^/]+)$/;
 
 /**
  * Closed namespaces beyond fine-tuning. Each prefix below is entered by prefix
@@ -322,6 +330,8 @@ const FILES_PREFIX = "/v1/files/";
 const FILES_OTHER_LABEL = "/v1/files/{other}";
 const BATCHES_PREFIX = "/v1/batches/";
 const BATCHES_OTHER_LABEL = "/v1/batches/{other}";
+const VECTOR_STORES_PREFIX = "/v1/vector_stores/";
+const VECTOR_STORES_OTHER_LABEL = "/v1/vector_stores/{other}";
 
 /**
  * Label for a path no route claimed. Metrics are recorded for EVERY response,
@@ -366,6 +376,7 @@ const STATIC_ROUTE_PATHS = new Set([
   "/v1/videos",
   "/v1/batches",
   "/v1/files",
+  "/v1/vector_stores",
   "/v1/sound-generation",
   "/v1/music",
   "/v1/text-to-voice",
@@ -599,6 +610,30 @@ export function normalizePathLabel(pathname: string, mountPaths: readonly string
   }
   if (pathname.startsWith(FILES_PREFIX)) {
     return FILES_OTHER_LABEL;
+  }
+
+  // Vector Stores: /v1/vector_stores/{id}[/files[/{fileId}]|/file_batches…|/search].
+  // Most-specific first so the id RE cannot swallow a sub-resource suffix.
+  if (VECTOR_STORES_SEARCH_RE.test(pathname)) {
+    return "/v1/vector_stores/{id}/search";
+  }
+  if (VECTOR_STORES_BATCH_FILES_RE.test(pathname)) {
+    return "/v1/vector_stores/{id}/file_batches/{batchId}/files";
+  }
+  if (VECTOR_STORES_BATCH_CANCEL_RE.test(pathname)) {
+    return "/v1/vector_stores/{id}/file_batches/{batchId}/cancel";
+  }
+  if (VECTOR_STORES_BATCH_RE.test(pathname)) {
+    return "/v1/vector_stores/{id}/file_batches/{batchId}";
+  }
+  if (VECTOR_STORES_FILE_RE.test(pathname)) {
+    return "/v1/vector_stores/{id}/files/{fileId}";
+  }
+  if (pathname !== "/v1/vector_stores" && VECTOR_STORES_ID_RE.test(pathname)) {
+    return "/v1/vector_stores/{id}";
+  }
+  if (pathname.startsWith(VECTOR_STORES_PREFIX)) {
+    return VECTOR_STORES_OTHER_LABEL;
   }
 
   // fal.ai: see the namespace note above. Queue-request rules read before the
