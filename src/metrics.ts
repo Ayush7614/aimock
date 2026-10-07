@@ -27,6 +27,8 @@ import {
   VECTOR_STORES_BATCH_CANCEL_RE,
   VECTOR_STORES_BATCH_FILES_RE,
   VECTOR_STORES_BATCH_RE,
+  VECTOR_STORES_FILES_RE,
+  VECTOR_STORES_FILE_BATCHES_RE,
   VECTOR_STORES_FILE_RE,
   VECTOR_STORES_ID_RE,
   VECTOR_STORES_SEARCH_RE,
@@ -641,6 +643,12 @@ export function normalizePathLabel(pathname: string, mountPaths: readonly string
   }
   if (VECTOR_STORES_FILE_RE.test(pathname)) {
     return "/v1/vector_stores/{id}/files/{fileId}";
+  }
+  if (VECTOR_STORES_FILES_RE.test(pathname)) {
+    return "/v1/vector_stores/{id}/files";
+  }
+  if (VECTOR_STORES_FILE_BATCHES_RE.test(pathname)) {
+    return "/v1/vector_stores/{id}/file_batches";
   }
   if (pathname !== "/v1/vector_stores" && VECTOR_STORES_ID_RE.test(pathname)) {
     return "/v1/vector_stores/{id}";
